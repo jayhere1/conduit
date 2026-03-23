@@ -24,3 +24,5 @@ Cargo.lock
 /logs
 /benchmarks
 *.cast
+__pycache__/
+*.pyc
