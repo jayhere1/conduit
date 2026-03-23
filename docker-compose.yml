@@ -1,0 +1,103 @@
+###############################################################################
+# Conduit — Docker Compose
+#
+# Usage:
+#   docker compose up              → API server + UI (dev mode)
+#   docker compose up -d           → background
+#   docker compose --profile docs up → also builds & serves docs
+#   docker compose down            → stop everything
+#
+# Volumes:
+#   ./dags/  → mounted at /data/dags (your pipeline definitions)
+#   .conduit/ → state persistence (environments, snapshots, event log)
+###############################################################################
+
+services:
+  # ── Conduit API Server ────────────────────────────────────────────────────
+  conduit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: conduit-server
+    ports:
+      - "${CONDUIT_PORT:-9090}:9090"
+    volumes:
+      # Mount your DAGs from the host
+      - ${CONDUIT_DAGS_PATH:-./dags}:/data/dags
+      # Persist state between container restarts
+      - conduit-state:/data/.conduit
+    environment:
+      RUST_LOG: ${RUST_LOG:-conduit=info}
+      CONDUIT_PORT: 9090
+      CONDUIT_HOST: 0.0.0.0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/api/v1/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  # ── Conduit UI (dev mode with hot reload) ─────────────────────────────────
+  # In production, the UI is baked into the main image and served by the API.
+  # This service is for local development only.
+  ui-dev:
+    image: node:20-slim
+    container_name: conduit-ui-dev
+    profiles: [dev]
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "${UI_PORT:-3000}:3000"
+    volumes:
+      - ./conduit-ui:/app
+      - ui-node-modules:/app/node_modules
+    environment:
+      # Vite proxies API calls to the conduit container
+      VITE_API_URL: http://conduit:9090
+    depends_on:
+      conduit:
+        condition: service_healthy
+
+  # ── Documentation (mdBook) ────────────────────────────────────────────────
+  docs:
+    image: peaceiris/mdbook:latest
+    container_name: conduit-docs
+    profiles: [docs]
+    command: serve --hostname 0.0.0.0 --port 3001
+    ports:
+      - "${DOCS_PORT:-3001}:3001"
+    volumes:
+      - ./docs:/book
+
+  # ── One-shot: run all tests ───────────────────────────────────────────────
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: rust-builder
+    container_name: conduit-test
+    profiles: [test]
+    command: cargo test --workspace
+    working_dir: /build
+
+  # ── One-shot: run benchmarks ──────────────────────────────────────────────
+  bench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: rust-builder
+    container_name: conduit-bench
+    profiles: [bench]
+    command: cargo bench --package conduit-bench
+    working_dir: /build
+    volumes:
+      - bench-results:/build/target/criterion
+
+volumes:
+  conduit-state:
+    driver: local
+  ui-node-modules:
+    driver: local
+  bench-results:
+    driver: local

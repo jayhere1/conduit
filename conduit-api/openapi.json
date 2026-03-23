@@ -1,0 +1,2546 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Conduit API",
+    "description": "REST API for the Conduit data pipeline orchestrator. Conduit is a Rust-native orchestration engine for DAGs (directed acyclic graphs) that compiles and schedules data pipelines with support for complex dependencies, dynamic scheduling, and schema contracts.",
+    "version": "0.1.0",
+    "contact": {
+      "name": "Conduit Community"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:9000/api/v1",
+      "description": "Local development server"
+    },
+    {
+      "url": "https://api.conduit.dev/api/v1",
+      "description": "Production server"
+    }
+  ],
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Health check",
+        "description": "Basic health check endpoint. No authentication required.",
+        "operationId": "healthCheck",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "service": {
+                      "type": "string",
+                      "example": "conduit"
+                    },
+                    "version": {
+                      "type": "string",
+                      "example": "0.1.0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/info": {
+      "get": {
+        "tags": ["System"],
+        "summary": "System information",
+        "description": "Get system information including version, paths, and resource counts.",
+        "operationId": "systemInfo",
+        "responses": {
+          "200": {
+            "description": "System information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "string",
+                      "example": "0.1.0"
+                    },
+                    "dags_path": {
+                      "type": "string",
+                      "example": "/etc/conduit/dags"
+                    },
+                    "state_dir": {
+                      "type": "string",
+                      "example": "/var/lib/conduit"
+                    },
+                    "environments": {
+                      "type": "integer",
+                      "example": 3
+                    },
+                    "total_runs": {
+                      "type": "integer",
+                      "example": 25
+                    },
+                    "snapshots": {
+                      "type": "integer",
+                      "example": 15
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        }
+      }
+    },
+    "/dags": {
+      "get": {
+        "tags": ["DAGs"],
+        "summary": "List all DAGs",
+        "description": "Retrieve all compiled DAGs with basic metadata.",
+        "operationId": "listDags",
+        "responses": {
+          "200": {
+            "description": "List of DAGs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dags": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DagSummary"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "example": 3
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        }
+      }
+    },
+    "/dags/{dagId}": {
+      "get": {
+        "tags": ["DAGs"],
+        "summary": "Get DAG details",
+        "description": "Retrieve full details for a specific DAG including all tasks and dependencies.",
+        "operationId": "getDag",
+        "parameters": [
+          {
+            "name": "dagId",
+            "in": "path",
+            "required": true,
+            "description": "The DAG identifier",
+            "schema": {
+              "type": "string"
+            },
+            "example": "daily_etl"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DAG details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DagDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        }
+      }
+    },
+    "/dags/{dagId}/graph": {
+      "get": {
+        "tags": ["DAGs"],
+        "summary": "Get DAG execution graph",
+        "description": "Retrieve the execution graph (task dependencies) for a DAG.",
+        "operationId": "getDagGraph",
+        "parameters": [
+          {
+            "name": "dagId",
+            "in": "path",
+            "required": true,
+            "description": "The DAG identifier",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DAG execution graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dag_id": {
+                      "type": "string"
+                    },
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "edges": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from": {
+                            "type": "string"
+                          },
+                          "to": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/dags/compile": {
+      "post": {
+        "tags": ["DAGs"],
+        "summary": "Compile DAGs",
+        "description": "Compile DAG definitions from files and check for errors.",
+        "operationId": "compileDags",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether to fail on warnings"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Compilation succeeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dag_count": {
+                      "type": "integer"
+                    },
+                    "errors": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Compilation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/dags/{dagId}/runs": {
+      "get": {
+        "tags": ["Runs"],
+        "summary": "List runs for a DAG",
+        "description": "Get all runs (executions) for a specific DAG.",
+        "operationId": "listRuns",
+        "parameters": [
+          {
+            "name": "dagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50
+            },
+            "description": "Maximum number of runs to return"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["pending", "running", "success", "failed", "skipped"]
+            },
+            "description": "Filter by run status"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "runs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DagRun"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Runs"],
+        "summary": "Trigger a DAG run",
+        "description": "Queue a new execution of a DAG. Returns immediately with run ID.",
+        "operationId": "triggerRun",
+        "parameters": [
+          {
+            "name": "dagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "logical_date": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Override the logical execution date"
+                  },
+                  "config": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Runtime configuration overrides"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run queued successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "runId": {
+                      "type": "string",
+                      "example": "run_daily_etl_20250323_145030"
+                    },
+                    "dagId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["queued", "pending", "running", "success", "failed"]
+                    },
+                    "taskStates": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/runs/{runId}": {
+      "get": {
+        "tags": ["Runs"],
+        "summary": "Get run details",
+        "description": "Retrieve full details for a specific run including task states.",
+        "operationId": "getRun",
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DagRun"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/runs": {
+      "get": {
+        "tags": ["Runs"],
+        "summary": "List all runs",
+        "description": "Get all runs across all DAGs.",
+        "operationId": "listAllRuns",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["pending", "running", "success", "failed", "skipped"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of all runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "runs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DagRun"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/environments": {
+      "get": {
+        "tags": ["Environments"],
+        "summary": "List environments",
+        "description": "Get all virtual environments (dev, staging, production, etc.).",
+        "operationId": "listEnvironments",
+        "responses": {
+          "200": {
+            "description": "List of environments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "environments": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Environment"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Environments"],
+        "summary": "Create environment",
+        "description": "Create a new virtual environment.",
+        "operationId": "createEnvironment",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "example": "staging"
+                  },
+                  "based_on": {
+                    "type": "string",
+                    "description": "Parent environment to clone from",
+                    "example": "production"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Environment created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "snapshotCount": {
+                      "type": "integer"
+                    },
+                    "basedOn": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/environments/{envName}": {
+      "get": {
+        "tags": ["Environments"],
+        "summary": "Get environment details",
+        "operationId": "getEnvironment",
+        "parameters": [
+          {
+            "name": "envName",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Environment details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Environment"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Environments"],
+        "summary": "Delete environment",
+        "operationId": "deleteEnvironment",
+        "parameters": [
+          {
+            "name": "envName",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Environment deleted"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/environments/{envName}/diff/{otherEnv}": {
+      "get": {
+        "tags": ["Environments"],
+        "summary": "Diff two environments",
+        "description": "Get differences between two environments.",
+        "operationId": "diffEnvironments",
+        "parameters": [
+          {
+            "name": "envName",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "otherEnv",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Environment diff",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "added": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "removed": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "modified": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "old_value": {
+                            "type": "string"
+                          },
+                          "new_value": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/environments/promote": {
+      "post": {
+        "tags": ["Environments"],
+        "summary": "Promote environment",
+        "description": "Promote configs from source to target environment.",
+        "operationId": "promoteEnvironment",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["source", "target"],
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "example": "staging"
+                  },
+                  "target": {
+                    "type": "string",
+                    "example": "production"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Environment promoted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/plan": {
+      "post": {
+        "tags": ["Plan/Apply"],
+        "summary": "Generate deployment plan",
+        "description": "Generate a Terraform-style plan showing what would change in an environment.",
+        "operationId": "generatePlan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "environment": {
+                    "type": "string",
+                    "default": "production",
+                    "description": "Target environment"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plan generated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "plan_id": {
+                      "type": "string"
+                    },
+                    "environment": {
+                      "type": "string"
+                    },
+                    "dag_changes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "dag_id": {
+                            "type": "string"
+                          },
+                          "change_type": {
+                            "type": "string",
+                            "enum": ["added", "removed", "modified"]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Compilation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/apply": {
+      "post": {
+        "tags": ["Plan/Apply"],
+        "summary": "Apply deployment plan",
+        "description": "Apply a previously generated plan to update the target environment.",
+        "operationId": "applyPlan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "environment": {
+                    "type": "string",
+                    "default": "production"
+                  },
+                  "plan_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plan applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "environment": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "List events",
+        "description": "Query event history with range and type filtering for time-travel debugging.",
+        "operationId": "listEvents",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Start sequence number (inclusive)"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "End sequence number (inclusive)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by event type (e.g., TaskCompleted, TaskFailed)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "query": {
+                      "type": "object",
+                      "properties": {
+                        "from": {
+                          "type": "integer"
+                        },
+                        "to": {
+                          "type": "integer"
+                        },
+                        "limit": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/events/{sequence}": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get event details",
+        "operationId": "getEvent",
+        "parameters": [
+          {
+            "name": "sequence",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/lineage/sql": {
+      "post": {
+        "tags": ["Lineage"],
+        "summary": "Extract SQL lineage",
+        "description": "Parse SQL and extract column-level lineage.",
+        "operationId": "extractSqlLineage",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["sql", "source_task_id"],
+                "properties": {
+                  "sql": {
+                    "type": "string",
+                    "example": "SELECT customer_id, SUM(amount) as total FROM orders GROUP BY customer_id"
+                  },
+                  "source_task_id": {
+                    "type": "string",
+                    "description": "Task ID where this SQL runs"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lineage extracted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "source_columns": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "output_columns": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "lineage_edges": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "source": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/lineage/trace/upstream": {
+      "post": {
+        "tags": ["Lineage"],
+        "summary": "Trace upstream lineage",
+        "description": "Find all upstream sources for a column.",
+        "operationId": "traceUpstream",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["task_id", "column_name"],
+                "properties": {
+                  "task_id": {
+                    "type": "string"
+                  },
+                  "column_name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream sources",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "target": {
+                      "type": "object",
+                      "properties": {
+                        "task_id": {
+                          "type": "string"
+                        },
+                        "column_name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "sources": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "task_id": {
+                            "type": "string"
+                          },
+                          "column_name": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/lineage/trace/downstream": {
+      "post": {
+        "tags": ["Lineage"],
+        "summary": "Trace downstream lineage",
+        "description": "Find all downstream consumers of a column.",
+        "operationId": "traceDownstream",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["task_id", "column_name"],
+                "properties": {
+                  "task_id": {
+                    "type": "string"
+                  },
+                  "column_name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Downstream consumers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "object"
+                    },
+                    "targets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/lineage/graph": {
+      "post": {
+        "tags": ["Lineage"],
+        "summary": "Get lineage graph",
+        "description": "Build complete lineage graph for visualization.",
+        "operationId": "lineageGraph",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lineage graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "edges": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/lineage/schema/diff": {
+      "post": {
+        "tags": ["Lineage"],
+        "summary": "Schema diff",
+        "description": "Compare two schemas and detect breaking changes.",
+        "operationId": "schemaDiff",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["old_schema", "new_schema"],
+                "properties": {
+                  "old_schema": {
+                    "$ref": "#/components/schemas/SchemaInput"
+                  },
+                  "new_schema": {
+                    "$ref": "#/components/schemas/SchemaInput"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Schema changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "changes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "breaking": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/lineage/contracts/validate": {
+      "post": {
+        "tags": ["Lineage"],
+        "summary": "Validate schema contract",
+        "description": "Validate a schema against a contract specification.",
+        "operationId": "validateContract",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["schema", "contract"],
+                "properties": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SchemaInput"
+                  },
+                  "contract": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "valid": {
+                      "type": "boolean"
+                    },
+                    "violations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/contracts": {
+      "get": {
+        "tags": ["Contracts"],
+        "summary": "List all contracts",
+        "description": "Get all schema contracts across all DAGs.",
+        "operationId": "listContracts",
+        "responses": {
+          "200": {
+            "description": "List of contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contracts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ContractSummary"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/contracts/{dagId}": {
+      "get": {
+        "tags": ["Contracts"],
+        "summary": "Get DAG contracts",
+        "operationId": "dagContracts",
+        "parameters": [
+          {
+            "name": "dagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DAG contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contracts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ContractSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/contracts/{dagId}/{taskId}": {
+      "get": {
+        "tags": ["Contracts"],
+        "summary": "Get task contracts",
+        "operationId": "taskContracts",
+        "parameters": [
+          {
+            "name": "dagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contracts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ContractSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["Metrics"],
+        "summary": "List metrics",
+        "description": "Get all metrics from contract definitions.",
+        "operationId": "listMetrics",
+        "responses": {
+          "200": {
+            "description": "List of metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "metrics": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Metric"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/metrics/{dagId}/{taskId}": {
+      "get": {
+        "tags": ["Metrics"],
+        "summary": "Get task metrics",
+        "operationId": "getTaskMetrics",
+        "parameters": [
+          {
+            "name": "dagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "metrics": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Metric"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/connections": {
+      "get": {
+        "tags": ["Connections"],
+        "summary": "List connections",
+        "description": "Get all configured external connections (databases, data warehouses, etc.).",
+        "operationId": "listConnections",
+        "responses": {
+          "200": {
+            "description": "List of connections",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connections": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Connection"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/connections/providers": {
+      "get": {
+        "tags": ["Connections"],
+        "summary": "List supported providers",
+        "description": "Get all supported provider types.",
+        "operationId": "listProviders",
+        "responses": {
+          "200": {
+            "description": "Supported provider types",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/connections/{name}": {
+      "get": {
+        "tags": ["Connections"],
+        "summary": "Get connection details",
+        "operationId": "getConnection",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connection details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connection": {
+                      "$ref": "#/components/schemas/Connection"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/backfill": {
+      "post": {
+        "tags": ["Backfill"],
+        "summary": "Create backfill",
+        "description": "Create a backfill job for a DAG over a date range.",
+        "operationId": "createBackfill",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["dag_id", "start_date", "end_date"],
+                "properties": {
+                  "dag_id": {
+                    "type": "string"
+                  },
+                  "start_date": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "end_date": {
+                    "type": "string",
+                    "format": "date"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backfill created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "backfill_id": {
+                      "type": "string"
+                    },
+                    "dag_id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/cluster/status": {
+      "get": {
+        "tags": ["Cluster"],
+        "summary": "Cluster status",
+        "description": "Get overall cluster health and worker status.",
+        "operationId": "clusterStatus",
+        "responses": {
+          "200": {
+            "description": "Cluster status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": ["healthy", "degraded", "unhealthy"]
+                    },
+                    "workers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "healthy": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/cluster/workers/{id}/drain": {
+      "post": {
+        "tags": ["Cluster"],
+        "summary": "Drain worker",
+        "description": "Gracefully drain a worker (stop accepting new tasks).",
+        "operationId": "drainWorker",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Worker draining started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "worker_id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/auth/keys": {
+      "post": {
+        "tags": ["Authentication"],
+        "summary": "Create API key",
+        "description": "Create a new API key. Returns plaintext key (only shown once).",
+        "operationId": "createKey",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "role"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Human-readable key name"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": ["viewer", "operator", "admin"],
+                    "description": "Key role (viewer/operator/admin)"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "API key created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "description": "Plaintext API key (shown only once)"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "prefix": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "get": {
+        "tags": ["Authentication"],
+        "summary": "List API keys",
+        "description": "List all API keys (without plaintext values).",
+        "operationId": "listKeys",
+        "responses": {
+          "200": {
+            "description": "List of API keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "keys": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ApiKey"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/auth/keys/{keyId}": {
+      "get": {
+        "tags": ["Authentication"],
+        "summary": "Get API key",
+        "operationId": "getKey",
+        "parameters": [
+          {
+            "name": "keyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKey"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Authentication"],
+        "summary": "Revoke API key",
+        "operationId": "revokeKey",
+        "parameters": [
+          {
+            "name": "keyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "API key revoked"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": ["Authentication"],
+        "summary": "Get current auth context",
+        "operationId": "whoami",
+        "responses": {
+          "200": {
+            "description": "Current authenticated user/key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key_name": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "permissions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "ApiKey",
+        "description": "API key authentication. Use format: Authorization: Bearer <api_key>"
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid request",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid authentication",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Insufficient permissions",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "InternalServerError": {
+        "description": "Internal server error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "DagSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "schedule": {
+            "type": "string",
+            "description": "Cron schedule or NULL if ad-hoc"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "taskCount": {
+            "type": "integer"
+          },
+          "sourceFile": {
+            "type": "string"
+          }
+        }
+      },
+      "DagDetails": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "schedule": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            }
+          }
+        }
+      },
+      "Task": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "retries": {
+            "type": "integer"
+          },
+          "retryDelay": {
+            "type": "integer",
+            "description": "Retry delay in seconds"
+          },
+          "pool": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Timeout in seconds"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "triggerRule": {
+            "type": "string",
+            "enum": ["all_success", "all_done", "all_failed", "one_done", "one_success"]
+          }
+        }
+      },
+      "DagRun": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "dagId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "running", "success", "failed", "skipped"]
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "taskStates": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Map of task_id -> status"
+          },
+          "triggeredBy": {
+            "type": "string",
+            "enum": ["scheduler", "api", "manual"]
+          }
+        }
+      },
+      "Environment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "snapshotCount": {
+            "type": "integer"
+          },
+          "basedOn": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SchemaInput": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "column_type": {
+                  "type": "string"
+                },
+                "nullable": {
+                  "type": "boolean"
+                },
+                "description": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ContractSummary": {
+        "type": "object",
+        "properties": {
+          "dagId": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": "string"
+          },
+          "checkCount": {
+            "type": "integer"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "checkType": {
+                  "type": "string"
+                },
+                "severity": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Metric": {
+        "type": "object",
+        "properties": {
+          "dagId": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": "string"
+          },
+          "metricName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "currentValue": {
+            "type": "number"
+          }
+        }
+      },
+      "Connection": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "conn_type": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "database": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["viewer", "operator", "admin"]
+          },
+          "prefix": {
+            "type": "string",
+            "description": "First few characters of the key (for identification)"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

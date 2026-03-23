@@ -1,0 +1,21 @@
+[package]
+name = "conduit-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Event store, snapshot manager, and virtual environment management for Conduit"
+
+[dependencies]
+conduit-common = { path = "../conduit-common" }
+rocksdb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

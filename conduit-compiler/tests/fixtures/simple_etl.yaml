@@ -1,0 +1,26 @@
+id: simple_etl
+description: A simple ETL pipeline defined in YAML
+schedule: "0 6 * * *"
+tags: [etl, yaml]
+max_active_runs: 1
+
+tasks:
+  extract:
+    type: shell
+    command: 'echo "Extracting data..."'
+    retries: 2
+    timeout: 15m
+
+  transform:
+    type: python
+    module: transforms.etl
+    function: run_transform
+    depends_on: [extract]
+    pool: transform_pool
+    timeout: 1h
+
+  load:
+    type: sql
+    connection: warehouse
+    query: "INSERT INTO target.orders SELECT * FROM staging.orders"
+    depends_on: [transform]

@@ -1,0 +1,17 @@
+[package]
+name = "conduit-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Event-driven task scheduler with cron support and trigger evaluation"
+
+[dependencies]
+conduit-common = { path = "../conduit-common" }
+conduit-state = { path = "../conduit-state" }
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,162 @@
+# ─── Conduit Connection Registry ─────────────────────────────────────────────
+# Defines named connections to external data systems.
+# Referenced by tasks via the `connection:` field in DAG definitions.
+#
+# Credentials are resolved through the secrets chain (see secrets.yaml):
+#   - Env var:            "${MY_SECRET}"
+#   - File:               "file:///path/to/creds.json"
+#   - Vault:              "vault://secret/data/db#password"
+#   - AWS SSM:            "ssm:///prod/db/password"
+#   - AWS Secrets Mgr:    "secretsmanager://my-db-creds#password"
+#   - GCP Secret Mgr:     "gcp-secret://db-password/versions/latest"
+#   - Literal (fallback): "my-password"
+
+# ── SQL Databases ────────────────────────────────────────────────────────────
+
+shopify_replica:
+  type: postgres
+  host: shopify-replica.internal
+  port: 5432
+  database: shopify
+  user: conduit_reader
+  credentials: "${SHOPIFY_DB_PASSWORD}"
+  schema: public
+  ssl_mode: require
+  statement_timeout: 600
+
+warehouse_mgmt:
+  type: postgres
+  host: warehouse-db.internal
+  port: 5432
+  database: warehouse
+  user: conduit_reader
+  credentials: "${WAREHOUSE_DB_PASSWORD}"
+  schema: inventory
+
+analytics_warehouse:
+  type: snowflake
+  host: acme.us-east-1.snowflakecomputing.com
+  database: analytics
+  user: conduit_etl
+  credentials: "${SNOWFLAKE_PASSWORD}"
+  warehouse: etl_wh_medium
+  role: etl_role
+  schema: analytics
+
+clickhouse_events:
+  type: clickhouse
+  host: clickhouse-cluster.internal
+  port: 8123
+  database: events
+  user: conduit
+  credentials: "${CLICKHOUSE_PASSWORD}"
+  protocol: http
+
+stripe_replica:
+  type: postgres
+  host: stripe-replica.internal
+  port: 5432
+  database: stripe
+  user: conduit_reader
+  credentials: "${STRIPE_DB_PASSWORD}"
+  schema: public
+  ssl_mode: require
+
+product_db:
+  type: postgres
+  host: product-db.internal
+  port: 5432
+  database: product
+  user: conduit_reader
+  credentials: "${PRODUCT_DB_PASSWORD}"
+  schema: public
+
+feature_store:
+  type: postgres
+  host: feature-store.internal
+  port: 5432
+  database: features
+  user: conduit_ml
+  credentials: "${FEATURE_STORE_PASSWORD}"
+  schema: feature_store
+
+source_db:
+  type: postgres
+  host: source-primary.internal
+  port: 5432
+  database: production
+  user: conduit_reader
+  credentials: "${SOURCE_DB_PASSWORD}"
+  schema: source
+  ssl_mode: require
+
+warehouse:
+  type: snowflake
+  host: acme.us-east-1.snowflakecomputing.com
+  database: warehouse
+  user: conduit_transform
+  credentials: "${SNOWFLAKE_PASSWORD}"
+  warehouse: transform_wh_large
+  role: transform_role
+  schema: staging
+
+data_lake:
+  type: snowflake
+  host: acme.us-east-1.snowflakecomputing.com
+  database: data_lake
+  user: conduit_ingest
+  credentials: "${SNOWFLAKE_PASSWORD}"
+  warehouse: ingest_wh_small
+  role: ingest_role
+  schema: raw
+
+local_duckdb:
+  type: duckdb
+  database: /data/analytics.duckdb
+  threads: 4
+  memory_limit: 4GB
+
+# ── Object Storage ───────────────────────────────────────────────────────────
+
+data_lake_s3:
+  type: s3
+  database: acme-data-lake
+  region: us-east-1
+  credentials: "${AWS_SECRET_ACCESS_KEY}"
+  access_key_id: "${AWS_ACCESS_KEY_ID}"
+  prefix: raw/
+
+model_artifacts:
+  type: s3
+  database: acme-ml-artifacts
+  region: us-east-1
+  credentials: "${AWS_SECRET_ACCESS_KEY}"
+  access_key_id: "${AWS_ACCESS_KEY_ID}"
+  prefix: models/
+
+# ── HTTP / Webhooks ──────────────────────────────────────────────────────────
+
+slack_notifications:
+  type: webhook
+  host: https://hooks.slack.com
+  base_path: /services/T00/B00/pipeline-alerts
+  timeout: 10
+
+internal_api:
+  type: rest
+  host: https://api.internal.acme.com
+  credentials: "${INTERNAL_API_KEY}"
+  auth_type: bearer
+  timeout: 30
+
+# ── Streaming ────────────────────────────────────────────────────────────────
+
+event_bus:
+  type: kafka
+  host: kafka-1.internal:9092,kafka-2.internal:9092,kafka-3.internal:9092
+  credentials: "${KAFKA_PASSWORD}"
+  user: conduit-producer
+  security_protocol: SASL_SSL
+  sasl_mechanism: SCRAM-SHA-256
+  group_id: conduit-pipeline
+  schema_registry: http://schema-registry.internal:8081

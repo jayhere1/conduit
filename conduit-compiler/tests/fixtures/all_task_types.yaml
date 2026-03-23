@@ -1,0 +1,29 @@
+id: all_task_types
+description: DAG exercising every task type
+schedule: "@daily"
+tags: [test, comprehensive]
+
+tasks:
+  bash_task:
+    type: bash
+    command: 'echo "bash"'
+
+  shell_task:
+    type: shell
+    command: 'echo "shell"'
+
+  python_task:
+    type: python
+    module: my_module
+    function: my_function
+
+  sql_task:
+    type: sql
+    connection: default
+    query: "SELECT 1"
+    depends_on: [bash_task, shell_task, python_task]
+
+  sensor_task:
+    type: sensor
+    command: 'test -f /tmp/ready'
+    depends_on: [sql_task]

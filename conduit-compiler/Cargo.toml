@@ -1,0 +1,27 @@
+[package]
+name = "conduit-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DAG compiler: parses Python definitions via tree-sitter, resolves dependencies, emits execution plans"
+
+[dependencies]
+conduit-common = { path = "../conduit-common" }
+tree-sitter = { workspace = true }
+tree-sitter-python = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "parse_benchmark"
+harness = false

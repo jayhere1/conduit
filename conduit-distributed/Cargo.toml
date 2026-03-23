@@ -1,0 +1,37 @@
+[package]
+name = "conduit-distributed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Distributed execution: gRPC coordinator and worker nodes"
+
+[dependencies]
+conduit-common = { path = "../conduit-common" }
+conduit-executor = { path = "../conduit-executor" }
+conduit-providers = { path = "../conduit-providers" }
+
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = "0.13"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+dashmap = "6"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tonic = { workspace = true }
+prost = { workspace = true }
+chrono = { workspace = true }
+tempfile = { workspace = true }

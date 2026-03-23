@@ -1,0 +1,426 @@
+# ─── E-Commerce Analytics Pipeline ──────────────────────────────────────────
+# A production-grade analytics pipeline for an e-commerce platform.
+# Demonstrates: wide fan-out/fan-in graph shape, all contract types,
+# multiple incremental strategies, resource pools, and cross-task references.
+#
+# Graph shape:
+#   extract_orders ──┐
+#   extract_products ─┤
+#   extract_customers ┼─→ validate_sources ─→ enrich_orders ──┐
+#   extract_inventory ┤                      sessionize_clicks ┤
+#   extract_clickstream┘                                       │
+#                                          ┌───────────────────┘
+#                                          ├─→ build_customer_360
+#                                          ├─→ build_product_performance
+#                                          └─→ build_revenue_dashboard ─→ notify_stakeholders
+
+id: ecommerce_analytics
+description: >
+  End-to-end e-commerce analytics — ingests orders, products, customers,
+  inventory, and clickstream data, then builds customer 360, product performance,
+  and revenue dashboard tables. Runs daily at 5 AM UTC.
+schedule: "0 5 * * *"
+tags: [ecommerce, analytics, daily, production]
+max_active_runs: 1
+on_failure: "https://hooks.slack.com/services/T00/B00/ecommerce-alerts"
+
+tasks:
+  # ── EXTRACT LAYER (fan-out: 5 parallel extracts) ───────────────────────────
+
+  extract_orders:
+    type: sql
+    connection: shopify_replica
+    query: |
+      SELECT
+        order_id, customer_id, product_id, quantity, unit_price,
+        discount_pct, total_amount, currency, payment_method,
+        status, shipping_country, created_at, updated_at
+      FROM public.orders
+      WHERE created_at >= '{{ ds }}'::date
+        AND created_at < '{{ ds }}'::date + INTERVAL '1 day'
+    retries: 3
+    retry_delay: 30s
+    timeout: 15m
+    pool: source_db
+    incremental:
+      strategy: append
+      time_column: created_at
+      lookback: 2h
+      batch_size: 100000
+    contracts:
+      - type: row_count
+        min: 100
+        max: 500000
+        severity: error
+        description: "Expect 100–500k orders per day; outside this range signals a data issue"
+      - type: freshness
+        max_age: 26h
+        description: "Orders must be less than 26 hours old (allows 2h buffer over daily)"
+      - type: unique
+        columns: [order_id]
+      - type: not_null
+        column: customer_id
+        min_rate: 1.0
+      - type: not_null
+        column: total_amount
+        min_rate: 1.0
+      - type: accepted_values
+        column: status
+        values: [pending, confirmed, processing, shipped, delivered, returned, cancelled]
+      - type: accepted_values
+        column: currency
+        values: [USD, EUR, GBP, CAD, AUD, JPY]
+      - type: value_range
+        column: total_amount
+        min: 0
+        max: 50000
+        description: "Flag orders over $50k or negative amounts"
+      - type: value_range
+        column: discount_pct
+        min: 0
+        max: 100
+
+  extract_products:
+    type: sql
+    connection: shopify_replica
+    query: |
+      SELECT
+        product_id, sku, name, category, subcategory,
+        brand, price, cost, weight_kg, is_active,
+        created_at, updated_at
+      FROM public.products
+      WHERE updated_at >= '{{ ds }}'::date - INTERVAL '1 day'
+    retries: 2
+    timeout: 5m
+    pool: source_db
+    incremental:
+      strategy: merge_on_key
+      unique_key: [product_id]
+      time_column: updated_at
+    contracts:
+      - type: row_count
+        min: 1
+      - type: unique
+        columns: [product_id]
+      - type: unique
+        columns: [sku]
+        severity: warning
+        description: "SKUs should be unique; duplicates indicate catalog issues"
+      - type: not_null
+        column: price
+      - type: value_range
+        column: price
+        min: 0.01
+        max: 10000
+        description: "Price sanity check"
+
+  extract_customers:
+    type: sql
+    connection: shopify_replica
+    query: |
+      SELECT
+        customer_id, email, first_name, last_name,
+        signup_date, country, segment, lifetime_orders,
+        lifetime_spend, last_order_date, is_active, updated_at
+      FROM public.customers
+      WHERE updated_at >= '{{ ds }}'::date - INTERVAL '2 days'
+    retries: 2
+    timeout: 10m
+    pool: source_db
+    incremental:
+      strategy: merge_on_key
+      unique_key: [customer_id]
+      time_column: updated_at
+      invalidate_hard_deletes: true
+    contracts:
+      - type: row_count
+        min: 1
+      - type: unique
+        columns: [customer_id]
+      - type: unique
+        columns: [email]
+        severity: warning
+      - type: not_null
+        column: email
+        min_rate: 0.98
+        description: "Allow up to 2% null emails (guest checkouts)"
+      - type: accepted_values
+        column: segment
+        values: [new, active, at_risk, churned, vip]
+        allow_null: true
+
+  extract_inventory:
+    type: sql
+    connection: warehouse_mgmt
+    query: |
+      SELECT
+        product_id, warehouse_id, quantity_on_hand,
+        quantity_reserved, reorder_point, last_restock_date
+      FROM inventory.stock_levels
+    retries: 2
+    timeout: 5m
+    pool: source_db
+    contracts:
+      - type: row_count
+        min: 1
+      - type: not_null
+        column: quantity_on_hand
+      - type: value_range
+        column: quantity_on_hand
+        min: 0
+        description: "Inventory can't be negative"
+
+  extract_clickstream:
+    type: sql
+    connection: clickhouse_events
+    query: |
+      SELECT
+        event_id, session_id, customer_id, event_type,
+        page_url, product_id, referrer, device_type,
+        country, event_timestamp
+      FROM events.clickstream
+      WHERE event_timestamp >= toDateTime('{{ ds }}')
+        AND event_timestamp < toDateTime('{{ ds }}') + INTERVAL 1 DAY
+    retries: 3
+    retry_delay: 60s
+    timeout: 20m
+    pool: clickhouse
+    incremental:
+      strategy: append
+      time_column: event_timestamp
+      lookback: 1h
+      batch_size: 500000
+    contracts:
+      - type: row_count
+        min: 10000
+        max: 50000000
+        description: "Expect 10k–50M click events per day"
+      - type: freshness
+        max_age: 26h
+      - type: accepted_values
+        column: event_type
+        values: [page_view, product_view, add_to_cart, remove_from_cart, checkout_start, purchase, search]
+      - type: accepted_values
+        column: device_type
+        values: [desktop, mobile, tablet]
+        allow_null: true
+
+  # ── VALIDATE LAYER (fan-in: all extracts converge) ─────────────────────────
+
+  validate_sources:
+    type: python
+    module: ecommerce.quality
+    function: cross_validate_sources
+    depends_on:
+      - extract_orders
+      - extract_products
+      - extract_customers
+      - extract_inventory
+      - extract_clickstream
+    timeout: 10m
+    contracts:
+      - type: metric
+        metric_name: referential_integrity_score
+        min: 0.98
+        description: "98%+ of order.product_ids must exist in products table"
+      - type: metric
+        metric_name: customer_match_rate
+        min: 0.95
+        description: "95%+ of order.customer_ids must exist in customers table"
+
+  # ── TRANSFORM LAYER (parallel transforms) ──────────────────────────────────
+
+  enrich_orders:
+    type: python
+    module: ecommerce.transforms
+    function: enrich_order_facts
+    depends_on: [validate_sources]
+    pool: transform_pool
+    timeout: 30m
+    resources:
+      memory_mb: 8192
+      cpu_millicores: 2000
+    contracts:
+      - type: row_count
+        min: 100
+      - type: metric
+        metric_name: enrichment_rate
+        min: 0.97
+        description: "97%+ of orders should be fully enriched with customer + product data"
+      - type: metric
+        metric_name: currency_conversion_rate
+        min: 0.99
+        description: "99%+ of non-USD orders should have valid FX conversion"
+
+  sessionize_clicks:
+    type: python
+    module: ecommerce.transforms
+    function: sessionize_clickstream
+    depends_on: [validate_sources]
+    pool: transform_pool
+    timeout: 45m
+    resources:
+      memory_mb: 16384
+      cpu_millicores: 4000
+    contracts:
+      - type: row_count
+        min: 1000
+      - type: metric
+        metric_name: session_attribution_rate
+        min: 0.85
+        description: "85%+ of sessions should be attributed to a known customer"
+      - type: metric
+        metric_name: avg_session_duration_seconds
+        min: 10
+        max: 7200
+        severity: warning
+        description: "Average session duration sanity check (10s – 2hr)"
+
+  # ── LOAD LAYER (fan-out to 3 destination tables) ───────────────────────────
+
+  build_customer_360:
+    type: sql
+    connection: analytics_warehouse
+    query: |
+      INSERT INTO analytics.customer_360
+      SELECT
+        c.customer_id,
+        c.email,
+        c.first_name || ' ' || c.last_name AS full_name,
+        c.segment,
+        c.signup_date,
+        c.country,
+        COUNT(DISTINCT o.order_id) AS total_orders,
+        SUM(o.total_amount) AS lifetime_value,
+        AVG(o.total_amount) AS avg_order_value,
+        MAX(o.created_at) AS last_order_date,
+        COUNT(DISTINCT s.session_id) AS total_sessions,
+        SUM(CASE WHEN s.event_type = 'purchase' THEN 1 ELSE 0 END)::float
+          / NULLIF(COUNT(DISTINCT s.session_id), 0) AS conversion_rate,
+        CURRENT_TIMESTAMP AS refreshed_at
+      FROM staging.customers c
+      LEFT JOIN staging.enriched_orders o ON o.customer_id = c.customer_id
+      LEFT JOIN staging.sessions s ON s.customer_id = c.customer_id
+      GROUP BY 1, 2, 3, 4, 5, 6
+    depends_on: [enrich_orders, sessionize_clicks]
+    timeout: 20m
+    pool: analytics_warehouse
+    contracts:
+      - type: row_count
+        min: 1000
+        description: "Customer 360 must have substantial data"
+      - type: unique
+        columns: [customer_id]
+      - type: references
+        column: customer_id
+        ref_task: extract_customers
+        ref_column: customer_id
+        description: "Every row must map to a known customer"
+      - type: row_count_delta
+        max_percent_change: 0.05
+        allow_decrease: false
+        severity: warning
+        description: "Customer count shouldn't drop or jump >5%"
+      - type: metric
+        metric_name: avg_lifetime_value
+        min: 1
+        severity: warning
+        description: "Average LTV sanity check"
+
+  build_product_performance:
+    type: sql
+    connection: analytics_warehouse
+    query: |
+      INSERT INTO analytics.product_performance
+      SELECT
+        p.product_id,
+        p.sku,
+        p.name,
+        p.category,
+        p.brand,
+        COUNT(DISTINCT o.order_id) AS units_sold,
+        SUM(o.total_amount) AS total_revenue,
+        SUM(o.total_amount - (o.quantity * p.cost)) AS gross_margin,
+        AVG(o.discount_pct) AS avg_discount,
+        i.quantity_on_hand AS current_stock,
+        CASE
+          WHEN i.quantity_on_hand <= i.reorder_point THEN 'low_stock'
+          WHEN i.quantity_on_hand = 0 THEN 'out_of_stock'
+          ELSE 'in_stock'
+        END AS stock_status,
+        COUNT(DISTINCT s.session_id) AS product_views,
+        COUNT(DISTINCT o.order_id)::float
+          / NULLIF(COUNT(DISTINCT s.session_id), 0) AS view_to_purchase_rate,
+        CURRENT_TIMESTAMP AS refreshed_at
+      FROM staging.products p
+      LEFT JOIN staging.enriched_orders o ON o.product_id = p.product_id
+      LEFT JOIN staging.inventory i ON i.product_id = p.product_id
+      LEFT JOIN staging.sessions s ON s.product_id = p.product_id
+        AND s.event_type = 'product_view'
+      GROUP BY 1, 2, 3, 4, 5, 10, 11
+    depends_on: [enrich_orders, sessionize_clicks]
+    timeout: 15m
+    pool: analytics_warehouse
+    contracts:
+      - type: row_count
+        min: 1
+      - type: unique
+        columns: [product_id]
+      - type: value_range
+        column: total_revenue
+        min: 0
+        description: "Revenue can't be negative"
+      - type: custom
+        assertion_name: no_negative_margins
+        description: "Flag products with negative gross margins"
+
+  build_revenue_dashboard:
+    type: sql
+    connection: analytics_warehouse
+    query: |
+      INSERT INTO analytics.daily_revenue
+      SELECT
+        '{{ ds }}'::date AS report_date,
+        o.currency,
+        o.shipping_country,
+        COUNT(DISTINCT o.order_id) AS order_count,
+        COUNT(DISTINCT o.customer_id) AS unique_customers,
+        SUM(o.total_amount) AS gross_revenue,
+        SUM(o.total_amount * (1 - o.discount_pct / 100)) AS net_revenue,
+        AVG(o.total_amount) AS avg_order_value,
+        SUM(CASE WHEN o.status = 'returned' THEN o.total_amount ELSE 0 END) AS returns_value,
+        SUM(CASE WHEN c.signup_date = '{{ ds }}'::date THEN o.total_amount ELSE 0 END) AS new_customer_revenue,
+        CURRENT_TIMESTAMP AS computed_at
+      FROM staging.enriched_orders o
+      JOIN staging.customers c ON c.customer_id = o.customer_id
+      WHERE o.created_at::date = '{{ ds }}'::date
+      GROUP BY 1, 2, 3
+    depends_on: [enrich_orders, sessionize_clicks]
+    timeout: 10m
+    pool: analytics_warehouse
+    contracts:
+      - type: row_count
+        min: 1
+        description: "Must have at least one revenue row"
+      - type: metric
+        metric_name: total_daily_revenue
+        min: 1000
+        severity: warning
+        description: "Daily revenue below $1k is suspicious"
+      - type: row_count_delta
+        max_percent_change: 0.3
+        severity: warning
+        description: "Revenue row count shouldn't swing >30% day-over-day"
+
+  # ── NOTIFY ─────────────────────────────────────────────────────────────────
+
+  notify_stakeholders:
+    type: shell
+    command: |
+      curl -X POST "$SLACK_WEBHOOK_URL" \
+        -H 'Content-Type: application/json' \
+        -d '{
+          "text": ":chart_with_upwards_trend: *E-Commerce Analytics Complete* for `{{ ds }}`\n• Customer 360 refreshed\n• Product performance updated\n• Revenue dashboard ready\n<https://dashboard.internal/ecommerce|View Dashboard>"
+        }'
+    depends_on: [build_customer_360, build_product_performance, build_revenue_dashboard]
+    retries: 2

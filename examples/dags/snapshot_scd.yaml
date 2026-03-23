@@ -1,0 +1,67 @@
+# ─── SCD Type 2 Snapshot Pipeline ───────────────────────────────────────────
+# Demonstrates the snapshot_diff incremental strategy for slowly changing
+# dimensions — tracks historical changes to product and pricing data.
+
+id: product_snapshot
+description: Nightly snapshot of product catalog with SCD Type 2 history
+schedule: "0 2 * * *"
+tags: [snapshot, scd, products]
+
+tasks:
+  extract_products:
+    type: sql
+    connection: source_db
+    query: |
+      SELECT
+        product_id, name, category, price, status, updated_at
+      FROM source.products
+    retries: 3
+    timeout: 10m
+
+  snapshot_products:
+    type: sql
+    connection: warehouse
+    query: |
+      MERGE INTO dim.products_history AS target
+      USING staging.products AS source
+      ON target.product_id = source.product_id
+         AND target.valid_to IS NULL
+      WHEN MATCHED AND (
+        target.name != source.name
+        OR target.price != source.price
+        OR target.status != source.status
+      ) THEN UPDATE SET valid_to = CURRENT_TIMESTAMP
+    depends_on: [extract_products]
+    timeout: 20m
+    incremental:
+      strategy: snapshot_diff
+      unique_key: [product_id]
+      check_columns: [name, price, status]
+      scd_type_2: true
+
+  insert_new_versions:
+    type: sql
+    connection: warehouse
+    query: |
+      INSERT INTO dim.products_history (product_id, name, category, price, status, valid_from)
+      SELECT product_id, name, category, price, status, CURRENT_TIMESTAMP
+      FROM staging.products s
+      WHERE NOT EXISTS (
+        SELECT 1 FROM dim.products_history h
+        WHERE h.product_id = s.product_id
+          AND h.valid_to IS NULL
+          AND h.name = s.name
+          AND h.price = s.price
+          AND h.status = s.status
+      )
+    depends_on: [snapshot_products]
+    timeout: 15m
+
+  rebuild_current_view:
+    type: sql
+    connection: warehouse
+    query: |
+      CREATE OR REPLACE VIEW dim.products_current AS
+      SELECT * FROM dim.products_history WHERE valid_to IS NULL
+    depends_on: [insert_new_versions]
+    timeout: 2m

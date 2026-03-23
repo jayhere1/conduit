@@ -1,0 +1,142 @@
+# ─── Daily ETL Pipeline ─────────────────────────────────────────────────────
+# Demonstrates a YAML-defined DAG with SQL, Python, and shell tasks,
+# including incremental processing and evidence-based data quality contracts.
+#
+# Contracts are evidence-based: each task emits metrics via stdout
+# (CONDUIT::METRIC::name::value), and contracts assert against them.
+# SQL tasks auto-emit common metrics. Python/shell tasks emit explicitly.
+
+id: daily_etl
+description: Daily ETL pipeline — extracts from source, transforms, and loads to warehouse
+schedule: "0 6 * * *"
+tags: [etl, warehouse, daily]
+max_active_runs: 1
+
+tasks:
+  extract_orders:
+    type: sql
+    connection: source_db
+    query: |
+      SELECT id, customer_id, amount, status, created_at
+      FROM source.orders
+      WHERE created_at >= '{{ ds }}'::date
+        AND created_at < '{{ ds }}'::date + INTERVAL '1 day'
+    retries: 3
+    retry_delay: 30s
+    timeout: 10m
+    pool: extract_pool
+    incremental:
+      strategy: append
+      time_column: created_at
+      lookback: 2h
+      batch_size: 50000
+    contracts:
+      # Each contract below expects the task to emit the corresponding metric.
+      # Conduit's built-in SQL executor auto-emits row_count, data_age_seconds,
+      # duplicate_count, and null_rate.* for SQL tasks.
+      - type: row_count
+        min: 1
+        description: "At least 1 order expected per day"
+      - type: freshness
+        max_age: 24h
+      - type: unique
+        columns: [id]
+      - type: not_null
+        column: customer_id
+      - type: accepted_values
+        column: status
+        values: [pending, processing, shipped, delivered, cancelled]
+      - type: value_range
+        column: amount
+        min: 0
+        severity: error
+        description: "No negative order amounts allowed"
+
+  extract_customers:
+    type: sql
+    connection: source_db
+    query: |
+      SELECT id, name, email, segment, updated_at
+      FROM source.customers
+      WHERE updated_at >= '{{ ds }}'::date - INTERVAL '1 day'
+    retries: 2
+    timeout: 5m
+    pool: extract_pool
+    incremental:
+      strategy: merge_on_key
+      unique_key: [id]
+      time_column: updated_at
+
+  validate_extracts:
+    type: python
+    module: quality.validators
+    function: validate_daily_extract
+    depends_on: [extract_orders, extract_customers]
+    timeout: 5m
+
+  transform_orders:
+    type: python
+    module: transforms.orders
+    function: enrich_orders
+    depends_on: [validate_extracts]
+    pool: transform_pool
+    timeout: 30m
+    resources:
+      memory_mb: 4096
+    contracts:
+      # Python tasks emit evidence explicitly:
+      #   emit_metric("row_count", len(df))
+      #   emit_metric("accuracy", model.score())
+      - type: row_count
+        min: 1
+      - type: metric
+        metric_name: enrichment_rate
+        min: 0.95
+        description: "At least 95% of orders should be enriched"
+
+  build_customer_360:
+    type: sql
+    connection: warehouse
+    query: |
+      INSERT INTO analytics.customer_360
+      SELECT
+        c.id,
+        c.name,
+        c.segment,
+        COUNT(o.id) AS order_count,
+        SUM(o.amount) AS total_spend,
+        MAX(o.created_at) AS last_order_at
+      FROM staging.customers c
+      LEFT JOIN staging.orders o ON o.customer_id = c.id
+      GROUP BY c.id, c.name, c.segment
+    depends_on: [transform_orders]
+    timeout: 20m
+    contracts:
+      - type: row_count
+        min: 1
+        description: "Customer 360 must have data"
+      - type: unique
+        columns: [id]
+      - type: references
+        column: id
+        ref_task: extract_customers
+        ref_column: id
+        description: "Every customer in 360 must exist in extract"
+      - type: row_count_delta
+        max_percent_change: 0.1
+        severity: warning
+        description: "Alert if customer count changes >10%"
+      - type: custom
+        assertion_name: no_negative_spend
+        description: "No customers with negative total spend"
+
+  notify_completion:
+    type: shell
+    command: |
+      curl -X POST "$SLACK_WEBHOOK_URL" \
+        -H 'Content-Type: application/json' \
+        -d '{"text": "Daily ETL completed for {{ ds }}"}'
+    depends_on: [build_customer_360]
+    retries: 1
+
+on_failure: "https://hooks.slack.com/services/xxx/yyy/zzz"

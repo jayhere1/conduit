@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "conduit-native"
+version = "0.1.0"
+description = "PyO3 bindings for Conduit pipeline orchestrator"
+requires-python = ">=3.9"
+authors = [
+    {name = "Conduit Team"}
+]
+license = {text = "Apache-2.0"}
+keywords = ["conduit", "dag", "pipeline", "orchestrator"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Repository = "https://github.com/your-org/conduit"
+Documentation = "https://docs.conduit.dev"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+
+[tool.maturin.module]
+name = "conduit_native"

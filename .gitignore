@@ -1,0 +1,26 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+conduit-ui/dist/
+conduit-vscode/dist/
+conduit-vscode/*.vsix
+
+# State
+.conduit/
+Cargo.lock
+
+# Editor
+*.swp
+*.swo
+.DS_Store
+
+# Secrets
+.env
+
+# Logs & temp
+/logs
+/benchmarks
+*.cast

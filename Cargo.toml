@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+    "conduit-cli",
+    "conduit-common",
+    "conduit-compiler",
+    "conduit-scheduler",
+    "conduit-executor",
+    "conduit-state",
+    "conduit-planner",
+    "conduit-lineage",
+    "conduit-api",
+    "conduit-providers",
+    "conduit-distributed",
+]
+exclude = [
+    "conduit-bench",
+    "conduit-python",
+    "conduit-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/conduit-orchestrator/conduit"
+description = "A Rust-native data pipeline orchestrator"
+
+[workspace.dependencies]
+# Shared across crates
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# DAG parsing
+tree-sitter = "0.24"
+tree-sitter-python = "0.23"
+
+# State storage
+rocksdb = "0.22"
+
+# Serialization
+flatbuffers = "24"
+serde_yaml = "0.9"
+
+# API
+tonic = "0.12"
+prost = "0.13"
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Metrics & tracing
+prometheus-client = "0.22"
+opentelemetry = "0.27"
+
+# Async
+async-trait = "0.1"
+tokio-stream = "0.1"
+
+# Concurrent data structures
+dashmap = "6"
+prost-types = "0.13"
+
+# Testing
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+tempfile = "3"

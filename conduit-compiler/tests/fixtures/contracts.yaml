@@ -1,0 +1,28 @@
+id: validated_pipeline
+description: Pipeline with data quality contracts
+schedule: "0 8 * * *"
+tags: [quality, contracts]
+
+tasks:
+  extract:
+    type: shell
+    command: 'echo "extract"'
+
+  transform:
+    type: shell
+    command: 'echo "transform"'
+    depends_on: [extract]
+    contracts:
+      - type: row_count
+        min: 1000
+        severity: error
+      - type: freshness
+        max_age: 4h
+        severity: warn
+      - type: not_null
+        column: id
+
+  load:
+    type: shell
+    command: 'echo "load"'
+    depends_on: [transform]

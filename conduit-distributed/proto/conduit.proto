@@ -1,0 +1,290 @@
+// Conduit distributed execution protocol.
+//
+// Defines the gRPC service contracts between Coordinator (leader)
+// and Worker nodes. The coordinator runs alongside the scheduler
+// and assigns tasks to registered workers over bidirectional streams.
+
+syntax = "proto3";
+
+package conduit.distributed;
+
+// ─── Worker ↔ Coordinator Service ─────────────────────────────────────────
+
+/// The coordinator runs on the scheduler node. Workers connect to it.
+service Coordinator {
+    /// Worker registers itself and receives a stream of task assignments.
+    /// The worker sends a single RegisterRequest, then the coordinator
+    /// streams TaskAssignment messages as work becomes available.
+    rpc Register(RegisterRequest) returns (stream TaskAssignment);
+
+    /// Worker reports task completion/failure back to the coordinator.
+    rpc ReportResult(TaskResult) returns (Ack);
+
+    /// Bidirectional heartbeat stream. Worker sends periodic heartbeats,
+    /// coordinator responds with directives (e.g., cancel a task).
+    rpc Heartbeat(stream WorkerHeartbeat) returns (stream CoordinatorDirective);
+
+    /// Worker streams real-time log lines from a running task.
+    rpc StreamLogs(stream TaskLogEntry) returns (Ack);
+
+    /// Query cluster status (used by CLI and UI).
+    rpc ClusterStatus(ClusterStatusRequest) returns (ClusterStatusResponse);
+}
+
+// ─── Registration ─────────────────────────────────────────────────────────
+
+message RegisterRequest {
+    /// Unique worker ID (generated on startup, e.g., "worker-<hostname>-<pid>").
+    string worker_id = 1;
+
+    /// Human-readable hostname.
+    string hostname = 2;
+
+    /// Maximum concurrent tasks this worker can run.
+    uint32 capacity = 3;
+
+    /// Resource pools this worker is willing to execute tasks from.
+    /// Empty means "default pool only".
+    repeated string pool_affinity = 4;
+
+    /// Worker metadata (e.g., labels, region, instance type).
+    map<string, string> labels = 5;
+
+    /// Worker version string for compatibility checks.
+    string version = 6;
+
+    /// Port the worker is listening on for health checks (optional).
+    uint32 health_port = 7;
+}
+
+// ─── Task Assignment ──────────────────────────────────────────────────────
+
+message TaskAssignment {
+    string assignment_id = 1;
+    string dag_id = 2;
+    string run_id = 3;
+    string task_id = 4;
+    uint32 attempt = 5;
+
+    /// Task execution specification.
+    TaskSpec spec = 6;
+
+    /// Execution context (logical_date, environment, params).
+    TaskContext context = 7;
+
+    /// Deadline: if not completed by this time, coordinator may reassign.
+    int64 deadline_epoch_ms = 8;
+}
+
+message TaskSpec {
+    TaskType task_type = 1;
+
+    /// For Python/Bash: the script content or path.
+    string script = 2;
+
+    /// For SQL: connection name.
+    string connection = 3;
+
+    /// For SQL: the query.
+    string query = 4;
+
+    /// For Executable: command and args.
+    string command = 5;
+    repeated string args = 6;
+
+    /// Timeout in seconds. 0 means no timeout.
+    uint64 timeout_secs = 7;
+
+    /// Resource limits.
+    ResourceLimits resources = 8;
+}
+
+enum TaskType {
+    TASK_TYPE_UNSPECIFIED = 0;
+    PYTHON = 1;
+    BASH = 2;
+    SQL = 3;
+    SENSOR = 4;
+    EXECUTABLE = 5;
+}
+
+message ResourceLimits {
+    uint32 cpu_millicores = 1;
+    uint32 memory_mb = 2;
+}
+
+message TaskContext {
+    string dag_id = 1;
+    string run_id = 2;
+    string task_id = 3;
+    uint32 attempt = 4;
+    int64 logical_date_epoch_ms = 5;
+    string environment = 6;
+    map<string, string> params = 7;
+}
+
+// ─── Task Results ─────────────────────────────────────────────────────────
+
+message TaskResult {
+    string assignment_id = 1;
+    string worker_id = 2;
+    string dag_id = 3;
+    string run_id = 4;
+    string task_id = 5;
+    uint32 attempt = 6;
+
+    TaskOutcome outcome = 7;
+
+    /// Exit code from the process.
+    int32 exit_code = 8;
+
+    /// Execution duration in milliseconds.
+    uint64 duration_ms = 9;
+
+    /// XCom data (JSON-encoded).
+    string xcom_json = 10;
+
+    /// Error message (if failed).
+    string error = 11;
+
+    /// Evidence metrics collected during execution (for contracts).
+    map<string, double> metrics = 12;
+}
+
+enum TaskOutcome {
+    TASK_OUTCOME_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    FAILED = 2;
+    RETRY = 3;
+    SKIPPED = 4;
+}
+
+// ─── Heartbeat & Directives ───────────────────────────────────────────────
+
+message WorkerHeartbeat {
+    string worker_id = 1;
+
+    /// Current number of running tasks.
+    uint32 active_tasks = 2;
+
+    /// System metrics.
+    double cpu_percent = 3;
+    double memory_percent = 4;
+    double disk_percent = 5;
+
+    /// IDs of currently running assignments.
+    repeated string running_assignments = 6;
+
+    /// Timestamp (epoch ms).
+    int64 timestamp_ms = 7;
+}
+
+message CoordinatorDirective {
+    oneof directive {
+        /// Cancel a specific task assignment.
+        CancelTask cancel_task = 1;
+
+        /// Drain: stop accepting new tasks, finish current ones, then shutdown.
+        DrainWorker drain = 2;
+
+        /// Acknowledged heartbeat (keepalive).
+        HeartbeatAck ack = 3;
+    }
+}
+
+message CancelTask {
+    string assignment_id = 1;
+    string reason = 2;
+}
+
+message DrainWorker {
+    string reason = 1;
+    /// Seconds to wait before force-killing tasks.
+    uint32 grace_period_secs = 2;
+}
+
+message HeartbeatAck {
+    int64 timestamp_ms = 1;
+}
+
+// ─── Log Streaming ────────────────────────────────────────────────────────
+
+message TaskLogEntry {
+    string assignment_id = 1;
+    string worker_id = 2;
+
+    LogLevel level = 3;
+    string message = 4;
+    int64 timestamp_ms = 5;
+
+    /// Optional structured data (JSON).
+    string metadata_json = 6;
+}
+
+enum LogLevel {
+    LOG_LEVEL_UNSPECIFIED = 0;
+    DEBUG = 1;
+    INFO = 2;
+    WARN = 3;
+    ERROR = 4;
+}
+
+// ─── Cluster Status ───────────────────────────────────────────────────────
+
+message ClusterStatusRequest {}
+
+message ClusterStatusResponse {
+    /// Overall cluster health.
+    ClusterHealth health = 1;
+
+    /// Connected workers.
+    repeated WorkerStatus workers = 2;
+
+    /// Active DAG runs with distributed tasks.
+    uint32 active_runs = 3;
+
+    /// Total tasks currently running across all workers.
+    uint32 running_tasks = 4;
+
+    /// Total tasks queued waiting for workers.
+    uint32 queued_tasks = 5;
+
+    /// Coordinator uptime in seconds.
+    uint64 uptime_secs = 6;
+}
+
+enum ClusterHealth {
+    CLUSTER_HEALTH_UNSPECIFIED = 0;
+    HEALTHY = 1;
+    DEGRADED = 2;
+    UNHEALTHY = 3;
+}
+
+message WorkerStatus {
+    string worker_id = 1;
+    string hostname = 2;
+    WorkerState state = 3;
+    uint32 capacity = 4;
+    uint32 active_tasks = 5;
+    repeated string pool_affinity = 6;
+    int64 last_heartbeat_ms = 7;
+    double cpu_percent = 8;
+    double memory_percent = 9;
+    map<string, string> labels = 10;
+    int64 registered_at_ms = 11;
+    uint64 tasks_completed = 12;
+    uint64 tasks_failed = 13;
+}
+
+enum WorkerState {
+    WORKER_STATE_UNSPECIFIED = 0;
+    ACTIVE = 1;
+    DRAINING = 2;
+    DISCONNECTED = 3;
+    DEAD = 4;
+}
+
+message Ack {
+    bool success = 1;
+    string message = 2;
+}

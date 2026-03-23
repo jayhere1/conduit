@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Conduit — Development Dockerfile
+#
+# Faster builds for local dev: skips UI build, mounts source as volume,
+# uses cargo-watch for auto-recompilation.
+#
+# Usage:
+#   docker build -f Dockerfile.dev -t conduit-dev .
+#   docker run -it -p 9090:9090 -v $(pwd):/app conduit-dev
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM rust:1.77-bookworm
+
+# Install system deps
+RUN apt-get update && apt-get install -y \
+    libclang-dev \
+    librocksdb-dev \
+    cmake \
+    pkg-config \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install cargo-watch for auto-reload
+RUN cargo install cargo-watch
+
+WORKDIR /app
+
+# Pre-fetch dependencies (optional — speeds up first build if Cargo.toml is stable)
+COPY Cargo.toml Cargo.lock ./
+COPY conduit-common/Cargo.toml conduit-common/Cargo.toml
+COPY conduit-compiler/Cargo.toml conduit-compiler/Cargo.toml
+COPY conduit-scheduler/Cargo.toml conduit-scheduler/Cargo.toml
+COPY conduit-executor/Cargo.toml conduit-executor/Cargo.toml
+COPY conduit-state/Cargo.toml conduit-state/Cargo.toml
+COPY conduit-planner/Cargo.toml conduit-planner/Cargo.toml
+COPY conduit-lineage/Cargo.toml conduit-lineage/Cargo.toml
+COPY conduit-api/Cargo.toml conduit-api/Cargo.toml
+COPY conduit-cli/Cargo.toml conduit-cli/Cargo.toml
+
+RUN mkdir -p conduit-common/src && echo "" > conduit-common/src/lib.rs && \
+    mkdir -p conduit-compiler/src && echo "" > conduit-compiler/src/lib.rs && \
+    mkdir -p conduit-scheduler/src && echo "" > conduit-scheduler/src/lib.rs && \
+    mkdir -p conduit-executor/src && echo "" > conduit-executor/src/lib.rs && \
+    mkdir -p conduit-state/src && echo "" > conduit-state/src/lib.rs && \
+    mkdir -p conduit-planner/src && echo "" > conduit-planner/src/lib.rs && \
+    mkdir -p conduit-lineage/src && echo "" > conduit-lineage/src/lib.rs && \
+    mkdir -p conduit-api/src && echo "" > conduit-api/src/lib.rs && \
+    mkdir -p conduit-cli/src && echo "fn main() {}" > conduit-cli/src/main.rs
+
+RUN cargo build 2>/dev/null || true
+
+ENV RUST_LOG=conduit=debug
+EXPOSE 9090
+
+# In dev mode, watch for source changes and rebuild automatically
+CMD ["cargo", "watch", "-x", "run -- serve --host 0.0.0.0 --port 9090"]

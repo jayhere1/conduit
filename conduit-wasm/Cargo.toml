@@ -1,0 +1,18 @@
+[package]
+name = "conduit-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WASM plugin sandbox for running tasks in Wasmtime"
+
+[dependencies]
+conduit-common = { path = "../conduit-common" }
+wasmtime = "19"
+wasmtime-wasi = "19"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }

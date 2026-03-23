@@ -1,0 +1,345 @@
+# ─── SaaS Metrics Platform ──────────────────────────────────────────────────
+# Computes core SaaS KPIs: MRR, churn, cohort retention, expansion/contraction.
+# Demonstrates: sensor-triggered execution, diamond DAG shape, metric contracts,
+# time-series aggregation, and multi-stage fan-out for parallel metric computation.
+#
+# Graph shape:
+#   wait_for_billing_close ─→ extract_subscriptions ─┐
+#                             extract_billing_events ─┼─→ validate_billing ─┐
+#                             extract_usage_data ─────┘                     │
+#                                                    ┌──────────────────────┘
+#                                                    ├─→ compute_mrr
+#                                                    ├─→ compute_churn
+#                                                    ├─→ compute_cohort_retention
+#                                                    └─→ compute_expansion_contraction
+#                                                              │
+#                              aggregate_saas_dashboard ←──────┘ (all four)
+#                                        │
+#                              ├─→ update_investor_metrics
+#                              └─→ alert_on_anomalies
+
+id: saas_metrics
+description: >
+  Monthly SaaS KPI pipeline — waits for billing period close, then computes
+  MRR, churn rate, cohort retention, and expansion/contraction revenue.
+  Feeds the executive dashboard and investor reporting.
+schedule: "0 4 1 * *"
+tags: [saas, metrics, monthly, finance, kpi]
+max_active_runs: 1
+on_failure: "https://hooks.slack.com/services/T00/B00/saas-pipeline-alerts"
+
+tasks:
+  # ── SENSOR: wait for billing system to finalize ────────────────────────────
+
+  wait_for_billing_close:
+    type: sensor
+    sensor_type: api
+    poke_interval: 300s
+    timeout: 12h
+    contracts:
+      - type: metric
+        metric_name: billing_period_finalized
+        min: 1
+        description: "Sensor must confirm billing period is closed before proceeding"
+
+  # ── EXTRACT LAYER ──────────────────────────────────────────────────────────
+
+  extract_subscriptions:
+    type: sql
+    connection: stripe_replica
+    query: |
+      SELECT
+        subscription_id, customer_id, plan_id, plan_name,
+        plan_interval, mrr_cents, currency, status,
+        trial_start, trial_end, current_period_start,
+        current_period_end, cancel_at, canceled_at,
+        created_at, updated_at
+      FROM subscriptions
+      WHERE updated_at >= date_trunc('month', '{{ ds }}'::date) - INTERVAL '1 day'
+    depends_on: [wait_for_billing_close]
+    retries: 3
+    retry_delay: 60s
+    timeout: 15m
+    pool: stripe_pool
+    incremental:
+      strategy: merge_on_key
+      unique_key: [subscription_id]
+      time_column: updated_at
+    contracts:
+      - type: row_count
+        min: 100
+        description: "Must have active subscriptions"
+      - type: unique
+        columns: [subscription_id]
+      - type: not_null
+        column: customer_id
+      - type: not_null
+        column: mrr_cents
+      - type: accepted_values
+        column: status
+        values: [trialing, active, past_due, canceled, unpaid, paused]
+      - type: accepted_values
+        column: plan_interval
+        values: [month, year]
+      - type: value_range
+        column: mrr_cents
+        min: 0
+        max: 100000000
+        description: "MRR sanity: $0 – $1M per subscription"
+
+  extract_billing_events:
+    type: sql
+    connection: stripe_replica
+    query: |
+      SELECT
+        event_id, customer_id, subscription_id, event_type,
+        amount_cents, currency, invoice_id, charge_id,
+        failure_reason, created_at
+      FROM billing_events
+      WHERE created_at >= date_trunc('month', '{{ ds }}'::date)
+        AND created_at < date_trunc('month', '{{ ds }}'::date) + INTERVAL '1 month'
+    depends_on: [wait_for_billing_close]
+    retries: 3
+    retry_delay: 30s
+    timeout: 20m
+    pool: stripe_pool
+    incremental:
+      strategy: append
+      time_column: created_at
+      lookback: 1h
+    contracts:
+      - type: row_count
+        min: 50
+      - type: freshness
+        max_age: 48h
+        description: "Billing events should be recent after period close"
+      - type: accepted_values
+        column: event_type
+        values: [charge.succeeded, charge.failed, charge.refunded, invoice.paid, invoice.payment_failed, subscription.created, subscription.updated, subscription.deleted, customer.subscription.trial_will_end]
+      - type: not_null
+        column: amount_cents
+
+  extract_usage_data:
+    type: sql
+    connection: product_db
+    query: |
+      SELECT
+        customer_id, feature_name, usage_count,
+        active_users, api_calls, storage_bytes,
+        compute_seconds, period_start, period_end
+      FROM usage_metering
+      WHERE period_start >= date_trunc('month', '{{ ds }}'::date)
+        AND period_end <= date_trunc('month', '{{ ds }}'::date) + INTERVAL '1 month'
+    depends_on: [wait_for_billing_close]
+    retries: 2
+    timeout: 15m
+    pool: product_db
+    contracts:
+      - type: row_count
+        min: 1
+      - type: not_null
+        column: customer_id
+      - type: value_range
+        column: usage_count
+        min: 0
+      - type: value_range
+        column: api_calls
+        min: 0
+
+  # ── VALIDATE LAYER ─────────────────────────────────────────────────────────
+
+  validate_billing:
+    type: python
+    module: saas.quality
+    function: validate_billing_integrity
+    depends_on: [extract_subscriptions, extract_billing_events, extract_usage_data]
+    timeout: 10m
+    contracts:
+      - type: metric
+        metric_name: subscription_event_match_rate
+        min: 0.99
+        description: "99%+ of billing events must match a known subscription"
+      - type: metric
+        metric_name: revenue_reconciliation_delta
+        max: 0.01
+        description: "Sum of billing events must match within 1% of expected MRR"
+      - type: metric
+        metric_name: orphaned_customers_pct
+        max: 0.02
+        severity: warning
+        description: "Fewer than 2% of customers should have usage without subscriptions"
+
+  # ── COMPUTE LAYER (parallel metric pipelines) ─────────────────────────────
+
+  compute_mrr:
+    type: python
+    module: saas.metrics
+    function: calculate_mrr_breakdown
+    depends_on: [validate_billing]
+    timeout: 20m
+    pool: compute_pool
+    resources:
+      memory_mb: 4096
+    contracts:
+      - type: metric
+        metric_name: total_mrr
+        min: 1000
+        description: "Total MRR must be positive"
+      - type: metric
+        metric_name: mrr_new
+        min: 0
+        description: "New MRR can't be negative"
+      - type: metric
+        metric_name: mrr_expansion
+        min: 0
+      - type: metric
+        metric_name: mrr_contraction
+        max: 0
+        severity: warning
+        description: "Contraction is expected to be negative or zero"
+      - type: metric
+        metric_name: mrr_churned
+        max: 0
+        severity: warning
+      - type: row_count
+        min: 1
+        description: "Must produce at least one MRR record"
+
+  compute_churn:
+    type: python
+    module: saas.metrics
+    function: calculate_churn_rates
+    depends_on: [validate_billing]
+    timeout: 15m
+    pool: compute_pool
+    contracts:
+      - type: metric
+        metric_name: logo_churn_rate
+        min: 0
+        max: 0.25
+        description: "Monthly logo churn rate 0%–25% (>25% is a data issue)"
+      - type: metric
+        metric_name: revenue_churn_rate
+        min: -0.5
+        max: 0.25
+        description: "Revenue churn can be negative (net expansion), but not wildly"
+      - type: metric
+        metric_name: churned_customer_count
+        min: 0
+
+  compute_cohort_retention:
+    type: python
+    module: saas.metrics
+    function: build_cohort_matrix
+    depends_on: [validate_billing]
+    timeout: 30m
+    pool: compute_pool
+    resources:
+      memory_mb: 8192
+    contracts:
+      - type: row_count
+        min: 1
+        description: "Must produce cohort data"
+      - type: metric
+        metric_name: month_1_retention
+        min: 0.5
+        max: 1.0
+        severity: warning
+        description: "Month-1 retention between 50%–100%"
+      - type: metric
+        metric_name: cohort_count
+        min: 3
+        severity: warning
+        description: "Need at least 3 cohorts for meaningful analysis"
+
+  compute_expansion_contraction:
+    type: python
+    module: saas.metrics
+    function: calculate_expansion_contraction
+    depends_on: [validate_billing]
+    timeout: 15m
+    pool: compute_pool
+    contracts:
+      - type: metric
+        metric_name: expansion_revenue
+        min: 0
+      - type: metric
+        metric_name: contraction_revenue
+        min: 0
+      - type: metric
+        metric_name: net_dollar_retention
+        min: 0.7
+        max: 2.0
+        description: "NDR between 70%–200% is reasonable; outside indicates data issues"
+
+  # ── AGGREGATE LAYER ────────────────────────────────────────────────────────
+
+  aggregate_saas_dashboard:
+    type: sql
+    connection: analytics_warehouse
+    query: |
+      INSERT INTO analytics.saas_monthly_kpis
+      SELECT
+        date_trunc('month', '{{ ds }}'::date) AS period,
+        m.total_mrr,
+        m.mrr_new,
+        m.mrr_expansion,
+        m.mrr_contraction,
+        m.mrr_churned,
+        c.logo_churn_rate,
+        c.revenue_churn_rate,
+        ec.net_dollar_retention,
+        ec.expansion_revenue,
+        ec.contraction_revenue,
+        cr.month_1_retention,
+        cr.month_3_retention,
+        cr.month_6_retention,
+        cr.month_12_retention,
+        CURRENT_TIMESTAMP AS computed_at
+      FROM staging.mrr_breakdown m
+      CROSS JOIN staging.churn_rates c
+      CROSS JOIN staging.expansion_contraction ec
+      CROSS JOIN staging.cohort_summary cr
+    depends_on:
+      - compute_mrr
+      - compute_churn
+      - compute_cohort_retention
+      - compute_expansion_contraction
+    timeout: 10m
+    pool: analytics_warehouse
+    contracts:
+      - type: row_count
+        exact: 1
+        description: "Exactly one summary row per month"
+      - type: row_count_delta
+        max_percent_change: 0
+        description: "Should never have duplicate monthly rows"
+
+  # ── OUTPUT LAYER (parallel destinations) ───────────────────────────────────
+
+  update_investor_metrics:
+    type: python
+    module: saas.reporting
+    function: push_to_investor_dashboard
+    depends_on: [aggregate_saas_dashboard]
+    timeout: 5m
+    retries: 2
+    contracts:
+      - type: metric
+        metric_name: metrics_published
+        min: 10
+        description: "Must publish at least 10 KPI data points"
+
+  alert_on_anomalies:
+    type: python
+    module: saas.alerting
+    function: detect_metric_anomalies
+    depends_on: [aggregate_saas_dashboard]
+    timeout: 5m
+    contracts:
+      - type: metric
+        metric_name: anomalies_detected
+        min: 0
+        max: 20
+        severity: warning
+        description: "More than 20 anomalies in one period suggests a systemic issue"

@@ -1,0 +1,38 @@
+[package]
+name = "conduit-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Conduit CLI: the main binary entry point"
+
+[[bin]]
+name = "conduit"
+path = "src/main.rs"
+
+[dependencies]
+conduit-common = { path = "../conduit-common" }
+conduit-compiler = { path = "../conduit-compiler" }
+conduit-state = { path = "../conduit-state" }
+conduit-scheduler = { path = "../conduit-scheduler" }
+conduit-executor = { path = "../conduit-executor" }
+conduit-planner = { path = "../conduit-planner" }
+conduit-api = { path = "../conduit-api" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+regex = "1"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+conduit-compiler = { path = "../conduit-compiler" }
+conduit-common = { path = "../conduit-common" }
+conduit-state = { path = "../conduit-state" }
+regex = "1"

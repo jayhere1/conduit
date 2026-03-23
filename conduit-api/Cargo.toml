@@ -1,0 +1,40 @@
+[package]
+name = "conduit-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "gRPC + REST + WebSocket API server for Conduit"
+
+[dependencies]
+conduit-common = { path = "../conduit-common" }
+conduit-state = { path = "../conduit-state" }
+conduit-compiler = { path = "../conduit-compiler" }
+conduit-scheduler = { path = "../conduit-scheduler" }
+conduit-planner = { path = "../conduit-planner" }
+conduit-lineage = { path = "../conduit-lineage" }
+conduit-providers = { path = "../conduit-providers" }
+axum = { workspace = true, features = ["ws"] }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true }
+conduit-common = { path = "../conduit-common" }
+conduit-state = { path = "../conduit-state" }
+conduit-scheduler = { path = "../conduit-scheduler" }
+conduit-executor = { path = "../conduit-executor" }

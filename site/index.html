@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Conduit - The Orchestrator Built for 2026</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: #0a0e27;
+      color: #e5e7eb;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* Header & Navigation */
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      background: rgba(10, 14, 39, 0.95);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(59, 130, 246, 0.1);
+      padding: 1rem 2rem;
+    }
+
+    nav {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo {
+      font-size: 1.5rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    nav ul {
+      display: flex;
+      list-style: none;
+      gap: 2rem;
+    }
+
+    nav a {
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 0.95rem;
+      transition: color 0.3s ease;
+    }
+
+    nav a:hover {
+      color: #3b82f6;
+    }
+
+    /* Sections */
+    section {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 6rem 2rem;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    /* Hero Section */
+    #hero {
+      padding-top: 10rem;
+      padding-bottom: 4rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-bg {
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: radial-gradient(circle at 30% 50%, rgba(59, 130, 246, 0.15) 0%, transparent 50%),
+                  radial-gradient(circle at 70% 50%, rgba(139, 92, 246, 0.1) 0%, transparent 50%);
+      animation: gradientShift 8s ease-in-out infinite;
+    }
+
+    @keyframes gradientShift {
+      0%, 100% { transform: translate(0, 0); }
+      50% { transform: translate(30px, -30px); }
+    }
+
+    .hero-content {
+      position: relative;
+      z-index: 10;
+      text-align: center;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.5rem);
+      font-weight: 700;
+      margin-bottom: 1rem;
+      line-height: 1.2;
+      color: #fff;
+    }
+
+    h1 .accent {
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .subheadline {
+      font-size: 1.25rem;
+      color: #9ca3af;
+      margin-bottom: 3rem;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .install-block {
+      background: rgba(31, 41, 55, 0.8);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin: 2rem auto;
+      max-width: 500px;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.95rem;
+      color: #3b82f6;
+    }
+
+    .install-block code {
+      flex: 1;
+      overflow-x: auto;
+    }
+
+    .copy-btn {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.3s ease, transform 0.2s ease;
+      white-space: nowrap;
+    }
+
+    .copy-btn:hover {
+      background: #2563eb;
+      transform: scale(1.05);
+    }
+
+    .cta-button {
+      display: inline-block;
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      color: white;
+      padding: 1rem 2rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1.05rem;
+      border: none;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      margin: 1rem;
+    }
+
+    .cta-button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 20px 40px rgba(59, 130, 246, 0.3);
+    }
+
+    /* Problem Section */
+    #problem {
+      background: linear-gradient(180deg, rgba(31, 41, 55, 0.3) 0%, transparent 100%);
+    }
+
+    h2 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 3rem;
+      text-align: center;
+      color: #fff;
+    }
+
+    h2 .accent {
+      background: linear-gradient(135deg, #ef4444, #f97316);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .problem-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 2rem;
+      margin-bottom: 3rem;
+    }
+
+    .problem-card {
+      background: rgba(31, 41, 55, 0.6);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      border-radius: 8px;
+      padding: 2rem;
+      transition: all 0.3s ease;
+    }
+
+    .problem-card:hover {
+      border-color: rgba(239, 68, 68, 0.5);
+      background: rgba(31, 41, 55, 0.8);
+      transform: translateY(-4px);
+    }
+
+    .problem-icon {
+      font-size: 2.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .problem-card h3 {
+      font-size: 1.25rem;
+      margin-bottom: 0.5rem;
+      color: #fff;
+    }
+
+    .problem-card p {
+      color: #d1d5db;
+      font-size: 0.95rem;
+    }
+
+    /* Solution Section */
+    #solution {
+      background: linear-gradient(180deg, transparent 0%, rgba(31, 41, 55, 0.2) 100%);
+    }
+
+    h2.solution-title {
+      color: #fff;
+    }
+
+    h2.solution-title .accent {
+      background: linear-gradient(135deg, #10b981, #06b6d4);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .solution-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 2rem;
+      margin-bottom: 3rem;
+    }
+
+    .solution-card {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(6, 182, 212, 0.05) 100%);
+      border: 1px solid rgba(59, 130, 246, 0.2);
+      border-radius: 8px;
+      padding: 2rem;
+      transition: all 0.3s ease;
+    }
+
+    .solution-card:hover {
+      border-color: rgba(59, 130, 246, 0.5);
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(6, 182, 212, 0.1) 100%);
+      transform: translateY(-4px);
+    }
+
+    .solution-card h3 {
+      font-size: 1.3rem;
+      margin-bottom: 1rem;
+      color: #fff;
+    }
+
+    .solution-card p {
+      color: #d1d5db;
+      margin-bottom: 1rem;
+      font-size: 0.95rem;
+    }
+
+    .solution-metric {
+      background: rgba(59, 130, 246, 0.1);
+      border-left: 3px solid #3b82f6;
+      padding: 1rem;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9rem;
+      color: #3b82f6;
+    }
+
+    /* Benchmark Section */
+    #benchmarks {
+      background: rgba(31, 41, 55, 0.5);
+    }
+
+    .benchmark-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 2rem;
+      margin-bottom: 3rem;
+    }
+
+    .benchmark-card {
+      background: rgba(10, 14, 39, 0.8);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 8px;
+      padding: 2rem;
+      text-align: center;
+    }
+
+    .benchmark-metric {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 2rem;
+      font-weight: 700;
+      color: #3b82f6;
+      margin-bottom: 0.5rem;
+    }
+
+    .benchmark-label {
+      color: #9ca3af;
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .vs-text {
+      color: #6b7280;
+      font-size: 0.85rem;
+      margin-top: 0.5rem;
+      font-style: italic;
+    }
+
+    /* Code Comparison */
+    #comparison {
+      background: linear-gradient(180deg, rgba(31, 41, 55, 0.3) 0%, transparent 100%);
+    }
+
+    .comparison-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+      margin-bottom: 3rem;
+    }
+
+    @media (max-width: 768px) {
+      .comparison-container {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .code-block {
+      background: rgba(31, 41, 55, 0.9);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 8px;
+      padding: 1.5rem;
+      overflow-x: auto;
+    }
+
+    .code-label {
+      color: #9ca3af;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 1rem;
+      display: block;
+    }
+
+    .code-block code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9rem;
+      color: #d1d5db;
+      display: block;
+      line-height: 1.8;
+    }
+
+    .keyword { color: #c084fc; }
+    .string { color: #34d399; }
+    .comment { color: #6b7280; }
+    .function { color: #60a5fa; }
+    .bad { color: #f87171; }
+
+    /* Quickstart Section */
+    #quickstart {
+      background: linear-gradient(180deg, transparent 0%, rgba(31, 41, 55, 0.3) 100%);
+    }
+
+    .quickstart-steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 2rem;
+      margin-bottom: 3rem;
+    }
+
+    .step {
+      counter-increment: steps;
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 8px;
+      padding: 2rem;
+      position: relative;
+    }
+
+    .step::before {
+      content: counter(steps);
+      position: absolute;
+      top: -1rem;
+      left: 1.5rem;
+      width: 2rem;
+      height: 2rem;
+      background: #3b82f6;
+      color: white;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.95rem;
+    }
+
+    .step h3 {
+      margin-top: 0.5rem;
+      margin-bottom: 1rem;
+      color: #fff;
+    }
+
+    .step code {
+      background: rgba(31, 41, 55, 0.8);
+      padding: 0.75rem;
+      border-radius: 4px;
+      display: block;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      color: #3b82f6;
+      overflow-x: auto;
+      margin: 1rem 0;
+    }
+
+    .step p {
+      color: #d1d5db;
+      font-size: 0.95rem;
+    }
+
+    counter-reset: steps;
+
+    /* Migration Section */
+    #migration {
+      background: rgba(31, 41, 55, 0.5);
+      text-align: center;
+    }
+
+    .migration-content {
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
+      border: 2px solid rgba(59, 130, 246, 0.3);
+      border-radius: 8px;
+      padding: 3rem 2rem;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+
+    .migration-content h3 {
+      font-size: 1.5rem;
+      margin-bottom: 1rem;
+      color: #fff;
+    }
+
+    .migration-content code {
+      background: rgba(31, 41, 55, 0.9);
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #3b82f6;
+      display: block;
+      margin: 1.5rem 0;
+      font-size: 0.95rem;
+    }
+
+    .migration-links {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      margin-top: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .migration-links a {
+      color: #3b82f6;
+      text-decoration: none;
+      font-weight: 600;
+      transition: color 0.3s ease;
+    }
+
+    .migration-links a:hover {
+      color: #60a5fa;
+      text-decoration: underline;
+    }
+
+    /* Footer */
+    footer {
+      background: rgba(10, 14, 39, 0.95);
+      border-top: 1px solid rgba(59, 130, 246, 0.1);
+      padding: 3rem 2rem;
+      margin-top: 4rem;
+    }
+
+    .footer-content {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 2rem;
+      margin-bottom: 2rem;
+    }
+
+    .footer-section h4 {
+      color: #fff;
+      margin-bottom: 1rem;
+      font-size: 1rem;
+    }
+
+    .footer-section ul {
+      list-style: none;
+    }
+
+    .footer-section a {
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 0.9rem;
+      transition: color 0.3s ease;
+    }
+
+    .footer-section a:hover {
+      color: #3b82f6;
+    }
+
+    .footer-bottom {
+      border-top: 1px solid rgba(59, 130, 246, 0.1);
+      padding-top: 2rem;
+      text-align: center;
+      color: #6b7280;
+      font-size: 0.9rem;
+    }
+
+    .rust-badge {
+      display: inline-block;
+      background: linear-gradient(135deg, #ce422b, #d97706);
+      color: white;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      font-weight: 600;
+      margin: 1rem 0;
+      font-size: 0.85rem;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      section {
+        padding: 4rem 1.5rem;
+      }
+
+      h1 {
+        font-size: 2rem;
+      }
+
+      h2 {
+        font-size: 1.75rem;
+      }
+
+      nav ul {
+        gap: 1rem;
+      }
+
+      nav a {
+        font-size: 0.85rem;
+      }
+
+      .install-block {
+        flex-direction: column;
+      }
+
+      .problem-grid,
+      .solution-grid,
+      .benchmark-grid,
+      .quickstart-steps {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Utility Classes */
+    .highlight {
+      color: #3b82f6;
+    }
+
+    .text-sm {
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header>
+    <nav>
+      <div class="logo">⚡ Conduit</div>
+      <ul>
+        <li><a href="#hero">Home</a></li>
+        <li><a href="#problem">Problems</a></li>
+        <li><a href="#solution">Solutions</a></li>
+        <li><a href="#quickstart">Quickstart</a></li>
+        <li><a href="https://github.com/conduit-dev/conduit" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <!-- Hero Section -->
+  <section id="hero">
+    <div class="hero-bg"></div>
+    <div class="hero-content">
+      <h1>
+        Airflow was designed in <span class="accent">2014.</span><br>
+        It's <span class="accent">2026.</span>
+      </h1>
+      <p class="subheadline">
+        Conduit is the data orchestrator built for modern pipelines. Compiled, not interpreted. Compiled, not executed. Ready for production.
+      </p>
+
+      <div class="install-block">
+        <code>curl -sSL https://install.conduit.dev | sh</code>
+        <button class="copy-btn" onclick="copyInstall()">Copy</button>
+      </div>
+
+      <div>
+        <a href="#quickstart" class="cta-button">Get Started in 60 Seconds</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Problem Section -->
+  <section id="problem">
+    <div class="container">
+      <h2>What's <span class="accent">wrong</span> with your orchestrator?</h2>
+
+      <div class="problem-grid">
+        <div class="problem-card">
+          <div class="problem-icon">⚠️</div>
+          <h3>Dag Parsing = Code Execution</h3>
+          <p>Airflow imports and executes every Python file in your dags/ folder just to parse the DAG structure. A bug in any file brings down the scheduler.</p>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-icon">💥</div>
+          <h3>No Safe Deployments</h3>
+          <p>Deploy a bad DAG change and your production pipeline goes down. No rollback. No staging. Just hope and restart the scheduler.</p>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-icon">🧪</div>
+          <h3>Testing is Expensive</h3>
+          <p>Testing pipeline changes requires a full staging environment. Full Airflow cluster, database, message broker. Copy of production data. Cost and latency killed.</p>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-icon">⏱️</div>
+          <h3>Polling is Slow</h3>
+          <p>The scheduler polls your database every second, checking if tasks are ready. Latency adds up. Consistency is a guess.</p>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-icon">🛠️</div>
+          <h3>Dependency Hell</h3>
+          <p>PostgreSQL. Redis. Celery. Gunicorn. A webserver. Just to say "hello world". Your orchestrator has become infrastructure.</p>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-icon">🚀</div>
+          <h3>Scaling is Manual</h3>
+          <p>Airflow scales horizontally through Celery and message brokers. Complex. Fragile. Needs constant tuning and monitoring.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Solution Section -->
+  <section id="solution">
+    <div class="container">
+      <h2>What if your orchestrator was <span class="accent">designed today?</span></h2>
+
+      <div class="solution-grid">
+        <div class="solution-card">
+          <h3>Compile, Don't Execute</h3>
+          <p>Tree-sitter parses Python AST without running it. Your DAGs are analyzed, not executed. No side effects. No crashes during parsing.</p>
+          <div class="solution-metric">1,000 DAGs → 1.8s</div>
+        </div>
+
+        <div class="solution-card">
+          <h3>Plan/Apply Pipeline</h3>
+          <p>See exactly what will change before deploying, like Terraform. <code>conduit plan</code> shows diffs. <code>conduit apply</code> deploys with confidence.</p>
+          <div class="solution-metric">Zero guessing. Full preview.</div>
+        </div>
+
+        <div class="solution-card">
+          <h3>Virtual Environments</h3>
+          <p>Fork production, test changes in isolation, promote when ready. Snapshot-based. Zero-cost. Test safely. Deploy once.</p>
+          <div class="solution-metric">Test in prod. Safely.</div>
+        </div>
+
+        <div class="solution-card">
+          <h3>Single Binary</h3>
+          <p>No PostgreSQL. No Redis. No Celery. No webserver. Just <code>conduit serve</code>. One command. One process. Full observability.</p>
+          <div class="solution-metric">50MB vs 500MB+</div>
+        </div>
+
+        <div class="solution-card">
+          <h3>Event-Sourced</h3>
+          <p>Every state change is an immutable event. Full audit trail. Time-travel debugging. Replay any moment. Know exactly what happened.</p>
+          <div class="solution-metric">Debuggable. Auditable.</div>
+        </div>
+
+        <div class="solution-card">
+          <h3>Built in Rust</h3>
+          <p>Memory-safe. Type-safe. Screaming fast. No garbage collection pauses. No segfaults. No surprises at 3 AM.</p>
+          <div class="solution-metric">Reliable. Fast. Safe.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Benchmark Section -->
+  <section id="benchmarks">
+    <div class="container">
+      <h2>Numbers, <span class="accent">not marketing</span></h2>
+
+      <div class="benchmark-grid">
+        <div class="benchmark-card">
+          <div class="benchmark-metric">1.8s</div>
+          <div class="benchmark-label">DAG Compilation</div>
+          <div class="vs-text">vs 60-120s (Airflow)</div>
+        </div>
+
+        <div class="benchmark-card">
+          <div class="benchmark-metric">50MB</div>
+          <div class="benchmark-label">Memory Usage</div>
+          <div class="vs-text">vs 500MB+ (Airflow)</div>
+        </div>
+
+        <div class="benchmark-card">
+          <div class="benchmark-metric">1 Binary</div>
+          <div class="benchmark-label">Dependencies</div>
+          <div class="vs-text">vs 5+ services (Airflow)</div>
+        </div>
+
+        <div class="benchmark-card">
+          <div class="benchmark-metric">&lt;1s</div>
+          <div class="benchmark-label">Cold Start</div>
+          <div class="vs-text">vs 30-60s (Airflow)</div>
+        </div>
+
+        <div class="benchmark-card">
+          <div class="benchmark-metric">1000x</div>
+          <div class="benchmark-label">Event Query Speed</div>
+          <div class="vs-text">vs database polling</div>
+        </div>
+
+        <div class="benchmark-card">
+          <div class="benchmark-metric">100%</div>
+          <div class="benchmark-label">Rollback Support</div>
+          <div class="vs-text">Revert to any event</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Code Comparison Section -->
+  <section id="comparison">
+    <div class="container">
+      <h2>The <span class="accent">difference</span> in code</h2>
+
+      <div class="comparison-container">
+        <div>
+          <label class="code-label">Conduit (Safe)</label>
+          <div class="code-block">
+            <code><span class="comment"># Write your DAG</span>
+<span class="keyword">from</span> conduit <span class="keyword">import</span> <span class="function">DAG</span>, <span class="function">Task</span>
+
+dag = <span class="function">DAG</span>(<span class="string">"my_pipeline"</span>)
+
+<span class="keyword">with</span> dag:
+    extract = <span class="function">Task</span>(<span class="string">"extract"</span>)
+    load = <span class="function">Task</span>(<span class="string">"load"</span>)
+
+    extract >> load
+
+<span class="comment"># Deploy</span>
+<span class="keyword">$</span> conduit plan
+<span class="keyword">$</span> conduit apply</code>
+          </div>
+        </div>
+
+        <div>
+          <label class="code-label">Airflow (Chaos)</label>
+          <div class="code-block">
+            <code><span class="comment"># Hope your Python is correct</span>
+<span class="keyword">from</span> airflow <span class="keyword">import</span> <span class="function">DAG</span>
+<span class="keyword">from</span> airflow.operators.<span class="bad">bash</span> <span class="keyword">import</span> <span class="function">BashOperator</span>
+
+dag = <span class="function">DAG</span>(<span class="string">"my_pipeline"</span>)
+
+task1 = <span class="function">BashOperator</span>(
+    dag=dag,
+    <span class="bad">command=</span><span class="string">"echo hello"</span>
+)
+
+task2 = <span class="function">BashOperator</span>(dag=dag, ...)
+
+<span class="comment"># Deploy (pray)</span>
+<span class="bad">$ git push && ssh prod "systemctl restart airflow"</span></code>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quickstart Section -->
+  <section id="quickstart">
+    <div class="container">
+      <h2>Get started in <span class="accent">60 seconds</span></h2>
+
+      <div class="quickstart-steps">
+        <div class="step">
+          <h3>Install</h3>
+          <code>curl -sSL https://install.conduit.dev | sh</code>
+          <p>One-liner. Grab the binary. That's it.</p>
+        </div>
+
+        <div class="step">
+          <h3>Initialize</h3>
+          <code>conduit init my_project && cd my_project</code>
+          <p>Create a new project directory with templates.</p>
+        </div>
+
+        <div class="step">
+          <h3>Write a DAG</h3>
+          <code>cat > dags/hello.py &lt;&lt; 'EOF'
+from conduit import DAG, Task
+
+dag = DAG("hello_world")
+with dag:
+    say_hello = Task("hello")
+EOF</code>
+          <p>Define your pipeline in Python.</p>
+        </div>
+
+        <div class="step">
+          <h3>Compile</h3>
+          <code>conduit compile</code>
+          <p>Parse and validate your DAGs. Takes milliseconds.</p>
+        </div>
+
+        <div class="step">
+          <h3>Run Locally</h3>
+          <code>conduit run hello_world</code>
+          <p>Test your pipeline without needing infrastructure.</p>
+        </div>
+
+        <div class="step">
+          <h3>Serve Dashboard</h3>
+          <code>conduit serve</code>
+          <p>Start the server. Open http://localhost:9000</p>
+        </div>
+      </div>
+
+      <div style="text-align: center; margin-top: 3rem;">
+        <p style="color: #9ca3af; margin-bottom: 1.5rem;">Ready to dive deeper?</p>
+        <a href="https://docs.conduit.dev" target="_blank" class="cta-button">Read the Docs</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Migration Section -->
+  <section id="migration">
+    <div class="container">
+      <h2>Already on <span class="accent">Airflow?</span></h2>
+
+      <div class="migration-content">
+        <h3>We thought of that.</h3>
+        <p>Auto-convert your Airflow DAGs to Conduit with a single command:</p>
+        <code>conduit migrate ./dags</code>
+        <p>Your Python-defined pipelines become Conduit DAGs. Same logic. Better engine.</p>
+        <div class="migration-links">
+          <a href="https://docs.conduit.dev/guides/migrate-from-airflow" target="_blank">Migration Guide →</a>
+          <a href="https://docs.conduit.dev/guides/airflow-compatibility" target="_blank">Compatibility →</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="footer-content">
+      <div class="footer-section">
+        <h4>Product</h4>
+        <ul>
+          <li><a href="https://docs.conduit.dev" target="_blank">Documentation</a></li>
+          <li><a href="https://github.com/conduit-dev/conduit" target="_blank">GitHub</a></li>
+          <li><a href="https://conduit.dev/releases" target="_blank">Releases</a></li>
+          <li><a href="https://conduit.dev/roadmap" target="_blank">Roadmap</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-section">
+        <h4>Community</h4>
+        <ul>
+          <li><a href="https://discord.gg/conduit" target="_blank">Discord</a></li>
+          <li><a href="https://github.com/conduit-dev/conduit/discussions" target="_blank">Discussions</a></li>
+          <li><a href="https://twitter.com/conduitdev" target="_blank">Twitter</a></li>
+          <li><a href="https://conduit.dev/blog" target="_blank">Blog</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-section">
+        <h4>Legal</h4>
+        <ul>
+          <li><a href="https://conduit.dev/privacy" target="_blank">Privacy Policy</a></li>
+          <li><a href="https://conduit.dev/terms" target="_blank">Terms of Service</a></li>
+          <li><a href="https://github.com/conduit-dev/conduit/blob/main/LICENSE" target="_blank">License</a></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer-bottom">
+      <div class="rust-badge">⚡ Built with Rust</div>
+      <p style="margin-top: 1rem;">
+        Conduit is <strong>open source</strong>. The engine is <strong>free forever.</strong><br>
+        © 2026 Conduit Labs. All rights reserved.
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    function copyInstall() {
+      const code = 'curl -sSL https://install.conduit.dev | sh';
+      navigator.clipboard.writeText(code).then(() => {
+        const btn = event.target;
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => {
+          btn.textContent = original;
+        }, 2000);
+      });
+    }
+
+    // Smooth scroll offset for fixed header
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+      anchor.addEventListener('click', function(e) {
+        const href = this.getAttribute('href');
+        if (href === '#') return;
+
+        const target = document.querySelector(href);
+        if (!target) return;
+
+        e.preventDefault();
+        const headerOffset = 60;
+        const elementPosition = target.getBoundingClientRect().top;
+        const offsetPosition = elementPosition + window.pageYOffset - headerOffset;
+
+        window.scrollTo({
+          top: offsetPosition,
+          behavior: 'smooth'
+        });
+      });
+    });
+
+    // Add scroll animation for cards
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.style.opacity = '1';
+          entry.target.style.transform = 'translateY(0)';
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.problem-card, .solution-card, .benchmark-card, .step').forEach(el => {
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(10px)';
+      el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+      observer.observe(el);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,428 @@
+# ─── ML Feature Pipeline ────────────────────────────────────────────────────
+# End-to-end ML pipeline: feature engineering → training → validation → deploy.
+# Demonstrates: parallel branching feature computation, GPU resource pools,
+# model quality contracts (accuracy, drift, bias), conditional promotion,
+# and multi-stage validation gates.
+#
+# Graph shape:
+#   extract_training_data ─→ validate_raw_data ─┐
+#                                                ├─→ compute_user_features
+#                                                ├─→ compute_product_features
+#                                                ├─→ compute_behavioral_features
+#                                                └─→ compute_temporal_features
+#                                                          │
+#                                     assemble_feature_matrix ← (all four)
+#                                                │
+#                                        train_model (GPU)
+#                                                │
+#                              ┌──────────────────┼───────────────────┐
+#                              │                  │                   │
+#                     evaluate_holdout    detect_drift    check_fairness
+#                              │                  │                   │
+#                              └──────────────────┼───────────────────┘
+#                                                 │
+#                                     promotion_gate ─→ deploy_to_serving
+#                                                              │
+#                                                    notify_ml_team
+
+id: ml_feature_pipeline
+description: >
+  Churn prediction model pipeline — computes features from user behavior,
+  product interactions, and temporal patterns. Trains an XGBoost model,
+  validates against holdout set, checks for data drift and fairness bias,
+  then conditionally promotes to the model registry.
+schedule: "0 2 * * *"
+tags: [ml, features, training, churn-prediction, daily]
+max_active_runs: 1
+on_failure: "https://hooks.slack.com/services/T00/B00/ml-pipeline-alerts"
+
+tasks:
+  # ── DATA EXTRACTION ────────────────────────────────────────────────────────
+
+  extract_training_data:
+    type: sql
+    connection: feature_store
+    query: |
+      SELECT
+        u.user_id, u.signup_date, u.plan_tier, u.country,
+        u.company_size, u.industry,
+        e.event_type, e.event_count, e.last_event_at,
+        s.session_count_7d, s.session_count_30d,
+        s.avg_session_duration_seconds,
+        o.order_count_30d, o.total_spend_30d,
+        o.days_since_last_order,
+        l.label AS churned,
+        l.label_date
+      FROM feature_store.users u
+      JOIN feature_store.event_aggregates e ON e.user_id = u.user_id
+      JOIN feature_store.session_stats s ON s.user_id = u.user_id
+      LEFT JOIN feature_store.order_stats o ON o.user_id = u.user_id
+      JOIN feature_store.churn_labels l ON l.user_id = u.user_id
+      WHERE l.label_date >= '{{ ds }}'::date - INTERVAL '90 days'
+    retries: 3
+    retry_delay: 60s
+    timeout: 30m
+    pool: feature_store
+    contracts:
+      - type: row_count
+        min: 10000
+        description: "Need at least 10k labeled examples for training"
+      - type: freshness
+        max_age: 48h
+      - type: not_null
+        column: user_id
+      - type: not_null
+        column: churned
+      - type: accepted_values
+        column: churned
+        values: ["0", "1"]
+        description: "Binary label: 0 = retained, 1 = churned"
+      - type: metric
+        metric_name: positive_label_rate
+        min: 0.05
+        max: 0.50
+        description: "Churn rate 5%–50%; outside means label drift"
+
+  # ── DATA VALIDATION ────────────────────────────────────────────────────────
+
+  validate_raw_data:
+    type: python
+    module: ml.validation
+    function: validate_training_data
+    depends_on: [extract_training_data]
+    timeout: 10m
+    contracts:
+      - type: metric
+        metric_name: null_feature_rate
+        max: 0.05
+        description: "Less than 5% of feature values should be null"
+      - type: metric
+        metric_name: duplicate_user_rate
+        max: 0.001
+        description: "Less than 0.1% duplicate user IDs"
+      - type: metric
+        metric_name: feature_count
+        min: 15
+        description: "Must have at least 15 features after validation"
+      - type: metric
+        metric_name: label_balance_ratio
+        min: 0.1
+        max: 10.0
+        severity: warning
+        description: "Positive/negative ratio should be between 1:10 and 10:1"
+
+  # ── FEATURE ENGINEERING (parallel branches) ────────────────────────────────
+
+  compute_user_features:
+    type: python
+    module: ml.features.user
+    function: compute_user_demographics
+    depends_on: [validate_raw_data]
+    timeout: 15m
+    pool: compute_pool
+    resources:
+      memory_mb: 4096
+    contracts:
+      - type: row_count
+        min: 10000
+      - type: metric
+        metric_name: user_feature_coverage
+        min: 0.95
+        description: "95%+ of users should have complete demographic features"
+      - type: metric
+        metric_name: user_features_generated
+        min: 8
+        description: "Must produce at least 8 user-level features"
+
+  compute_product_features:
+    type: python
+    module: ml.features.product
+    function: compute_product_interaction_features
+    depends_on: [validate_raw_data]
+    timeout: 20m
+    pool: compute_pool
+    resources:
+      memory_mb: 8192
+    contracts:
+      - type: row_count
+        min: 10000
+      - type: metric
+        metric_name: product_feature_coverage
+        min: 0.90
+        description: "90%+ of users should have product interaction features"
+      - type: metric
+        metric_name: product_features_generated
+        min: 12
+        description: "Must produce at least 12 product interaction features"
+
+  compute_behavioral_features:
+    type: python
+    module: ml.features.behavior
+    function: compute_engagement_signals
+    depends_on: [validate_raw_data]
+    timeout: 25m
+    pool: compute_pool
+    resources:
+      memory_mb: 8192
+      cpu_millicores: 2000
+    contracts:
+      - type: row_count
+        min: 10000
+      - type: metric
+        metric_name: behavioral_feature_coverage
+        min: 0.85
+        description: "85%+ of users should have behavioral features"
+      - type: metric
+        metric_name: behavioral_features_generated
+        min: 15
+        description: "Must produce at least 15 behavioral signal features"
+      - type: metric
+        metric_name: avg_session_feature_completeness
+        min: 0.80
+        severity: warning
+
+  compute_temporal_features:
+    type: python
+    module: ml.features.temporal
+    function: compute_time_series_features
+    depends_on: [validate_raw_data]
+    timeout: 30m
+    pool: compute_pool
+    resources:
+      memory_mb: 16384
+      cpu_millicores: 4000
+    contracts:
+      - type: row_count
+        min: 10000
+      - type: metric
+        metric_name: temporal_feature_coverage
+        min: 0.80
+        description: "80%+ of users should have temporal features (needs 30d history)"
+      - type: metric
+        metric_name: temporal_features_generated
+        min: 20
+        description: "Must produce at least 20 time-series derived features"
+      - type: metric
+        metric_name: trend_computation_success_rate
+        min: 0.90
+        severity: warning
+        description: "90%+ of trend calculations should succeed"
+
+  # ── FEATURE ASSEMBLY ───────────────────────────────────────────────────────
+
+  assemble_feature_matrix:
+    type: python
+    module: ml.features.assembly
+    function: join_and_impute
+    depends_on:
+      - compute_user_features
+      - compute_product_features
+      - compute_behavioral_features
+      - compute_temporal_features
+    timeout: 15m
+    pool: compute_pool
+    resources:
+      memory_mb: 16384
+    contracts:
+      - type: row_count
+        min: 10000
+        description: "Final feature matrix must have at least 10k rows"
+      - type: metric
+        metric_name: total_feature_count
+        min: 50
+        description: "Assembled matrix should have 50+ features"
+      - type: metric
+        metric_name: imputation_rate
+        max: 0.10
+        description: "Less than 10% of values should require imputation"
+      - type: metric
+        metric_name: feature_correlation_max
+        max: 0.95
+        severity: warning
+        description: "No two features should be >95% correlated (redundancy)"
+      - type: metric
+        metric_name: matrix_sparsity
+        max: 0.20
+        severity: warning
+        description: "Feature matrix should be less than 20% sparse after imputation"
+
+  # ── MODEL TRAINING ─────────────────────────────────────────────────────────
+
+  train_model:
+    type: python
+    module: ml.training
+    function: train_xgboost_churn_model
+    depends_on: [assemble_feature_matrix]
+    timeout: 2h
+    pool: gpu_pool
+    priority: 10
+    resources:
+      memory_mb: 32768
+      cpu_millicores: 8000
+    contracts:
+      - type: metric
+        metric_name: training_auc
+        min: 0.70
+        description: "Training AUC must exceed 0.70"
+      - type: metric
+        metric_name: training_samples
+        min: 8000
+        description: "Must train on at least 8k samples (after train/test split)"
+      - type: metric
+        metric_name: training_duration_seconds
+        max: 7200
+        severity: warning
+        description: "Training shouldn't exceed 2 hours"
+      - type: metric
+        metric_name: feature_importance_top10_coverage
+        min: 0.30
+        severity: warning
+        description: "Top 10 features should explain at least 30% of variance"
+
+  # ── VALIDATION GATES (parallel checks) ─────────────────────────────────────
+
+  evaluate_holdout:
+    type: python
+    module: ml.evaluation
+    function: evaluate_on_holdout
+    depends_on: [train_model]
+    timeout: 30m
+    pool: compute_pool
+    resources:
+      memory_mb: 8192
+    contracts:
+      - type: metric
+        metric_name: holdout_auc
+        min: 0.68
+        description: "Holdout AUC must exceed 0.68 (allows 2% drop from training)"
+      - type: metric
+        metric_name: holdout_precision
+        min: 0.60
+        description: "Precision at default threshold must exceed 60%"
+      - type: metric
+        metric_name: holdout_recall
+        min: 0.55
+        description: "Recall at default threshold must exceed 55%"
+      - type: metric
+        metric_name: holdout_f1
+        min: 0.57
+        description: "F1 score must exceed 0.57"
+      - type: metric
+        metric_name: calibration_error
+        max: 0.05
+        severity: warning
+        description: "Expected calibration error should be under 5%"
+      - type: metric
+        metric_name: auc_vs_production
+        min: -0.02
+        severity: warning
+        description: "New model AUC shouldn't be >2% worse than production"
+
+  detect_drift:
+    type: python
+    module: ml.monitoring
+    function: detect_feature_drift
+    depends_on: [train_model]
+    timeout: 15m
+    pool: compute_pool
+    contracts:
+      - type: metric
+        metric_name: psi_max
+        max: 0.20
+        description: "Population Stability Index must be under 0.20 (no major drift)"
+      - type: metric
+        metric_name: drifted_feature_count
+        max: 5
+        severity: warning
+        description: "Fewer than 5 features should show significant drift"
+      - type: metric
+        metric_name: concept_drift_score
+        max: 0.15
+        description: "Concept drift (label distribution shift) under 0.15"
+      - type: metric
+        metric_name: covariate_drift_score
+        max: 0.25
+        severity: warning
+        description: "Covariate drift under 0.25"
+
+  check_fairness:
+    type: python
+    module: ml.fairness
+    function: run_bias_audit
+    depends_on: [train_model]
+    timeout: 15m
+    pool: compute_pool
+    contracts:
+      - type: metric
+        metric_name: demographic_parity_delta
+        max: 0.10
+        description: "Prediction rates across groups must be within 10%"
+      - type: metric
+        metric_name: equalized_odds_delta
+        max: 0.10
+        description: "True positive rates across groups must be within 10%"
+      - type: metric
+        metric_name: disparate_impact_ratio
+        min: 0.80
+        max: 1.25
+        description: "Disparate impact ratio should be 0.80–1.25 (four-fifths rule)"
+      - type: metric
+        metric_name: bias_groups_tested
+        min: 3
+        description: "Must test at least 3 demographic groups"
+
+  # ── PROMOTION GATE ─────────────────────────────────────────────────────────
+
+  promotion_gate:
+    type: python
+    module: ml.deployment
+    function: decide_promotion
+    depends_on: [evaluate_holdout, detect_drift, check_fairness]
+    timeout: 5m
+    trigger_rule: all_success
+    contracts:
+      - type: metric
+        metric_name: promotion_decision
+        min: 0
+        max: 1
+        description: "Binary: 1 = promote, 0 = reject"
+      - type: metric
+        metric_name: gates_passed
+        min: 3
+        description: "All three validation gates must pass"
+
+  # ── DEPLOYMENT ─────────────────────────────────────────────────────────────
+
+  deploy_to_serving:
+    type: python
+    module: ml.deployment
+    function: push_to_model_registry
+    depends_on: [promotion_gate]
+    timeout: 10m
+    retries: 2
+    retry_delay: 60s
+    contracts:
+      - type: metric
+        metric_name: model_registered
+        min: 1
+        description: "Model must be successfully registered"
+      - type: metric
+        metric_name: serving_health_check
+        min: 1
+        description: "Model serving endpoint must respond to health check"
+
+  # ── NOTIFICATION ───────────────────────────────────────────────────────────
+
+  notify_ml_team:
+    type: shell
+    command: |
+      curl -X POST "$SLACK_WEBHOOK_URL" \
+        -H 'Content-Type: application/json' \
+        -d '{
+          "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": "Churn Model Pipeline Complete"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "*Date:* `{{ ds }}`\n*Holdout AUC:* `{{ task_metrics.evaluate_holdout.holdout_auc }}`\n*Drift Score:* `{{ task_metrics.detect_drift.psi_max }}`\n*Fairness:* `{{ task_metrics.check_fairness.demographic_parity_delta }}`\n*Promoted:* `{{ task_metrics.promotion_gate.promotion_decision }}`"}}
+          ]
+        }'
+    depends_on: [deploy_to_serving]
+    retries: 2

@@ -1,0 +1,19 @@
+[package]
+name = "conduit-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Task runtime: process isolation, resource limits, stdin/stdout protocol"
+
+[dependencies]
+conduit-common = { path = "../conduit-common" }
+conduit-state = { path = "../conduit-state" }
+conduit-providers = { path = "../conduit-providers" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }

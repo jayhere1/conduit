@@ -1,0 +1,29 @@
+id: incremental_pipeline
+description: Pipeline with incremental strategies
+schedule: "*/30 * * * *"
+tags: [incremental, streaming]
+
+tasks:
+  extract_events:
+    type: shell
+    command: 'echo "Extracting events"'
+
+  merge_users:
+    type: sql
+    connection: warehouse
+    query: "MERGE INTO users ..."
+    depends_on: [extract_events]
+    incremental:
+      strategy: merge
+      unique_key: [user_id]
+      time_column: updated_at
+
+  append_events:
+    type: sql
+    connection: warehouse
+    query: "INSERT INTO events ..."
+    depends_on: [extract_events]
+    incremental:
+      strategy: append
+      time_column: event_time
+      lookback: 2h

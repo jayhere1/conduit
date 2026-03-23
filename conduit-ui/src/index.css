@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Base ────────────────────────────────────────────────────────────────── */
+
+@layer base {
+  body {
+    @apply text-gray-200 antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    @apply w-2;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-conduit-950;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-conduit-800 hover:bg-conduit-700;
+  }
+}
+
+/* ─── Utilities ───────────────────────────────────────────────────────────── */
+
+@layer utilities {
+  .glass {
+    @apply bg-conduit-900/60 backdrop-blur-sm border border-conduit-800/50 rounded-xl;
+  }
+
+  .glass-hover {
+    @apply glass transition-all duration-200 hover:bg-conduit-900/80 hover:border-conduit-700/50;
+  }
+
+  .glow {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.15);
+  }
+
+  .status-dot {
+    @apply w-2.5 h-2.5 rounded-full;
+  }
+
+  .mono {
+    @apply font-mono text-sm;
+  }
+
+  /* Animate the DAG graph edges */
+  @keyframes flow {
+    from { stroke-dashoffset: 24; }
+    to { stroke-dashoffset: 0; }
+  }
+  .animate-flow {
+    stroke-dasharray: 8 16;
+    animation: flow 1s linear infinite;
+  }
+
+  /* Pulse for live indicators */
+  @keyframes live-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .animate-live {
+    animation: live-pulse 2s ease-in-out infinite;
+  }
+}

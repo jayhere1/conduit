@@ -1,0 +1,52 @@
+# ─── File-Triggered Sensor Pipeline ─────────────────────────────────────────
+# Demonstrates sensors, executables, and delete+insert incremental strategy.
+
+id: file_ingest
+description: Watches for new CSV uploads, processes them, and loads to the data lake
+tags: [ingest, sensor, data-lake]
+
+tasks:
+  wait_for_file:
+    type: sensor
+    sensor_type: file
+    poke_interval: 60s
+    timeout: 6h
+
+  validate_schema:
+    type: executable
+    command: /usr/local/bin/schema-validator
+    args: ["--input", "/data/incoming/latest.csv", "--schema", "schemas/ingest.json"]
+    depends_on: [wait_for_file]
+    retries: 2
+    timeout: 5m
+
+  parse_and_clean:
+    type: python
+    module: ingest.csv_parser
+    function: clean_and_stage
+    depends_on: [validate_schema]
+    pool: ingest_pool
+    timeout: 15m
+    resources:
+      memory_mb: 2048
+      cpu_millicores: 500
+
+  load_to_lake:
+    type: sql
+    connection: data_lake
+    query: |
+      COPY INTO raw.file_uploads
+      FROM @staging/cleaned/
+      FILE_FORMAT = (TYPE = 'PARQUET')
+    depends_on: [parse_and_clean]
+    timeout: 10m
+    incremental:
+      strategy: delete_insert
+      partition_column: upload_date
+      partition_granularity: day
+      max_partitions_per_run: 7
+
+  update_catalog:
+    type: shell
+    command: "python -m catalog.register --table raw.file_uploads --date {{ ds }}"
+    depends_on: [load_to_lake]
