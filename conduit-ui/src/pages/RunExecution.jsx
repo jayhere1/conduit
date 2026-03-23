@@ -26,6 +26,33 @@ import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
 import clsx from 'clsx';
 
+// ─── CSS Animations ──────────────────────────────────────────────────────────
+
+const animationStyles = `
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 8px rgba(59, 130, 246, 0.4); }
+    50% { box-shadow: 0 0 16px rgba(59, 130, 246, 0.8); }
+  }
+  @keyframes flash-green {
+    0% { box-shadow: 0 0 0 rgba(16, 185, 129, 0); }
+    50% { box-shadow: 0 0 20px rgba(16, 185, 129, 1); }
+    100% { box-shadow: 0 0 0 rgba(16, 185, 129, 0); }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-4px); }
+    75% { transform: translateX(4px); }
+  }
+  @keyframes grow-bar {
+    0% { width: 0%; }
+    100% { width: 100%; }
+  }
+  .pulse-glow-animation { animation: pulse-glow 1.5s ease-in-out infinite; }
+  .flash-green-animation { animation: flash-green 0.6s ease-out; }
+  .shake-animation { animation: shake 0.4s ease-in-out; }
+  .gantt-bar-running { animation: grow-bar 10s linear; }
+`;
+
 // ─── Time Helpers ────────────────────────────────────────────────────────────
 
 const formatDuration = (startedAt, endedAt) => {
@@ -87,6 +114,152 @@ const STATUS_CONFIG = {
 
 const getStatusConfig = (status) =>
   STATUS_CONFIG[status?.toLowerCase()] || STATUS_CONFIG.pending;
+
+// ─── Progress Indicator ──────────────────────────────────────────────────
+
+function ProgressIndicator({ taskStates }) {
+  if (!taskStates) return null;
+
+  const entries = Object.entries(taskStates);
+  const total = entries.length;
+  const completed = entries.filter(([, s]) => s.toLowerCase() === 'success').length;
+  const failed = entries.filter(([, s]) => s.toLowerCase() === 'failed').length;
+  const running = entries.filter(([, s]) => s.toLowerCase() === 'running').length;
+  const pending = total - completed - failed - running;
+
+  const pct = total > 0 ? Math.round(((completed + failed) / total) * 100) : 0;
+
+  return (
+    <Card>
+      <div className="space-y-4">
+        {/* Summary text */}
+        <div className="flex items-baseline gap-2">
+          <span className="text-lg font-bold text-white">
+            {completed}/{total}
+          </span>
+          <span className="text-sm text-gray-400">
+            tasks complete
+          </span>
+        </div>
+
+        {/* Segmented progress bar */}
+        <div className="flex-1 h-3 bg-conduit-900/50 rounded-full overflow-hidden border border-conduit-800/30 flex">
+          <div
+            className="bg-emerald-500 transition-all duration-500"
+            style={{ width: `${total > 0 ? (completed / total) * 100 : 0}%` }}
+            title={`Completed: ${completed}`}
+          />
+          <div
+            className="bg-blue-500 transition-all duration-500 animate-pulse"
+            style={{ width: `${total > 0 ? (running / total) * 100 : 0}%` }}
+            title={`Running: ${running}`}
+          />
+          <div
+            className="bg-red-500 transition-all duration-500"
+            style={{ width: `${total > 0 ? (failed / total) * 100 : 0}%` }}
+            title={`Failed: ${failed}`}
+          />
+          <div
+            className="bg-gray-600 transition-all duration-500"
+            style={{ width: `${total > 0 ? (pending / total) * 100 : 0}%` }}
+            title={`Pending: ${pending}`}
+          />
+        </div>
+
+        {/* Legend */}
+        <div className="flex items-center gap-4 flex-wrap text-xs">
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 rounded bg-emerald-500" />
+            <span className="text-gray-400">Completed: {completed}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 rounded bg-blue-500 animate-pulse" />
+            <span className="text-gray-400">Running: {running}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 rounded bg-red-500" />
+            <span className="text-gray-400">Failed: {failed}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 rounded bg-gray-600" />
+            <span className="text-gray-400">Pending: {pending}</span>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ─── Gantt Timeline ──────────────────────────────────────────────────────
+
+function GanttTimeline({ taskStates, run }) {
+  if (!taskStates || !run?.tasks) return null;
+
+  const tasks = run.tasks.filter(t => t.name && taskStates[t.name]);
+  if (tasks.length === 0) return null;
+
+  const runStart = run.startedAt ? new Date(run.startedAt) : new Date();
+  const now = new Date();
+  const timeSpan = Math.max((now - runStart) / 1000, 1); // seconds
+
+  return (
+    <Card title="Execution Timeline" subtitle="Task duration and timing">
+      <div className="space-y-3">
+        {tasks.slice(0, 8).map((task) => {
+          const status = taskStates[task.name]?.toLowerCase() || 'pending';
+          const taskStart = task.startedAt ? new Date(task.startedAt) : null;
+          const taskEnd = task.endedAt ? new Date(task.endedAt) : null;
+
+          let startOffset = 0;
+          let barWidth = 0;
+
+          if (taskStart) {
+            startOffset = ((taskStart - runStart) / 1000) / timeSpan * 100;
+            if (taskEnd) {
+              barWidth = ((taskEnd - taskStart) / 1000) / timeSpan * 100;
+            } else if (status === 'running') {
+              barWidth = ((now - taskStart) / 1000) / timeSpan * 100;
+            }
+          }
+
+          const bgColor = {
+            success: 'bg-emerald-500',
+            running: 'bg-blue-500',
+            failed: 'bg-red-500',
+            pending: 'bg-gray-700',
+          }[status] || 'bg-gray-700';
+
+          return (
+            <div key={task.name} className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-gray-300 truncate flex-1 pr-2">
+                  {task.name}
+                </span>
+                <span className="text-xs text-gray-500 font-mono">
+                  {status === 'pending' ? '—' : taskEnd ? ((taskEnd - (taskStart || runStart)) / 1000).toFixed(1) + 's' : ((now - (taskStart || runStart)) / 1000).toFixed(1) + 's'}
+                </span>
+              </div>
+              <div className="h-2 bg-conduit-900/50 rounded-full overflow-hidden border border-conduit-800/20 relative">
+                <div
+                  className={clsx(bgColor, 'h-full rounded-full transition-all', status === 'running' && 'gantt-bar-running')}
+                  style={{
+                    marginLeft: `${startOffset}%`,
+                    width: `${Math.max(barWidth, 2)}%`,
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })}
+        {tasks.length > 8 && (
+          <div className="text-xs text-gray-500 pt-2">
+            +{tasks.length - 8} more tasks
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
 
 // ─── DAG Execution Graph (SVG) ──────────────────────────────────────────────
 
@@ -164,7 +337,6 @@ function ExecutionGraph({ dagGraph, taskStates, selectedTask, onSelectTask }) {
           <marker id="exec-arrow-active" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="#3b82f6" />
           </marker>
-          {/* Pulse animation for running nodes */}
           <filter id="glow-blue">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge>
@@ -340,7 +512,7 @@ function ExecutionGraph({ dagGraph, taskStates, selectedTask, onSelectTask }) {
   );
 }
 
-// ─── Task Detail Sidebar ─────────────────────────────────────────────────────
+// ─── Task Detail Sidebar ─────────────────────────────────────────────────
 
 function TaskSidebar({ taskId, taskState, run }) {
   if (!taskId) {
@@ -443,66 +615,6 @@ function TaskSidebar({ taskId, taskState, run }) {
   );
 }
 
-// ─── Execution Timeline ──────────────────────────────────────────────────────
-
-function ExecutionTimeline({ taskStates }) {
-  if (!taskStates) return null;
-
-  const entries = Object.entries(taskStates);
-  const total = entries.length;
-  const completed = entries.filter(([, s]) => s.toLowerCase() === 'success').length;
-  const failed = entries.filter(([, s]) => s.toLowerCase() === 'failed').length;
-  const running = entries.filter(([, s]) => s.toLowerCase() === 'running').length;
-  const pending = total - completed - failed - running;
-
-  const pct = total > 0 ? Math.round(((completed + failed) / total) * 100) : 0;
-
-  return (
-    <div className="flex items-center gap-4">
-      {/* Progress bar */}
-      <div className="flex-1 h-2 bg-conduit-900/50 rounded-full overflow-hidden border border-conduit-800/30">
-        <div className="h-full flex">
-          <div
-            className="bg-green-500 transition-all duration-500"
-            style={{ width: `${total > 0 ? (completed / total) * 100 : 0}%` }}
-          />
-          <div
-            className="bg-red-500 transition-all duration-500"
-            style={{ width: `${total > 0 ? (failed / total) * 100 : 0}%` }}
-          />
-          <div
-            className="bg-blue-500 transition-all duration-500 animate-pulse"
-            style={{ width: `${total > 0 ? (running / total) * 100 : 0}%` }}
-          />
-        </div>
-      </div>
-
-      {/* Stats */}
-      <div className="flex items-center gap-3 shrink-0">
-        <span className="text-xs font-mono text-gray-400">{pct}%</span>
-        <div className="flex items-center gap-1.5">
-          <span className="flex items-center gap-1 text-xs text-green-400">
-            <CheckCircle size={10} /> {completed}
-          </span>
-          {running > 0 && (
-            <span className="flex items-center gap-1 text-xs text-blue-400">
-              <Loader size={10} /> {running}
-            </span>
-          )}
-          {failed > 0 && (
-            <span className="flex items-center gap-1 text-xs text-red-400">
-              <XCircle size={10} /> {failed}
-            </span>
-          )}
-          <span className="flex items-center gap-1 text-xs text-gray-500">
-            <Clock size={10} /> {pending}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
 export default function RunExecution() {
@@ -511,6 +623,14 @@ export default function RunExecution() {
   const [selectedTask, setSelectedTask] = useState(null);
   const [elapsedTick, setElapsedTick] = useState(0);
   const wsRef = useRef(null);
+
+  // Inject animations
+  useEffect(() => {
+    const style = document.createElement('style');
+    style.textContent = animationStyles;
+    document.head.appendChild(style);
+    return () => style.remove();
+  }, []);
 
   // Fetch run data
   const { data: run, loading, error, refetch } = useApi(() => getRun(runId), [runId]);
@@ -553,10 +673,8 @@ export default function RunExecution() {
   // Parse task states from run data
   const taskStates = useMemo(() => {
     if (!run) return {};
-    // The API returns task_states as a map
     if (run.task_states) return run.task_states;
     if (run.taskStates) return run.taskStates;
-    // Fallback: build from tasks array
     if (run.tasks) {
       const states = {};
       run.tasks.forEach((t) => {
@@ -674,9 +792,14 @@ export default function RunExecution() {
         />
       </div>
 
-      {/* Progress Bar */}
+      {/* Progress Indicator */}
       <div className="mb-6">
-        <ExecutionTimeline taskStates={taskStates} />
+        <ProgressIndicator taskStates={taskStates} />
+      </div>
+
+      {/* Gantt Timeline */}
+      <div className="mb-6">
+        <GanttTimeline taskStates={taskStates} run={run} />
       </div>
 
       {/* Main Content: Graph + Sidebar */}

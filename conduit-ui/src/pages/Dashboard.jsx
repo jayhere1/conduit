@@ -17,9 +17,13 @@ import {
   CheckCircle,
   AlertCircle,
   Radio,
+  TrendingUp,
+  Gauge,
+  Server,
+  Cpu,
 } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { formatMs as formatTime, formatShortTime as formatDate } from '../utils/time';
+import { formatMs as formatTime, formatShortTime as formatDate, formatRelativeTime } from '../utils/time';
 
 const truncateId = (id, length = 8) => {
   if (!id) return 'N/A';
@@ -57,9 +61,23 @@ export default function Dashboard() {
   const totalEnvironments = envsData?.length || 0;
   const snapshots = systemData?.snapshots || 0;
 
+  // Calculate today's runs and success rate
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todaysRuns = runsData?.filter((r) => {
+    const runDate = new Date(r.startedAt);
+    runDate.setHours(0, 0, 0, 0);
+    return runDate.getTime() === today.getTime();
+  }) || [];
+  const successfulRuns = todaysRuns.filter((r) => r.status?.toLowerCase() === 'success').length;
+  const successRate = todaysRuns.length > 0 ? Math.round((successfulRuns / todaysRuns.length) * 100) : 0;
+
   // Format uptime
   const uptime = systemData?.uptime_seconds || 0;
   const uptimeFormatted = formatTime(uptime * 1000);
+
+  // Recent runs for timeline (last 10)
+  const timelineRuns = runsData ? runsData.slice(0, 10) : [];
 
   return (
     <div className="min-h-screen bg-conduit-950 p-6">
@@ -94,91 +112,85 @@ export default function Dashboard() {
           sub={dagsLoading ? 'Loading...' : 'configured'}
         />
         <StatCard
-          label="Active Runs"
-          value={activeRuns}
+          label="Today's Runs"
+          value={todaysRuns.length}
           icon={Play}
-          sub={runsLoading ? 'Loading...' : 'in progress'}
+          sub={runsLoading ? 'Loading...' : 'executed'}
           trend={activeRuns > 0 ? 1 : 0}
         />
         <StatCard
-          label="Environments"
+          label="Success Rate"
+          value={`${successRate}%`}
+          icon={TrendingUp}
+          sub={todaysRuns.length === 0 ? 'No runs' : `${successfulRuns} of ${todaysRuns.length}`}
+        />
+        <StatCard
+          label="Active Environments"
           value={totalEnvironments}
           icon={Layers}
           sub={envsLoading ? 'Loading...' : 'configured'}
         />
-        <StatCard
-          label="Snapshots"
-          value={snapshots}
-          icon={Zap}
-          sub={systemLoading ? 'Loading...' : 'taken'}
-        />
+      </div>
+
+      {/* Quick Actions */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+        <button className="glass px-4 py-3 rounded-lg flex items-center justify-center gap-2 text-sm font-medium text-conduit-300 hover:text-conduit-200 hover:border-conduit-500/50 border border-conduit-700/50 transition-all hover:shadow-lg hover:shadow-conduit-500/10">
+          <Zap className="w-4 h-4" />
+          Compile All DAGs
+        </button>
+        <button className="glass px-4 py-3 rounded-lg flex items-center justify-center gap-2 text-sm font-medium text-conduit-300 hover:text-conduit-200 hover:border-conduit-500/50 border border-conduit-700/50 transition-all hover:shadow-lg hover:shadow-conduit-500/10">
+          <Play className="w-4 h-4" />
+          Generate Plan
+        </button>
+        <button className="glass px-4 py-3 rounded-lg flex items-center justify-center gap-2 text-sm font-medium text-conduit-300 hover:text-conduit-200 hover:border-conduit-500/50 border border-conduit-700/50 transition-all hover:shadow-lg hover:shadow-conduit-500/10">
+          <Layers className="w-4 h-4" />
+          Create Environment
+        </button>
       </div>
 
       {/* Main Grid: Recent Runs & Live Events */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-        {/* Recent Runs */}
+        {/* Recent Runs Timeline */}
         <div className="lg:col-span-2">
-          <Card title="Recent Runs" icon={Activity}>
+          <Card title="Recent Runs Timeline" icon={Clock}>
             {runsLoading ? (
               <Spinner size="sm" />
-            ) : recentRuns.length === 0 ? (
+            ) : timelineRuns.length === 0 ? (
               <div className="text-center py-8">
                 <p className="text-gray-400 text-sm">No runs yet</p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-conduit-800/50">
-                      <th className="text-left px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                        Run ID
-                      </th>
-                      <th className="text-left px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                        DAG
-                      </th>
-                      <th className="text-left px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                        Status
-                      </th>
-                      <th className="text-left px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                        Started
-                      </th>
-                      <th className="text-left px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                        Duration
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {recentRuns.map((run) => {
-                      const startTime = run.startedAt ? new Date(run.startedAt) : null;
-                      const endTime = run.endedAt ? new Date(run.endedAt) : null;
-                      const duration =
-                        startTime && endTime
-                          ? formatTime(endTime.getTime() - startTime.getTime())
-                          : 'In progress';
-
-                      return (
-                        <tr
-                          key={run.id}
-                          className="border-b border-conduit-800/25 hover:bg-conduit-900/30 transition-colors"
-                        >
-                          <td className="px-3 py-2 text-conduit-300 font-mono text-xs">
-                            {truncateId(run.id)}
-                          </td>
-                          <td className="px-3 py-2 text-gray-200 text-sm">
-                            {run.dagId || 'N/A'}
-                          </td>
-                          <td className="px-3 py-2">
-                            <StatusBadge status={run.status} dot />
-                          </td>
-                          <td className="px-3 py-2 text-gray-400 text-xs">
-                            {formatDate(run.startedAt)}
-                          </td>
-                          <td className="px-3 py-2 text-gray-400 text-xs">{duration}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              <div className="space-y-3">
+                {timelineRuns.map((run, idx) => (
+                  <div key={run.id} className="flex items-start gap-3 pb-3 border-b border-conduit-800/30 last:border-0">
+                    <div className="flex-shrink-0 mt-1">
+                      <div
+                        className={`w-2.5 h-2.5 rounded-full ${
+                          run.status?.toLowerCase() === 'success'
+                            ? 'bg-emerald-500'
+                            : run.status?.toLowerCase() === 'running'
+                            ? 'bg-blue-500 animate-pulse'
+                            : run.status?.toLowerCase() === 'failed'
+                            ? 'bg-red-500'
+                            : 'bg-gray-500'
+                        }`}
+                      />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-medium text-gray-200 truncate">
+                            {run.dagId || 'Unknown DAG'}
+                          </p>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            {formatRelativeTime(run.startedAt)}
+                          </p>
+                        </div>
+                        <StatusBadge status={run.status} dot size="sm" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </Card>
@@ -232,9 +244,9 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* System Health */}
+      {/* System Health & Metrics */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1">
+        <div>
           <Card title="System Health" icon={CheckCircle}>
             {healthLoading || systemLoading ? (
               <Spinner size="sm" />
@@ -300,16 +312,58 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        {/* Activity Trend Chart (Placeholder for future chart implementation) */}
+        {/* Scheduler & Performance Metrics */}
         <div className="lg:col-span-2">
-          <Card title="Run Activity Trend" icon={Clock}>
-            {runsLoading ? (
+          <Card title="Scheduler & Performance" icon={Gauge}>
+            {healthLoading || systemLoading ? (
               <Spinner size="sm" />
             ) : (
-              <div className="h-48 w-full flex items-center justify-center">
-                <p className="text-gray-400 text-sm">
-                  Activity data will update in real-time
-                </p>
+              <div className="space-y-4">
+                {/* Scheduler Status */}
+                <div className="flex items-center justify-between p-3 rounded-lg bg-conduit-900/20 border border-conduit-800/30">
+                  <div>
+                    <p className="text-xs font-medium text-gray-400 uppercase tracking-wide">Scheduler</p>
+                    <p className="text-sm font-medium text-gray-200 mt-0.5">
+                      {healthData?.status === 'healthy' ? 'Running' : 'Degraded'}
+                    </p>
+                  </div>
+                  <div className={`w-3 h-3 rounded-full ${healthData?.status === 'healthy' ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                </div>
+
+                {/* Compilation Speed */}
+                <div className="flex items-center justify-between p-3 rounded-lg bg-conduit-900/20 border border-conduit-800/30">
+                  <div>
+                    <p className="text-xs font-medium text-gray-400 uppercase tracking-wide">Compilation</p>
+                    <p className="text-sm font-medium text-gray-200 mt-0.5">
+                      {systemData?.compilation_duration_ms
+                        ? `${Math.round(systemData.compilation_duration_ms)}ms`
+                        : 'N/A'}
+                    </p>
+                  </div>
+                  <Cpu className="w-4 h-4 text-conduit-500" />
+                </div>
+
+                {/* Event Store Size */}
+                <div className="flex items-center justify-between p-3 rounded-lg bg-conduit-900/20 border border-conduit-800/30">
+                  <div>
+                    <p className="text-xs font-medium text-gray-400 uppercase tracking-wide">Events Stored</p>
+                    <p className="text-sm font-medium text-gray-200 mt-0.5">
+                      {systemData?.snapshots || 0} snapshots
+                    </p>
+                  </div>
+                  <Server className="w-4 h-4 text-conduit-500" />
+                </div>
+
+                {/* Uptime */}
+                <div className="flex items-center justify-between p-3 rounded-lg bg-conduit-900/20 border border-conduit-800/30">
+                  <div>
+                    <p className="text-xs font-medium text-gray-400 uppercase tracking-wide">Uptime</p>
+                    <p className="text-sm font-medium text-gray-200 mt-0.5">
+                      {uptimeFormatted}
+                    </p>
+                  </div>
+                  <Activity className="w-4 h-4 text-emerald-500" />
+                </div>
               </div>
             )}
           </Card>

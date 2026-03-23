@@ -257,8 +257,8 @@ function InteractiveDagGraph({ dagGraph, dag, selectedNode, onSelectNode }) {
       </div>
 
       {/* Hint */}
-      <div className="absolute bottom-3 left-3 z-10 text-xs text-gray-600">
-        Scroll to zoom &middot; Shift+drag to pan &middot; Click to inspect
+      <div className="absolute bottom-3 left-3 z-10 text-xs text-gray-600 bg-conduit-900/60 px-2 py-1 rounded">
+        Scroll to zoom · Shift+drag to pan · Click to inspect
       </div>
 
       <div className="overflow-hidden rounded-xl border border-conduit-800/50 bg-conduit-950/50" style={{ height: Math.min(svgH + 20, 600) }}>
@@ -361,19 +361,26 @@ function InteractiveDagGraph({ dagGraph, dag, selectedNode, onSelectNode }) {
                     />
                   )}
 
-                  {/* Node bg */}
+                  {/* Node background with gradient */}
+                  <defs>
+                    <linearGradient id={`grad-${node.id}`} x1="0%" y1="0%" x2="0%" y2="100%">
+                      <stop offset="0%" style={{ stopColor: cfg.color, stopOpacity: 0.15 }} />
+                      <stop offset="100%" style={{ stopColor: cfg.color, stopOpacity: 0.05 }} />
+                    </linearGradient>
+                  </defs>
+
                   <rect
                     x={x}
                     y={y}
                     width={NODE_W}
                     height={NODE_H}
                     rx="12"
-                    fill="#111827"
+                    fill={isSelected ? `url(#grad-${node.id})` : '#111827'}
                     stroke={isSelected ? '#8b5cf6' : cfg.color}
                     strokeWidth={isSelected ? 2 : 1.5}
                   />
 
-                  {/* Type color stripe */}
+                  {/* Type color accent bar */}
                   <rect
                     x={x}
                     y={y}
@@ -381,11 +388,12 @@ function InteractiveDagGraph({ dagGraph, dag, selectedNode, onSelectNode }) {
                     height={NODE_H}
                     rx="2"
                     fill={cfg.color}
+                    opacity={isSelected ? 1 : 0.8}
                   />
 
                   {/* Task name */}
                   <text
-                    x={x + 16}
+                    x={x + 14}
                     y={pos.y - 10}
                     fill="#e5e7eb"
                     fontSize="12"
@@ -396,7 +404,7 @@ function InteractiveDagGraph({ dagGraph, dag, selectedNode, onSelectNode }) {
 
                   {/* Type badge */}
                   <text
-                    x={x + 16}
+                    x={x + 14}
                     y={pos.y + 8}
                     fill={cfg.color}
                     fontSize="10"
@@ -405,12 +413,12 @@ function InteractiveDagGraph({ dagGraph, dag, selectedNode, onSelectNode }) {
                     {cfg.label}
                   </text>
 
-                  {/* Info badges */}
+                  {/* Dependencies count */}
                   {deps > 0 && (
                     <text
-                      x={x + NODE_W - 14}
+                      x={x + NODE_W - 12}
                       y={pos.y - 10}
-                      fill="#6b7280"
+                      fill="#9ca3af"
                       fontSize="9"
                       textAnchor="end"
                     >
@@ -420,9 +428,9 @@ function InteractiveDagGraph({ dagGraph, dag, selectedNode, onSelectNode }) {
 
                   {/* Contracts indicator */}
                   {hasContracts && (
-                    <g transform={`translate(${x + NODE_W - 22}, ${pos.y + 2})`}>
-                      <rect x="0" y="0" width="14" height="14" rx="3" fill="#10b981" opacity="0.2" />
-                      <text x="7" y="11" fill="#10b981" fontSize="8" textAnchor="middle" fontWeight="600">
+                    <g transform={`translate(${x + NODE_W - 20}, ${pos.y + 2})`}>
+                      <rect x="0" y="0" width="12" height="12" rx="2" fill="#10b981" opacity="0.3" />
+                      <text x="6" y="9" fill="#10b981" fontSize="7" textAnchor="middle" fontWeight="700">
                         C
                       </text>
                     </g>
@@ -430,7 +438,7 @@ function InteractiveDagGraph({ dagGraph, dag, selectedNode, onSelectNode }) {
 
                   {/* Layer depth indicator */}
                   <text
-                    x={x + NODE_W - 14}
+                    x={x + NODE_W - 12}
                     y={pos.y + 26}
                     fill="#374151"
                     fontSize="8"

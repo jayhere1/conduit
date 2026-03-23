@@ -49,7 +49,7 @@ function SidebarLink({ to, icon: Icon, label }) {
         clsx(
           'group flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
           isActive
-            ? 'bg-conduit-600/20 text-conduit-300 border border-conduit-600/30'
+            ? 'bg-conduit-600/30 text-conduit-200 border border-conduit-500/50 shadow-lg shadow-conduit-600/20'
             : 'text-gray-400 hover:text-gray-200 hover:bg-conduit-900/50 border border-transparent'
         )
       }
@@ -72,9 +72,14 @@ export default function Layout() {
     <div className="flex h-full">
       {/* ── Sidebar ─────────────────────────────────────────── */}
       <aside className="w-60 shrink-0 flex flex-col border-r border-conduit-800/50 bg-conduit-950">
-        {/* Logo */}
+        {/* Logo with Glow Effect */}
         <div className="flex items-center gap-3 px-5 h-16 border-b border-conduit-800/50">
-          <div className="w-8 h-8 rounded-lg bg-conduit-600 flex items-center justify-center">
+          <div
+            className="w-8 h-8 rounded-lg bg-conduit-600 flex items-center justify-center transition-all duration-300 hover:shadow-lg hover:shadow-conduit-600/50"
+            style={{
+              animation: 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            }}
+          >
             <Activity size={18} className="text-white" />
           </div>
           <div>
@@ -95,11 +100,20 @@ export default function Layout() {
         </nav>
 
         {/* Footer */}
-        <div className="p-4 border-t border-conduit-800/50">
+        <div className="p-4 border-t border-conduit-800/50 space-y-3">
+          {/* System Status */}
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-conduit-900/30 border border-conduit-800/30">
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-gray-300 truncate">Scheduler</p>
+              <p className="text-[10px] text-gray-500">Running</p>
+            </div>
+          </div>
+
           {isAuthEnabled ? (
             <div className="space-y-2">
               {/* User info */}
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between px-3 py-2">
                 <span className="text-xs text-gray-400 truncate max-w-[120px]" title={user.keyName}>
                   {user.keyName}
                 </span>
@@ -122,7 +136,7 @@ export default function Layout() {
               </button>
             </div>
           ) : (
-            <div className="text-xs text-gray-500 font-mono">v0.1.0</div>
+            <div className="text-xs text-gray-500 font-mono px-3">v0.1.0</div>
           )}
         </div>
       </aside>
