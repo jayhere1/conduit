@@ -605,6 +605,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "conduit-common",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

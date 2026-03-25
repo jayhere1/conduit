@@ -63,7 +63,9 @@ impl MySqlProvider {
 
         let connection_string = format!(
             "mysql://{}:{}@{}:{}/{}?charset={}&ssl-mode={}",
-            user, password, host, port, database, charset, ssl_mode
+            super::url_encode(&user), super::url_encode(&password),
+            super::url_encode(&host), port,
+            super::url_encode(&database), charset, ssl_mode
         );
 
         Ok(Self {

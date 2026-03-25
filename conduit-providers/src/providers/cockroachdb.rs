@@ -65,7 +65,9 @@ impl CockroachDbProvider {
 
         let connection_string = format!(
             "postgresql://{}:{}@{}:{}/{}?sslmode={}&connect_timeout={}&options=-c statement_timeout={}",
-            user, password, host, port, database, ssl_mode, connection_timeout, statement_timeout * 1000
+            super::url_encode(&user), super::url_encode(&password),
+            super::url_encode(&host), port,
+            super::url_encode(&database), ssl_mode, connection_timeout, statement_timeout * 1000
         );
 
         Ok(Self {

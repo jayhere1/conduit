@@ -98,6 +98,12 @@ pub fn extra_u64(config: &conduit_common::config::ConnectionConfig, key: &str) -
     config.extra.get(key).and_then(|v| v.as_u64())
 }
 
+/// Percent-encode a string for safe use in a connection URL.
+/// Encodes characters that are special in URIs (@, /, ?, #, &, :, etc.).
+pub fn url_encode(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
 /// Helper: extract a bool from the extra config map.
 pub fn extra_bool(config: &conduit_common::config::ConnectionConfig, key: &str) -> Option<bool> {
     config.extra.get(key).and_then(|v| v.as_bool())
