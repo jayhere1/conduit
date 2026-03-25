@@ -279,8 +279,18 @@ impl SqlProvider for SqliteProvider {
     ) -> Result<Vec<ColumnInfo>, ProviderError> {
         let pool = self.ensure_pool().await?;
 
+        // PRAGMA doesn't support parameterized queries, so sanitize the
+        // table name to prevent SQL injection. Only allow alphanumeric,
+        // underscores, and dots (for schema.table).
+        if !table.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+            return Err(ProviderError::InvalidConfig {
+                connection: self.name.clone(),
+                reason: format!("Invalid table name: {}", table),
+            });
+        }
+
         let rows: Vec<(i32, String, String, bool, Option<String>, i32)> = sqlx::query_as(
-            &format!("PRAGMA table_info({})", table),
+            &format!("PRAGMA table_info(\"{}\")", table),
         )
         .fetch_all(pool)
         .await

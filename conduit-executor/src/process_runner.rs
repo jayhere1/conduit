@@ -350,28 +350,25 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
             TaskType::Sensor { sensor_type, poke_interval } => {
                 let interval = poke_interval.as_deref().unwrap_or("30s");
 
+                // Sensor scripts use environment variables instead of shell
+                // interpolation to prevent command injection. User-controlled
+                // params are passed as CONDUIT_SENSOR_* env vars.
                 let script = match sensor_type.as_str() {
                     "file" => {
-                        let filepath = context.params.get("filepath").cloned().unwrap_or_default();
-                        format!(
-                            "test -f \"{}\" && echo 'CONDUIT::LOG::INFO::File found' && exit 0 || exit 1",
-                            filepath
-                        )
+                        // $CONDUIT_SENSOR_FILEPATH is set via env, never interpolated
+                        r#"test -f "$CONDUIT_SENSOR_FILEPATH" && echo 'CONDUIT::LOG::INFO::File found' && exit 0 || exit 1"#.to_string()
                     }
                     "http" => {
-                        let url = context.params.get("url").cloned().unwrap_or_default();
-                        format!(
-                            "curl -sf \"{}\" > /dev/null && echo 'CONDUIT::LOG::INFO::Endpoint ready' && exit 0 || exit 1",
-                            url
-                        )
+                        // $CONDUIT_SENSOR_URL is set via env, never interpolated
+                        r#"curl -sf "$CONDUIT_SENSOR_URL" > /dev/null && echo 'CONDUIT::LOG::INFO::Endpoint ready' && exit 0 || exit 1"#.to_string()
                     }
                     "sql" => {
-                        let query = context.params.get("query").cloned().unwrap_or_default();
-                        let connection = context.params.get("connection").cloned().unwrap_or_default();
-                        format!(
-                            "echo 'CONDUIT::LOG::INFO::SQL sensor check on connection {}' && echo 'CONDUIT::LOG::INFO::Query: {}' && exit 0",
-                            connection, query
-                        )
+                        // SQL sensor: the query must return at least one row for
+                        // the condition to be met. Without a native provider
+                        // connection, we can't execute the query from bash, so
+                        // we fail with a clear message directing users to
+                        // configure a provider connection for native execution.
+                        r#"echo 'CONDUIT::LOG::ERROR::SQL sensor requires a native provider connection. Configure the connection in conduit.yaml.' && exit 1"#.to_string()
                     }
                     _ => {
                         match context.params.get("command") {
@@ -392,6 +389,19 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
                 Self::inject_context_env(&mut cmd, context);
                 cmd.env("CONDUIT_SENSOR_TYPE", sensor_type)
                     .env("CONDUIT_POKE_INTERVAL", interval);
+                // Pass user params as env vars (safe from shell injection)
+                if let Some(v) = context.params.get("filepath") {
+                    cmd.env("CONDUIT_SENSOR_FILEPATH", v);
+                }
+                if let Some(v) = context.params.get("url") {
+                    cmd.env("CONDUIT_SENSOR_URL", v);
+                }
+                if let Some(v) = context.params.get("query") {
+                    cmd.env("CONDUIT_SENSOR_QUERY", v);
+                }
+                if let Some(v) = context.params.get("connection") {
+                    cmd.env("CONDUIT_SENSOR_CONNECTION", v);
+                }
                 cmd.arg("-c").arg(script);
                 Ok(cmd)
             }
