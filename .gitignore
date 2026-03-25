@@ -20,6 +20,9 @@ conduit-vscode/*.vsix
 # Secrets
 .env
 
+# Test artifacts
+**/testdb
+
 # Logs & temp
 /logs
 /benchmarks
