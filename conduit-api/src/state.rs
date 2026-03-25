@@ -223,8 +223,8 @@ impl AppState {
                 .collect();
 
             self.record_run(DagRunInfo {
-                run_id: format!("run_ecom_{}", (now - Duration::days(day)).format("%Y%m%d_050000")),
-                dag_id: "ecommerce_analytics".to_string(),
+                run_id: format!("run_wh_{}", (now - Duration::days(day)).format("%Y%m%d_050000")),
+                dag_id: "daily_warehouse_refresh".to_string(),
                 status: status.to_string(),
                 started_at: started,
                 finished_at: ended,
@@ -250,8 +250,8 @@ impl AppState {
                 .collect();
 
             self.record_run(DagRunInfo {
-                run_id: format!("run_saas_{}", (now - Duration::days(month * 30 + 1)).format("%Y%m%d_040000")),
-                dag_id: "saas_metrics".to_string(),
+                run_id: format!("run_mkt_{}", (now - Duration::days(month * 30 + 1)).format("%Y%m%d_040000")),
+                dag_id: "weekly_marketing_report".to_string(),
                 status: "success".to_string(),
                 started_at: started,
                 finished_at: Some(started + Duration::hours(1) + Duration::minutes(23)),
@@ -302,7 +302,7 @@ impl AppState {
 
             self.record_run(DagRunInfo {
                 run_id: format!("run_ml_{}", (now - Duration::days(day)).format("%Y%m%d_020000")),
-                dag_id: "ml_feature_pipeline".to_string(),
+                dag_id: "daily_model_training".to_string(),
                 status: status.to_string(),
                 started_at: started,
                 finished_at: ended,
@@ -324,8 +324,8 @@ impl AppState {
                 .collect();
 
             self.record_run(DagRunInfo {
-                run_id: format!("run_etl_{}", (now - Duration::days(day)).format("%Y%m%d_060000")),
-                dag_id: "daily_etl".to_string(),
+                run_id: format!("run_demo_{}", (now - Duration::days(day)).format("%Y%m%d_060000")),
+                dag_id: "demo_pipeline".to_string(),
                 status: "success".to_string(),
                 started_at: started,
                 finished_at: Some(started + Duration::minutes(28 + day * 3)),

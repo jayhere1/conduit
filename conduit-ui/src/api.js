@@ -80,6 +80,8 @@ function normalizeDAG(dag) {
     sourceFile: dag.sourceFile || dag.source_file,
     maxActiveRuns: dag.maxActiveRuns || dag.max_active_runs,
     executionOrder: dag.executionOrder || dag.execution_order || [],
+    lastRunStatus: dag.lastRunStatus || dag.last_run_status || null,
+    lastRunAt: dag.lastRunAt || dag.last_run_at || null,
     tasks: (dag.tasks || []).map((task) => ({
       id: task.id,
       name: task.name || task.id,
@@ -95,7 +97,38 @@ function normalizeDAG(dag) {
   };
 }
 
-export const listDags = () => get('/dags').then((r) => (r.dags || []).map(normalizeDAG));
+/**
+ * Enrich DAGs with last-run data by cross-referencing recent runs.
+ */
+async function enrichDagsWithRuns(dags) {
+  try {
+    const runs = await get('/runs').then((r) => r.runs || []).catch(() => []);
+    // Group runs by dag_id, pick the most recent
+    const latestByDag = {};
+    for (const run of runs) {
+      const dagId = run.dag_id || run.dagId;
+      const startedAt = run.started_at || run.startedAt;
+      if (!latestByDag[dagId] || startedAt > latestByDag[dagId].startedAt) {
+        latestByDag[dagId] = { status: run.status, startedAt };
+      }
+    }
+    return dags.map((dag) => {
+      const latest = latestByDag[dag.id];
+      if (latest) {
+        dag.lastRunStatus = latest.status;
+        dag.lastRunAt = latest.startedAt;
+      }
+      return dag;
+    });
+  } catch {
+    return dags;
+  }
+}
+
+export const listDags = () =>
+  get('/dags')
+    .then((r) => (r.dags || []).map(normalizeDAG))
+    .then(enrichDagsWithRuns);
 export const getDag = (dagId) => get(`/dags/${dagId}`).then(normalizeDAG);
 export const getDagGraph = (dagId) => get(`/dags/${dagId}/graph`);
 export const compileDags = () => post('/dags/compile');

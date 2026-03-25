@@ -137,9 +137,9 @@ export default function DagList() {
                 ? 'bg-red-500/20'
                 : 'bg-gray-500/20';
               const statusDot = dag.lastRunStatus === 'success'
-                ? 'bg-emerald-500'
+                ? 'bg-emerald-500 shadow-emerald-500/50 shadow-sm'
                 : dag.lastRunStatus === 'failed'
-                ? 'bg-red-500'
+                ? 'bg-red-500 animate-pulse shadow-red-500/50 shadow-sm'
                 : 'bg-gray-500';
 
               return (
