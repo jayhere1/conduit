@@ -1,32 +1,68 @@
-//! Snapshot storage and fingerprint-based lookup.
+//! Snapshot storage and fingerprint-based lookup backed by RocksDB.
 //!
 //! Snapshots are the immutable outputs of task executions.
 //! The snapshot store enables fingerprint-based reuse: if a task's
 //! fingerprint matches an existing snapshot, execution is skipped.
+//!
+//! Uses two RocksDB column families:
+//! - `snapshots`: snapshot_id -> serialized Snapshot
+//! - `fingerprint_idx`: fingerprint hex -> snapshot_id
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::RwLock;
+use std::path::{Path, PathBuf};
 
 use conduit_common::error::{ConduitError, ConduitResult};
 use conduit_common::fingerprint::Fingerprint;
 use conduit_common::snapshot::{Snapshot, SnapshotId};
+use rocksdb::{ColumnFamilyDescriptor, Options, DB};
+use tracing::info;
 
-/// In-memory snapshot store (v0.1). Will be backed by RocksDB in v0.2.
+const CF_SNAPSHOTS: &str = "snapshots";
+const CF_FINGERPRINT_IDX: &str = "fingerprint_idx";
+
+/// Snapshot store backed by RocksDB with fingerprint-based lookup.
 pub struct SnapshotStore {
-    /// Snapshots by ID.
-    snapshots: RwLock<HashMap<SnapshotId, Snapshot>>,
-    /// Index: fingerprint -> snapshot ID (for reuse lookups).
-    fingerprint_index: RwLock<HashMap<Fingerprint, SnapshotId>>,
+    db: DB,
+    /// When set, this temporary directory is cleaned up on drop.
+    temp_dir: Option<PathBuf>,
+}
+
+impl Drop for SnapshotStore {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.temp_dir {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 impl SnapshotStore {
-    /// Create a new empty snapshot store.
+    /// Create a new snapshot store using a temporary directory.
+    /// Useful for tests and ephemeral usage. The directory is cleaned up on drop.
     pub fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("conduit-snapshots-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("failed to create temp dir for SnapshotStore");
+        let db = Self::open_db(&dir)
+            .expect("failed to open RocksDB in temp dir for SnapshotStore");
         Self {
-            snapshots: RwLock::new(HashMap::new()),
-            fingerprint_index: RwLock::new(HashMap::new()),
+            db,
+            temp_dir: Some(dir),
         }
+    }
+
+    /// Open or create a snapshot store at the given directory path.
+    pub fn open(path: &Path) -> ConduitResult<Self> {
+        let db = Self::open_db(path)?;
+        let store = Self {
+            db,
+            temp_dir: None,
+        };
+
+        info!(
+            path = %path.display(),
+            count = store.count(),
+            "Snapshot store opened"
+        );
+
+        Ok(store)
     }
 
     /// Store a snapshot. Returns the snapshot ID.
@@ -34,116 +70,139 @@ impl SnapshotStore {
         let id = snapshot.id.clone();
         let fingerprint = snapshot.fingerprint.clone();
 
-        self.snapshots
-            .write()
-            .map_err(|e| ConduitError::EventStoreError(format!("Lock error: {}", e)))?
-            .insert(id.clone(), snapshot);
+        let value = serde_json::to_vec(&snapshot)?;
 
-        self.fingerprint_index
-            .write()
-            .map_err(|e| ConduitError::EventStoreError(format!("Lock error: {}", e)))?
-            .insert(fingerprint, id.clone());
+        let cf_snapshots = self.cf_snapshots();
+        let cf_fp_idx = self.cf_fingerprint_idx();
+
+        self.db
+            .put_cf(cf_snapshots, id.as_bytes(), &value)
+            .map_err(|e| {
+                ConduitError::EventStoreError(format!("Failed to put snapshot {}: {}", id, e))
+            })?;
+
+        self.db
+            .put_cf(cf_fp_idx, fingerprint.0.as_bytes(), id.as_bytes())
+            .map_err(|e| {
+                ConduitError::EventStoreError(format!(
+                    "Failed to put fingerprint index for {}: {}",
+                    id, e
+                ))
+            })?;
 
         Ok(id)
     }
 
     /// Get a snapshot by ID.
     pub fn get(&self, id: &str) -> ConduitResult<Option<Snapshot>> {
-        Ok(self
-            .snapshots
-            .read()
-            .map_err(|e| ConduitError::EventStoreError(format!("Lock error: {}", e)))?
-            .get(id)
-            .cloned())
+        let cf = self.cf_snapshots();
+        match self.db.get_cf(cf, id.as_bytes()) {
+            Ok(Some(value)) => {
+                let snapshot: Snapshot = serde_json::from_slice(&value)?;
+                Ok(Some(snapshot))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(ConduitError::EventStoreError(format!(
+                "Failed to read snapshot {}: {}",
+                id, e
+            ))),
+        }
     }
 
     /// Look up a snapshot by fingerprint.
     /// This is the key operation for snapshot reuse: if a matching fingerprint exists,
     /// the task can be skipped entirely.
     pub fn find_by_fingerprint(&self, fingerprint: &Fingerprint) -> ConduitResult<Option<Snapshot>> {
-        let index = self
-            .fingerprint_index
-            .read()
-            .map_err(|e| ConduitError::EventStoreError(format!("Lock error: {}", e)))?;
-
-        if let Some(id) = index.get(fingerprint) {
-            return self.get(id);
+        let cf = self.cf_fingerprint_idx();
+        match self.db.get_cf(cf, fingerprint.0.as_bytes()) {
+            Ok(Some(id_bytes)) => {
+                let id = String::from_utf8(id_bytes.to_vec()).map_err(|e| {
+                    ConduitError::EventStoreError(format!(
+                        "Invalid UTF-8 in fingerprint index: {}",
+                        e
+                    ))
+                })?;
+                self.get(&id)
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(ConduitError::EventStoreError(format!(
+                "Failed to read fingerprint index: {}",
+                e
+            ))),
         }
-
-        Ok(None)
     }
 
     /// Check if a snapshot with this fingerprint exists (without loading it).
     pub fn has_fingerprint(&self, fingerprint: &Fingerprint) -> bool {
-        self.fingerprint_index
-            .read()
-            .map(|idx| idx.contains_key(fingerprint))
-            .unwrap_or(false)
+        let cf = self.cf_fingerprint_idx();
+        self.db
+            .get_cf(cf, fingerprint.0.as_bytes())
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     /// Get the total number of stored snapshots.
     pub fn count(&self) -> usize {
-        self.snapshots.read().map(|s| s.len()).unwrap_or(0)
+        let cf = self.cf_snapshots();
+        let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+        let mut count = 0usize;
+        for item in iter {
+            if item.is_ok() {
+                count += 1;
+            }
+        }
+        count
     }
 
-    /// Return all snapshots as a Vec (for serialization).
+    /// Return all snapshots as a Vec.
     pub fn list_all(&self) -> ConduitResult<Vec<Snapshot>> {
-        Ok(self
-            .snapshots
-            .read()
-            .map_err(|e| ConduitError::EventStoreError(format!("Lock error: {}", e)))?
-            .values()
-            .cloned()
-            .collect())
-    }
+        let cf = self.cf_snapshots();
+        let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+        let mut snapshots = Vec::new();
 
-    /// Load snapshots from a JSON file on disk.
-    ///
-    /// The file should contain a JSON array of `Snapshot` objects
-    /// (as produced by `save_to_file`). Both the snapshots map and
-    /// the fingerprint index are rebuilt from the loaded data.
-    pub fn from_file(path: &Path) -> ConduitResult<Self> {
-        let data = std::fs::read_to_string(path).map_err(|e| {
-            ConduitError::ConfigError(format!("Failed to read snapshots file: {}", e))
-        })?;
-
-        let snaps: Vec<Snapshot> = serde_json::from_str(&data).map_err(|e| {
-            ConduitError::ConfigError(format!("Failed to parse snapshots file: {}", e))
-        })?;
-
-        let mut snapshots = HashMap::new();
-        let mut fingerprint_index = HashMap::new();
-
-        for snap in snaps {
-            fingerprint_index.insert(snap.fingerprint.clone(), snap.id.clone());
-            snapshots.insert(snap.id.clone(), snap);
+        for item in iter {
+            let (_key, value) = item.map_err(|e| {
+                ConduitError::EventStoreError(format!("Iterator error: {}", e))
+            })?;
+            let snapshot: Snapshot = serde_json::from_slice(&value)?;
+            snapshots.push(snapshot);
         }
 
-        tracing::info!(
-            count = snapshots.len(),
-            "Loaded snapshots from {}",
-            path.display()
-        );
+        Ok(snapshots)
+    }
 
-        Ok(Self {
-            snapshots: RwLock::new(snapshots),
-            fingerprint_index: RwLock::new(fingerprint_index),
+    // ─── Internal helpers ───────────────────────────────────────────────
+
+    fn open_db(path: &Path) -> ConduitResult<DB> {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+
+        let cf_descriptors = vec![
+            ColumnFamilyDescriptor::new(CF_SNAPSHOTS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_FINGERPRINT_IDX, Options::default()),
+        ];
+
+        DB::open_cf_descriptors(&opts, path, cf_descriptors).map_err(|e| {
+            ConduitError::EventStoreError(format!(
+                "Failed to open RocksDB at {}: {}",
+                path.display(),
+                e
+            ))
         })
     }
 
-    /// Save all snapshots to a JSON file on disk.
-    pub fn save_to_file(&self, path: &Path) -> ConduitResult<()> {
-        let snaps = self.list_all()?;
-        let data = serde_json::to_string_pretty(&snaps)?;
-        std::fs::write(path, data).map_err(|e| {
-            ConduitError::ConfigError(format!("Failed to write snapshots file: {}", e))
-        })?;
-        tracing::info!(
-            count = snaps.len(),
-            "Saved snapshots to {}",
-            path.display()
-        );
-        Ok(())
+    fn cf_snapshots(&self) -> &rocksdb::ColumnFamily {
+        self.db
+            .cf_handle(CF_SNAPSHOTS)
+            .expect("snapshots column family missing")
+    }
+
+    fn cf_fingerprint_idx(&self) -> &rocksdb::ColumnFamily {
+        self.db
+            .cf_handle(CF_FINGERPRINT_IDX)
+            .expect("fingerprint_idx column family missing")
     }
 }
 
@@ -157,6 +216,7 @@ impl Default for SnapshotStore {
 mod tests {
     use super::*;
     use conduit_common::fingerprint::Fingerprint;
+    use std::collections::HashMap;
 
     fn make_snapshot(id: &str, fp: &str) -> Snapshot {
         Snapshot {
@@ -192,28 +252,22 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_from_file() {
+    fn persistence_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("snapshots.json");
+        let path = dir.path().join("snapshot_db");
 
-        // Create and populate a store
-        let store = SnapshotStore::new();
-        store.put(make_snapshot("snap_001", "abc123")).unwrap();
-        store.put(make_snapshot("snap_002", "def456")).unwrap();
+        {
+            let store = SnapshotStore::open(&path).unwrap();
+            store.put(make_snapshot("snap_001", "abc123")).unwrap();
+            store.put(make_snapshot("snap_002", "def456")).unwrap();
+        }
 
-        // Save to disk
-        store.save_to_file(&path).unwrap();
-        assert!(path.exists());
-
-        // Load from disk
-        let loaded = SnapshotStore::from_file(&path).unwrap();
+        let loaded = SnapshotStore::open(&path).unwrap();
         assert_eq!(loaded.count(), 2);
 
-        // Verify data integrity
         let snap = loaded.get("snap_001").unwrap().unwrap();
         assert_eq!(snap.id, "snap_001");
 
-        // Verify fingerprint index was rebuilt
         let found = loaded
             .find_by_fingerprint(&Fingerprint::from_hex("def456"))
             .unwrap();
@@ -238,5 +292,33 @@ mod tests {
             .find_by_fingerprint(&Fingerprint::from_hex("xyz789"))
             .unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn has_fingerprint_check() {
+        let store = SnapshotStore::new();
+        store.put(make_snapshot("snap_001", "abc123")).unwrap();
+
+        assert!(store.has_fingerprint(&Fingerprint::from_hex("abc123")));
+        assert!(!store.has_fingerprint(&Fingerprint::from_hex("xyz789")));
+    }
+
+    #[test]
+    fn count_tracks_entries() {
+        let store = SnapshotStore::new();
+        assert_eq!(store.count(), 0);
+
+        store.put(make_snapshot("snap_001", "abc123")).unwrap();
+        assert_eq!(store.count(), 1);
+
+        store.put(make_snapshot("snap_002", "def456")).unwrap();
+        assert_eq!(store.count(), 2);
+    }
+
+    #[test]
+    fn default_creates_working_store() {
+        let store = SnapshotStore::default();
+        store.put(make_snapshot("snap_001", "abc123")).unwrap();
+        assert_eq!(store.count(), 1);
     }
 }

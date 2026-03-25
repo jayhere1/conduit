@@ -22,6 +22,9 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{Column, PgPool, Row};
+use tokio::sync::OnceCell;
 
 use crate::errors::ProviderError;
 use crate::traits::*;
@@ -39,6 +42,7 @@ pub struct PostgresProvider {
     connection_timeout: u64,
     statement_timeout: u64,
     connection_string: String,
+    pool: OnceCell<PgPool>,
 }
 
 impl PostgresProvider {
@@ -52,7 +56,6 @@ impl PostgresProvider {
         let connection_timeout = extra_u64(config, "connection_timeout").unwrap_or(30);
         let statement_timeout = extra_u64(config, "statement_timeout").unwrap_or(3600);
 
-        // Resolve password from credential reference
         let password = config
             .credentials
             .as_deref()
@@ -76,6 +79,7 @@ impl PostgresProvider {
             connection_timeout,
             statement_timeout,
             connection_string,
+            pool: OnceCell::new(),
         })
     }
 
@@ -88,6 +92,56 @@ impl PostgresProvider {
     pub fn schema(&self) -> &str {
         &self.schema
     }
+
+    /// Lazily initialize the connection pool on first use.
+    async fn ensure_pool(&self) -> Result<&PgPool, ProviderError> {
+        self.pool
+            .get_or_try_init(|| async {
+                PgPoolOptions::new()
+                    .max_connections(5)
+                    .acquire_timeout(std::time::Duration::from_secs(self.connection_timeout))
+                    .connect(&self.connection_string)
+                    .await
+                    .map_err(|e| ProviderError::ConnectionFailed {
+                        name: self.name.clone(),
+                        reason: e.to_string(),
+                    })
+            })
+            .await
+    }
+}
+
+/// Convert a sqlx PgRow column value to serde_json::Value.
+fn pg_value_to_json(row: &sqlx::postgres::PgRow, idx: usize) -> serde_json::Value {
+    if let Ok(v) = row.try_get::<i64, _>(idx) {
+        return serde_json::Value::Number(v.into());
+    }
+    if let Ok(v) = row.try_get::<i32, _>(idx) {
+        return serde_json::Value::Number(v.into());
+    }
+    if let Ok(v) = row.try_get::<i16, _>(idx) {
+        return serde_json::Value::Number(v.into());
+    }
+    if let Ok(v) = row.try_get::<f64, _>(idx) {
+        return serde_json::Number::from_f64(v)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+    }
+    if let Ok(v) = row.try_get::<f32, _>(idx) {
+        return serde_json::Number::from_f64(v as f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+    }
+    if let Ok(v) = row.try_get::<bool, _>(idx) {
+        return serde_json::Value::Bool(v);
+    }
+    if let Ok(v) = row.try_get::<String, _>(idx) {
+        return serde_json::Value::String(v);
+    }
+    if let Ok(None) = row.try_get::<Option<String>, _>(idx) {
+        return serde_json::Value::Null;
+    }
+    serde_json::Value::Null
 }
 
 #[async_trait]
@@ -109,23 +163,39 @@ impl Provider for PostgresProvider {
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
         let start = std::time::Instant::now();
+        let pool = self.ensure_pool().await?;
 
-        // In production, this would use sqlx::PgPool::connect()
-        // For now, validate config and report readiness
+        let _: (i32,) = sqlx::query_as("SELECT 1")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| ProviderError::ConnectionFailed {
+                name: self.name.clone(),
+                reason: e.to_string(),
+            })?;
+
         let latency = start.elapsed().as_millis() as u64;
+
+        let server_version: Option<String> = sqlx::query_as("SHOW server_version")
+            .fetch_one(pool)
+            .await
+            .map(|(v,): (String,)| Some(v))
+            .unwrap_or(None);
 
         Ok(ConnectionTestResult {
             success: true,
             message: format!(
-                "PostgreSQL connection configured: {}@{}:{}/{}",
+                "PostgreSQL connection OK: {}@{}:{}/{}",
                 self.user, self.host, self.port, self.database
             ),
             latency_ms: latency,
-            server_version: None,
+            server_version,
         })
     }
 
     async fn close(&self) -> Result<(), ProviderError> {
+        if let Some(pool) = self.pool.get() {
+            pool.close().await;
+        }
         Ok(())
     }
 }
@@ -138,46 +208,157 @@ impl SqlProvider for PostgresProvider {
         _params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
         let start = std::time::Instant::now();
+        let pool = self.ensure_pool().await?;
 
-        // In production: connect to PG, execute query, collect results
-        // For now: return structured metadata about what would happen
-        let execution_time = start.elapsed().as_millis() as u64;
-
-        let mut result = SqlResult::empty();
-        result.execution_time_ms = execution_time;
-
-        // Detect query type for accurate metrics
         let query_upper = query.trim().to_uppercase();
-        if query_upper.starts_with("SELECT") || query_upper.starts_with("WITH") {
-            result.rows_returned = Some(0);
-            result.metrics.insert("query_type".to_string(), 0.0); // 0 = SELECT
-        } else if query_upper.starts_with("INSERT") {
-            result.metrics.insert("query_type".to_string(), 1.0); // 1 = INSERT
-        } else if query_upper.starts_with("UPDATE") {
-            result.metrics.insert("query_type".to_string(), 2.0); // 2 = UPDATE
-        } else if query_upper.starts_with("DELETE") {
-            result.metrics.insert("query_type".to_string(), 3.0); // 3 = DELETE
+        let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
+
+        if is_select {
+            let rows = sqlx::query(query)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
+                    connection: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+            let execution_time = start.elapsed().as_millis() as u64;
+
+            let columns: Vec<String> = if let Some(first) = rows.first() {
+                first.columns().iter().map(|c| c.name().to_string()).collect()
+            } else {
+                Vec::new()
+            };
+
+            let total_rows = rows.len() as u64;
+            let sample_limit = 100.min(rows.len());
+            let sample_rows: Vec<Vec<serde_json::Value>> = rows[..sample_limit]
+                .iter()
+                .map(|row| {
+                    (0..row.columns().len())
+                        .map(|idx| pg_value_to_json(row, idx))
+                        .collect()
+                })
+                .collect();
+
+            let mut metrics = HashMap::new();
+            metrics.insert("query_type".to_string(), 0.0);
+            metrics.insert("execution_time_ms".to_string(), execution_time as f64);
+
+            Ok(SqlResult {
+                rows_affected: 0,
+                rows_returned: Some(total_rows),
+                execution_time_ms: execution_time,
+                columns,
+                sample_rows,
+                metrics,
+            })
+        } else {
+            let result = sqlx::query(query)
+                .execute(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
+                    connection: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+            let execution_time = start.elapsed().as_millis() as u64;
+
+            let mut metrics = HashMap::new();
+            if query_upper.starts_with("INSERT") {
+                metrics.insert("query_type".to_string(), 1.0);
+            } else if query_upper.starts_with("UPDATE") {
+                metrics.insert("query_type".to_string(), 2.0);
+            } else if query_upper.starts_with("DELETE") {
+                metrics.insert("query_type".to_string(), 3.0);
+            }
+            metrics.insert("execution_time_ms".to_string(), execution_time as f64);
+
+            Ok(SqlResult {
+                rows_affected: result.rows_affected(),
+                rows_returned: None,
+                execution_time_ms: execution_time,
+                columns: Vec::new(),
+                sample_rows: Vec::new(),
+                metrics,
+            })
         }
-
-        result.metrics.insert("execution_time_ms".to_string(), execution_time as f64);
-
-        Ok(result)
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
-        Ok(vec![
-            self.schema.clone(),
-            "information_schema".to_string(),
-            "pg_catalog".to_string(),
-        ])
+        let pool = self.ensure_pool().await?;
+
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT schema_name FROM information_schema.schemata ORDER BY schema_name")
+                .fetch_all(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
+                    connection: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+        Ok(rows.into_iter().map(|(s,)| s).collect())
     }
 
     async fn describe_table(
         &self,
-        _schema: &str,
-        _table: &str,
+        schema: &str,
+        table: &str,
     ) -> Result<Vec<ColumnInfo>, ProviderError> {
-        // In production: query information_schema.columns
-        Ok(vec![])
+        let pool = self.ensure_pool().await?;
+
+        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT
+                c.column_name,
+                c.data_type,
+                c.is_nullable,
+                c.column_default
+            FROM information_schema.columns c
+            WHERE c.table_schema = $1
+              AND c.table_name = $2
+            ORDER BY c.ordinal_position
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| ProviderError::QueryFailed {
+            connection: self.name.clone(),
+            reason: e.to_string(),
+        })?;
+
+        let pk_rows: Vec<(String,)> = sqlx::query_as(
+            r#"
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema = kcu.table_schema
+            WHERE tc.constraint_type = 'PRIMARY KEY'
+              AND tc.table_schema = $1
+              AND tc.table_name = $2
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let pk_columns: std::collections::HashSet<String> =
+            pk_rows.into_iter().map(|(s,)| s).collect();
+
+        Ok(rows
+            .into_iter()
+            .map(|(name, data_type, is_nullable, default_value)| ColumnInfo {
+                is_primary_key: pk_columns.contains(&name),
+                name,
+                data_type,
+                is_nullable: is_nullable == "YES",
+                default_value,
+            })
+            .collect())
     }
 }
