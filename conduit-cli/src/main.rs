@@ -1251,51 +1251,57 @@ async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathB
                             params: HashMap::new(),
                         };
 
-                        let task_start = Instant::now();
-                        match ProcessRunner::run(&task, &context).await {
-                            Ok(output) => {
-                                let duration = task_start.elapsed();
-                                if output.exit_code == 0 {
-                                    update_run_task_state(&exec_state, &run_id, &task_id, "success");
-                                    exec_state.broadcast_event(&serde_json::json!({
-                                        "type": "task_state_changed",
-                                        "dagId": dag_id, "runId": run_id,
-                                        "taskId": task_id, "state": "success",
-                                        "durationMs": duration.as_millis() as u64,
-                                    }).to_string());
-                                    let _ = exec_event_tx.send(SchedulerEvent::TaskCompleted {
-                                        dag_id, run_id, task_id,
-                                        snapshot_id: None,
-                                        duration_ms: duration.as_millis() as u64,
-                                    });
-                                } else {
-                                    let err = output.stderr.trim().to_string();
-                                    update_run_task_state(&exec_state, &run_id, &task_id, "failed");
-                                    exec_state.broadcast_event(&serde_json::json!({
+                        // Spawn each task so independent tasks run concurrently
+                        // instead of blocking the command dispatch loop.
+                        let spawn_state = exec_state.clone();
+                        let spawn_event_tx = exec_event_tx.clone();
+                        tokio::spawn(async move {
+                            let task_start = Instant::now();
+                            match ProcessRunner::run(&task, &context).await {
+                                Ok(output) => {
+                                    let duration = task_start.elapsed();
+                                    if output.exit_code == 0 {
+                                        update_run_task_state(&spawn_state, &run_id, &task_id, "success");
+                                        spawn_state.broadcast_event(&serde_json::json!({
+                                            "type": "task_state_changed",
+                                            "dagId": dag_id, "runId": run_id,
+                                            "taskId": task_id, "state": "success",
+                                            "durationMs": duration.as_millis() as u64,
+                                        }).to_string());
+                                        let _ = spawn_event_tx.send(SchedulerEvent::TaskCompleted {
+                                            dag_id, run_id, task_id,
+                                            snapshot_id: None,
+                                            duration_ms: duration.as_millis() as u64,
+                                        });
+                                    } else {
+                                        let err = output.stderr.trim().to_string();
+                                        update_run_task_state(&spawn_state, &run_id, &task_id, "failed");
+                                        spawn_state.broadcast_event(&serde_json::json!({
+                                            "type": "task_state_changed",
+                                            "dagId": dag_id, "runId": run_id,
+                                            "taskId": task_id, "state": "failed",
+                                            "error": err,
+                                        }).to_string());
+                                        let _ = spawn_event_tx.send(SchedulerEvent::TaskFailed {
+                                            dag_id, run_id, task_id, error: err, attempt,
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    update_run_task_state(&spawn_state, &run_id, &task_id, "failed");
+                                    spawn_state.broadcast_event(&serde_json::json!({
                                         "type": "task_state_changed",
                                         "dagId": dag_id, "runId": run_id,
                                         "taskId": task_id, "state": "failed",
-                                        "error": err,
+                                        "error": e.to_string(),
                                     }).to_string());
-                                    let _ = exec_event_tx.send(SchedulerEvent::TaskFailed {
-                                        dag_id, run_id, task_id, error: err, attempt,
+                                    let _ = spawn_event_tx.send(SchedulerEvent::TaskFailed {
+                                        dag_id, run_id, task_id,
+                                        error: e.to_string(), attempt,
                                     });
                                 }
                             }
-                            Err(e) => {
-                                update_run_task_state(&exec_state, &run_id, &task_id, "failed");
-                                exec_state.broadcast_event(&serde_json::json!({
-                                    "type": "task_state_changed",
-                                    "dagId": dag_id, "runId": run_id,
-                                    "taskId": task_id, "state": "failed",
-                                    "error": e.to_string(),
-                                }).to_string());
-                                let _ = exec_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id, run_id, task_id,
-                                    error: e.to_string(), attempt,
-                                });
-                            }
-                        }
+                        });
                     }
                     SchedulerCommand::CompleteDagRun { dag_id, run_id, status } => {
                         let status_str = match status {

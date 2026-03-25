@@ -98,10 +98,28 @@ pub fn extra_u64(config: &conduit_common::config::ConnectionConfig, key: &str) -
     config.extra.get(key).and_then(|v| v.as_u64())
 }
 
-/// Percent-encode a string for safe use in a connection URL.
-/// Encodes characters that are special in URIs (@, /, ?, #, &, :, etc.).
-pub fn url_encode(s: &str) -> String {
-    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+/// Percent-encode user credentials (user, password) for connection URLs.
+/// Uses USERINFO encoding which encodes @, :, /, ?, #, etc. but preserves
+/// unreserved characters (alphanumeric, -, ., _, ~).
+pub fn url_encode_credential(s: &str) -> String {
+    /// Encodes everything except RFC 3986 unreserved characters and sub-delims
+    /// that are safe in the userinfo component. This encodes @, :, /, ?, #, &
+    /// which would break URL parsing, while preserving -, ., _, ~ which are safe.
+    const USERINFO: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'/')
+        .add(b':')
+        .add(b'?')
+        .add(b'@')
+        .add(b'[')
+        .add(b']')
+        .add(b'&')
+        .add(b'=')
+        .add(b'+');
+    percent_encoding::utf8_percent_encode(s, USERINFO).to_string()
 }
 
 /// Helper: extract a bool from the extra config map.
