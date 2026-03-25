@@ -52,7 +52,7 @@ Health check.
 ```json
 {
   "status": "healthy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "uptime_ms": 123456,
   "state_store": "connected",
   "scheduler": "running"
@@ -160,15 +160,14 @@ Recompile a DAG.
 
 ### POST /dags/{dag_id}/run
 
-Start a new DAG run.
+Start a new DAG run. The run is dispatched to the scheduler which coordinates task execution via the executor. Task state changes are broadcast over WebSocket in real-time.
 
 **Request:**
 
 ```json
 {
-  "env": "production",
-  "timeout_seconds": 3600,
-  "skip_tasks": ["load"]
+  "logical_date": "2024-03-22T14:00:00Z",
+  "config": { "batch_size": 1000 }
 }
 ```
 
@@ -176,13 +175,19 @@ Start a new DAG run.
 
 ```json
 {
-  "run_id": "run_abc123def456",
-  "dag_id": "daily_etl",
-  "status": "scheduled",
-  "started_at": "2024-03-22T14:32:10Z",
-  "created_at": "2024-03-22T14:32:10Z"
+  "runId": "run_daily_etl_20240322_143210_123",
+  "dagId": "daily_etl",
+  "status": "dispatched",
+  "taskStates": {
+    "extract": "pending",
+    "transform": "pending",
+    "load": "pending"
+  },
+  "message": "DAG run 'run_daily_etl_20240322_143210_123' dispatched to scheduler (3 tasks)"
 }
 ```
+
+If no scheduler is attached, `status` will be `"queued"` instead of `"dispatched"`.
 
 ### GET /runs
 
@@ -479,7 +484,61 @@ Apply a deployment plan.
 }
 ```
 
-## Lineage Endpoints (Phase 4)
+## Lineage Endpoints
+
+### POST /lineage/sql
+
+Analyze SQL for column-level lineage. Optionally provide inline table schemas for bare column resolution and wildcard expansion.
+
+**Request:**
+
+```json
+{
+  "sql": "SELECT c.id, c.name, SUM(o.amount) as total FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.id, c.name",
+  "dialect": "postgres",
+  "tables": {
+    "customers": ["id", "name", "email", "active"],
+    "orders": ["id", "customer_id", "amount", "status"]
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "columns": [
+    {
+      "output_column": "id",
+      "sources": [{ "table": "customers", "column": "id" }]
+    },
+    {
+      "output_column": "name",
+      "sources": [{ "table": "customers", "column": "name" }]
+    },
+    {
+      "output_column": "total",
+      "sources": [{ "table": "orders", "column": "amount" }],
+      "transform": "Aggregation"
+    }
+  ],
+  "tables_referenced": ["customers", "orders"]
+}
+```
+
+### POST /lineage/catalog/refresh
+
+Refresh the schema catalog by introspecting connected providers.
+
+**Response:**
+
+```json
+{
+  "status": "refreshed",
+  "tables_cataloged": 42,
+  "providers_queried": 3
+}
+```
 
 ### POST /lineage/upstream
 

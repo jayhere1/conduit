@@ -40,13 +40,21 @@ conduit/
   conduit-cli/          Binary entry point (conduit command)
   conduit-common/       Shared types: DAG model, errors, events, fingerprints, snapshots, config
   conduit-compiler/     Tree-sitter DAG parser + Kahn's algorithm dependency resolver + benchmarks
-  conduit-state/        Event store (RocksDB) + snapshot store + environment manager
+  conduit-state/        Event store (RocksDB) + snapshot store (RocksDB) + environment manager
   conduit-scheduler/    Event-driven task scheduling with cron, trigger rules, and pool management
-  conduit-executor/     Process-based task runtime with timeout enforcement and retry policies
+  conduit-executor/     Process-based task runtime with timeout, retry, and sensor polling
   conduit-planner/      Fingerprint diffing, impact analysis, and plan/apply deployment workflow
-  conduit-lineage/      Column-level lineage (Phase 4)
-  conduit-api/          REST + WebSocket API (Phase 2)
-  examples/dags/        Sample DAG definitions (ETL, marketing, ML pipeline)
+  conduit-lineage/      Column-level SQL lineage via sqlparser-rs AST + TableCatalog
+  conduit-providers/    Data source adapters: Postgres, MySQL, SQLite, CockroachDB, Redshift,
+                        TimescaleDB, HTTP/REST, and 26 additional provider stubs
+  conduit-api/          REST + WebSocket API with live run dispatch
+  conduit-distributed/  Distributed executor for multi-node task dispatch
+  conduit-ui/           React web UI (DAG visualization, run monitoring, log streaming)
+  conduit-python/       PyO3 bindings for embedding Conduit in Python
+  conduit-wasm/         WASM plugin sandbox for custom task types
+  conduit-bench/        Criterion benchmarks
+  dags/                 Sample DAG definitions
+  sdk/python/           Python SDK for authoring DAGs
 ```
 
 ## What's Implemented
@@ -55,17 +63,31 @@ conduit/
 Tree-sitter parses Python `@dag`/`@task` definitions **without executing Python**. Extracts schedules, tags, retry policies, pools, timeouts, and data-flow dependencies from call chains. Kahn's algorithm detects cycles, duplicates, and unknown references at compile time. Includes Criterion benchmarks for 10–1,000 DAG workloads.
 
 ### Event-Driven Scheduler (`conduit-scheduler`)
-Fully async tokio-channel scheduler (no database polling). Manages DAG run state machines (Pending → Queued → Running → Success/Failed/Skipped/Retrying). Evaluates trigger rules (AllSuccess, AllDone, OneSuccess, OneFailed, NoDeps), enforces named resource pools, and parses 5-field cron expressions. ~630 lines of real scheduling logic.
+Fully async tokio-channel scheduler (no database polling). Manages DAG run state machines (Pending → Queued → Running → Success/Failed/Skipped/Retrying). Evaluates trigger rules (AllSuccess, AllDone, OneSuccess, OneFailed, NoDeps), enforces named resource pools, and parses 5-field cron expressions.
 
 ### Task Executor (`conduit-executor`)
-Process-isolated task execution with stdin/stdout protocol. Supports Python, Bash, SQL, Sensor, and generic Executable task types. Enforces timeouts via `tokio::time::timeout`, implements fixed and exponential backoff retry policies, and parses structured protocol messages (XCOM, LOG, PROGRESS, METRIC) from task output.
+Process-isolated task execution with stdin/stdout protocol. Supports Python, Bash, SQL, Sensor, and generic Executable task types. Enforces timeouts via `tokio::time::timeout`, implements fixed and exponential backoff retry policies, and parses structured protocol messages (XCOM, LOG, PROGRESS, METRIC) from task output. Sensor tasks poll at configurable `poke_interval` until success or timeout. Tasks are dispatched concurrently via `tokio::spawn`.
+
+### Data Providers (`conduit-providers`)
+7 fully implemented providers with real database/HTTP connections:
+- **SQL**: PostgreSQL, MySQL, SQLite, CockroachDB, TimescaleDB, Redshift (via sqlx connection pools)
+- **HTTP**: REST API provider (via reqwest)
+- 26 additional providers stubbed with the trait interface ready for implementation
+
+All SQL providers use lazy connection pooling, parameterized queries, and percent-encoded credentials.
+
+### SQL Lineage (`conduit-lineage`)
+Column-level lineage via `sqlparser-rs` AST walking (not regex). Handles SELECT, JOINs, CTEs, UNIONs, subqueries, window functions, INSERT...SELECT, and CREATE TABLE AS SELECT. Optional `TableCatalog` integration enables bare column resolution, `SELECT *` expansion, and CTE column propagation. 67 tests. Lineage is currently labeled **beta** — known limitations include Jinja template SQL and view resolution.
+
+### REST API + Web UI (`conduit-api`, `conduit-ui`)
+Axum-based REST API with WebSocket event streaming. The API dispatches runs to the scheduler (not just recording intent). React web UI provides DAG visualization, run monitoring, task state tracking, and log streaming.
 
 ### Plan/Apply Workflow (`conduit-planner`)
 Terraform-style change detection and deployment. Computes content-addressable fingerprints for every task in topological order (upstream changes cascade automatically). Compares against environment state, classifies changes as Added/Modified/UpstreamInvalidated/Removed/Unchanged. Impact analyzer computes full transitive blast radius via BFS. Generates serializable deployment plans with snapshot reuse optimization.
 
 ### State Layer (`conduit-state`)
 - **Event Store**: Append-only RocksDB log with monotonic sequencing, range queries, and crash-safe recovery via `seek_to_last()`.
-- **Snapshot Store**: Content-addressable fingerprint index for O(1) snapshot reuse lookups.
+- **Snapshot Store**: RocksDB-backed with column families for snapshots and fingerprint index. Content-addressable fingerprint lookups for O(1) snapshot reuse.
 - **Environment Manager**: Virtual pipeline environments inspired by SQLMesh. Create/fork/promote/rollback as pointer operations over immutable snapshots.
 
 ### CLI Commands
@@ -74,11 +96,14 @@ Terraform-style change detection and deployment. Computes content-addressable fi
 | `conduit init <name>` | Scaffold a new project with example DAG |
 | `conduit compile [path]` | Parse and validate DAGs, report results |
 | `conduit run <dag_id>` | Compile, schedule, and execute a DAG end-to-end |
+| `conduit serve` | Start the API server + scheduler + executor + Web UI |
 | `conduit plan [env]` | Show what would change in an environment |
 | `conduit apply [env]` | Execute changes and update environment state |
 | `conduit env create <name>` | Create a virtual environment (forked from production) |
 | `conduit env list` | List all environments |
 | `conduit env promote <src> <dst>` | Promote one environment into another |
+| `conduit lineage <dag_id>` | Show column-level data lineage for a DAG |
+| `conduit migrate <path>` | Convert Airflow DAGs to Conduit format |
 | `conduit status` | Show system status |
 
 ## Build Requirements

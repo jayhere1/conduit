@@ -1,6 +1,6 @@
-# Column-Level Lineage
+# Column-Level Lineage (Beta)
 
-Column-level lineage is **Phase 4** of Conduit development. This document describes the design and current capabilities.
+Conduit provides column-level SQL lineage powered by `sqlparser-rs` AST analysis. This feature is functional and tested (67 tests) but labeled **beta** due to known limitations with template SQL and view resolution.
 
 ## What Is Lineage?
 
@@ -47,9 +47,18 @@ Automatic documentation of how data flows:
 
 ## How Conduit Tracks Lineage
 
-### 1. SQL Parsing
+### 1. SQL Parsing (sqlparser-rs AST)
 
-For SQL tasks, Conduit parses the query to extract column dependencies:
+For SQL tasks, Conduit parses the query AST to extract column dependencies. This uses `sqlparser-rs` for proper parsing (not regex), supporting:
+
+- **SELECT** with aliases, expressions, and qualified references (`schema.table.column`)
+- **JOINs** (INNER, LEFT, RIGHT, FULL, CROSS)
+- **CTEs** (WITH clauses, including chained CTEs with column propagation)
+- **UNIONs** / INTERSECT / EXCEPT
+- **Subqueries** in FROM and scalar positions
+- **Window functions** (PARTITION BY, ORDER BY)
+- **INSERT INTO...SELECT** and **CREATE TABLE AS SELECT**
+- **WHERE clause** dependency tracking
 
 ```python
 @sql_task(dialect="postgres")
@@ -76,6 +85,14 @@ Output: analytics.customer_summary
   - sum → FROM raw.transactions.amount
   - count → FROM raw.transactions (COUNT(*))
 ```
+
+### TableCatalog Integration
+
+When a `TableCatalog` is provided (populated from connected providers via `information_schema`), lineage gains additional capabilities:
+
+- **Bare column resolution**: `SELECT active FROM orders o JOIN customers c` correctly maps `active` to `customers` (instead of guessing the first table)
+- **Wildcard expansion**: `SELECT *` is expanded to actual column names
+- **CTE column propagation**: Output columns of CTEs are resolved through to their source tables
 
 ### 2. Python Task Lineage
 
@@ -378,27 +395,31 @@ for col in pii_columns:
         print(f"  {path['target']}.{path['column']}")
 ```
 
-## Current Status (Phase 4)
+## Current Status (Beta)
 
-Lineage is currently in **design and active development**:
+SQL lineage is functional and tested:
 
 ### Implemented
-- SQL parsing (PostgreSQL, MySQL)
+- SQL parsing via `sqlparser-rs` AST (PostgreSQL, MySQL, BigQuery, Snowflake, and other dialects)
+- TableCatalog integration for bare column resolution and wildcard expansion
+- CTE column propagation
 - Explicit lineage annotations for Python tasks
-- REST API endpoints
+- REST API endpoints (`/lineage/sql`, `/lineage/catalog/refresh`)
 - Lineage graph traversal
+- 67 test cases covering real ETL patterns
 
-### In Progress
-- BigQuery and Snowflake SQL support
-- Automatic Python task lineage inference
-- Lineage visualization UI
-- Schema evolution tracking
+### Known Limitations
+- Jinja/template SQL (`{{ ref('model') }}`) crashes the parser
+- Views cannot be resolved to underlying tables without a recursive catalog
+- `SELECT * EXCEPT(col)` (BigQuery syntax) not supported
+- LATERAL joins, PIVOT/UNPIVOT, UNNEST not handled
+- Python task lineage is annotation-based only (no static analysis)
 
 ### Planned
-- Apache Spark lineage integration
-- Data quality metrics integration
-- Cost analysis based on lineage
-- Retention policies based on lineage
+- Jinja pre-processing (strip templates before parsing)
+- Runtime schema capture via `CONDUIT::SCHEMA::` protocol
+- Schema evolution tracking
+- Lineage visualization in the Web UI
 
 ## Next Steps
 
