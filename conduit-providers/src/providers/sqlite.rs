@@ -16,18 +16,21 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{Column, Row, SqlitePool};
+use tokio::sync::OnceCell;
 
 use crate::errors::ProviderError;
 use crate::traits::*;
 use super::{extra_str, extra_u64};
 
 /// SQLite provider
-#[allow(dead_code)]
 pub struct SqliteProvider {
     name: String,
     database: String,
     journal_mode: String,
     busy_timeout: u64,
+    pool: OnceCell<SqlitePool>,
 }
 
 impl SqliteProvider {
@@ -46,8 +49,76 @@ impl SqliteProvider {
             database,
             journal_mode,
             busy_timeout,
+            pool: OnceCell::new(),
         })
     }
+
+    /// Lazily initialize the connection pool on first use.
+    async fn ensure_pool(&self) -> Result<&SqlitePool, ProviderError> {
+        self.pool
+            .get_or_try_init(|| async {
+                let url = if self.database == ":memory:" {
+                    "sqlite::memory:".to_string()
+                } else {
+                    format!("sqlite:{}?mode=rwc", self.database)
+                };
+
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .map_err(|e| ProviderError::ConnectionFailed {
+                        name: self.name.clone(),
+                        reason: e.to_string(),
+                    })?;
+
+                let pragma_journal = format!("PRAGMA journal_mode = {}", self.journal_mode);
+                sqlx::query(&pragma_journal)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| ProviderError::ConnectionFailed {
+                        name: self.name.clone(),
+                        reason: format!("failed to set journal_mode: {}", e),
+                    })?;
+
+                let pragma_timeout = format!("PRAGMA busy_timeout = {}", self.busy_timeout);
+                sqlx::query(&pragma_timeout)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| ProviderError::ConnectionFailed {
+                        name: self.name.clone(),
+                        reason: format!("failed to set busy_timeout: {}", e),
+                    })?;
+
+                Ok(pool)
+            })
+            .await
+    }
+}
+
+/// Convert a sqlx SqliteRow column value to serde_json::Value.
+fn sqlite_value_to_json(row: &sqlx::sqlite::SqliteRow, idx: usize) -> serde_json::Value {
+    if let Ok(v) = row.try_get::<i64, _>(idx) {
+        return serde_json::Value::Number(v.into());
+    }
+    if let Ok(v) = row.try_get::<i32, _>(idx) {
+        return serde_json::Value::Number(v.into());
+    }
+    if let Ok(v) = row.try_get::<f64, _>(idx) {
+        return serde_json::Number::from_f64(v)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+    }
+    if let Ok(v) = row.try_get::<bool, _>(idx) {
+        return serde_json::Value::Bool(v);
+    }
+    if let Ok(v) = row.try_get::<String, _>(idx) {
+        return serde_json::Value::String(v);
+    }
+    if let Ok(None) = row.try_get::<Option<String>, _>(idx) {
+        return serde_json::Value::Null;
+    }
+    serde_json::Value::Null
 }
 
 #[async_trait]
@@ -67,20 +138,36 @@ impl Provider for SqliteProvider {
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
         let start = std::time::Instant::now();
+        let pool = self.ensure_pool().await?;
 
-        // In production, this would use sqlx::SqlitePool::connect()
-        // For now, validate config and report readiness
+        let _: (i32,) = sqlx::query_as("SELECT 1")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| ProviderError::ConnectionFailed {
+                name: self.name.clone(),
+                reason: e.to_string(),
+            })?;
+
         let latency = start.elapsed().as_millis() as u64;
+
+        let server_version: Option<String> = sqlx::query_as("SELECT sqlite_version()")
+            .fetch_one(pool)
+            .await
+            .map(|(v,): (String,)| Some(v))
+            .unwrap_or(None);
 
         Ok(ConnectionTestResult {
             success: true,
-            message: format!("SQLite connection configured: {}", self.database),
+            message: format!("SQLite connection OK: {}", self.database),
             latency_ms: latency,
-            server_version: None,
+            server_version,
         })
     }
 
     async fn close(&self) -> Result<(), ProviderError> {
+        if let Some(pool) = self.pool.get() {
+            pool.close().await;
+        }
         Ok(())
     }
 }
@@ -93,42 +180,134 @@ impl SqlProvider for SqliteProvider {
         _params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
         let start = std::time::Instant::now();
+        let pool = self.ensure_pool().await?;
 
-        // In production: connect to SQLite, execute query, collect results
-        // For now: return structured metadata about what would happen
-        let execution_time = start.elapsed().as_millis() as u64;
-
-        let mut result = SqlResult::empty();
-        result.execution_time_ms = execution_time;
-
-        // Detect query type for accurate metrics
         let query_upper = query.trim().to_uppercase();
-        if query_upper.starts_with("SELECT") || query_upper.starts_with("WITH") {
-            result.rows_returned = Some(0);
-            result.metrics.insert("query_type".to_string(), 0.0); // 0 = SELECT
-        } else if query_upper.starts_with("INSERT") {
-            result.metrics.insert("query_type".to_string(), 1.0); // 1 = INSERT
-        } else if query_upper.starts_with("UPDATE") {
-            result.metrics.insert("query_type".to_string(), 2.0); // 2 = UPDATE
-        } else if query_upper.starts_with("DELETE") {
-            result.metrics.insert("query_type".to_string(), 3.0); // 3 = DELETE
+        let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
+
+        if is_select {
+            let rows = sqlx::query(query)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
+                    connection: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+            let execution_time = start.elapsed().as_millis() as u64;
+
+            let columns: Vec<String> = if let Some(first) = rows.first() {
+                first.columns().iter().map(|c| c.name().to_string()).collect()
+            } else {
+                Vec::new()
+            };
+
+            let total_rows = rows.len() as u64;
+            let sample_limit = 100.min(rows.len());
+            let sample_rows: Vec<Vec<serde_json::Value>> = rows[..sample_limit]
+                .iter()
+                .map(|row| {
+                    (0..row.columns().len())
+                        .map(|idx| sqlite_value_to_json(row, idx))
+                        .collect()
+                })
+                .collect();
+
+            let mut metrics = HashMap::new();
+            metrics.insert("query_type".to_string(), 0.0);
+            metrics.insert("execution_time_ms".to_string(), execution_time as f64);
+
+            Ok(SqlResult {
+                rows_affected: 0,
+                rows_returned: Some(total_rows),
+                execution_time_ms: execution_time,
+                columns,
+                sample_rows,
+                metrics,
+            })
+        } else {
+            let result = sqlx::query(query)
+                .execute(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
+                    connection: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+            let execution_time = start.elapsed().as_millis() as u64;
+
+            let mut metrics = HashMap::new();
+            if query_upper.starts_with("INSERT") {
+                metrics.insert("query_type".to_string(), 1.0);
+            } else if query_upper.starts_with("UPDATE") {
+                metrics.insert("query_type".to_string(), 2.0);
+            } else if query_upper.starts_with("DELETE") {
+                metrics.insert("query_type".to_string(), 3.0);
+            }
+            metrics.insert("execution_time_ms".to_string(), execution_time as f64);
+
+            Ok(SqlResult {
+                rows_affected: result.rows_affected(),
+                rows_returned: None,
+                execution_time_ms: execution_time,
+                columns: Vec::new(),
+                sample_rows: Vec::new(),
+                metrics,
+            })
         }
-
-        result.metrics.insert("execution_time_ms".to_string(), execution_time as f64);
-
-        Ok(result)
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
-        Ok(vec!["main".to_string()])
+        let pool = self.ensure_pool().await?;
+
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_database_list ORDER BY name")
+                .fetch_all(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
+                    connection: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+        Ok(rows.into_iter().map(|(s,)| s).collect())
     }
 
     async fn describe_table(
         &self,
         _schema: &str,
-        _table: &str,
+        table: &str,
     ) -> Result<Vec<ColumnInfo>, ProviderError> {
-        // In production: query sqlite_master
-        Ok(vec![])
+        let pool = self.ensure_pool().await?;
+
+        // PRAGMA doesn't support parameterized queries, so sanitize the
+        // table name to prevent SQL injection. Only allow alphanumeric,
+        // underscores, and dots (for schema.table).
+        if !table.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+            return Err(ProviderError::InvalidConfig {
+                connection: self.name.clone(),
+                reason: format!("Invalid table name: {}", table),
+            });
+        }
+
+        let rows: Vec<(i32, String, String, bool, Option<String>, i32)> = sqlx::query_as(
+            &format!("PRAGMA table_info(\"{}\")", table),
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| ProviderError::QueryFailed {
+            connection: self.name.clone(),
+            reason: e.to_string(),
+        })?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(_cid, name, data_type, notnull, dflt_value, pk)| ColumnInfo {
+                name,
+                data_type,
+                is_nullable: !notnull,
+                is_primary_key: pk > 0,
+                default_value: dflt_value,
+            })
+            .collect())
     }
 }

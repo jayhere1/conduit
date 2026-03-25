@@ -1,6 +1,7 @@
 # Rust
 /target
 **/*.rs.bk
+# Note: Cargo.lock is committed for reproducible builds (binary project)
 
 # Node
 node_modules/
@@ -10,7 +11,6 @@ conduit-vscode/*.vsix
 
 # State
 .conduit/
-Cargo.lock
 
 # Editor
 *.swp
@@ -19,6 +19,9 @@ Cargo.lock
 
 # Secrets
 .env
+
+# Test artifacts
+**/testdb
 
 # Logs & temp
 /logs

@@ -9,6 +9,8 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use conduit_scheduler::SchedulerEvent;
+
 use crate::error::ApiError;
 use crate::state::DagRunInfo;
 use crate::AppState;
@@ -33,7 +35,7 @@ pub struct TriggerRunRequest {
 pub async fn trigger_run(
     State(state): State<Arc<AppState>>,
     Path(dag_id): Path<String>,
-    Json(_body): Json<TriggerRunRequest>,
+    Json(body): Json<TriggerRunRequest>,
 ) -> Result<Json<Value>, ApiError> {
     // Verify the DAG exists
     let (plan, _) = conduit_compiler::ConduitPlan::compile(&state.dags_path)
@@ -44,11 +46,21 @@ pub async fn trigger_run(
         .get(&dag_id)
         .ok_or_else(|| ApiError::NotFound(format!("DAG '{}' not found", dag_id)))?;
 
+    let now = Utc::now();
     let run_id = format!(
         "run_{}_{}",
         dag_id,
-        Utc::now().format("%Y%m%d_%H%M%S_%3f")
+        now.format("%Y%m%d_%H%M%S_%3f")
     );
+
+    let logical_date = body
+        .logical_date
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or(now);
+
+    let config = body.config.unwrap_or_default();
 
     let task_states: HashMap<String, String> = dag
         .tasks
@@ -56,11 +68,26 @@ pub async fn trigger_run(
         .map(|tid| (tid.clone(), "pending".to_string()))
         .collect();
 
+    // Dispatch to the scheduler if the channel is available.
+    let dispatched = if let Some(tx) = state.scheduler_tx.get() {
+        let event = SchedulerEvent::DagRunRequested {
+            dag_id: dag_id.clone(),
+            run_id: run_id.clone(),
+            logical_date,
+            config: config.clone(),
+        };
+        tx.send(event).is_ok()
+    } else {
+        false
+    };
+
+    let status = if dispatched { "dispatched" } else { "queued" };
+
     let run_info = DagRunInfo {
         run_id: run_id.clone(),
         dag_id: dag_id.clone(),
-        status: "queued".to_string(),
-        started_at: Utc::now(),
+        status: status.to_string(),
+        started_at: now,
         finished_at: None,
         task_states: task_states.clone(),
         triggered_by: "api".to_string(),
@@ -69,24 +96,36 @@ pub async fn trigger_run(
     state.record_run(run_info);
 
     // Broadcast the event via WebSocket
-    let event = json!({
+    let ws_event = json!({
         "type": "dag_run_created",
         "dagId": dag_id,
         "runId": run_id,
+        "status": status,
         "timestamp": Utc::now().to_rfc3339(),
         "taskCount": dag.tasks.len(),
     });
-    state.broadcast_event(&event.to_string());
+    state.broadcast_event(&ws_event.to_string());
 
-    // In production, this would dispatch to the scheduler.
-    // For now, we record the intent and return immediately.
+    let message = if dispatched {
+        format!(
+            "DAG run '{}' dispatched to scheduler ({} tasks)",
+            run_id,
+            dag.tasks.len()
+        )
+    } else {
+        format!(
+            "DAG run '{}' queued ({} tasks, no scheduler attached)",
+            run_id,
+            dag.tasks.len()
+        )
+    };
 
     Ok(Json(json!({
         "runId": run_id,
         "dagId": dag_id,
-        "status": "queued",
+        "status": status,
         "taskStates": task_states,
-        "message": format!("DAG run '{}' queued ({} tasks)", run_id, dag.tasks.len()),
+        "message": message,
     })))
 }
 
@@ -99,12 +138,10 @@ pub async fn list_runs(
     let limit = params.limit.unwrap_or(50);
     let mut runs = state.get_runs(Some(&dag_id));
 
-    // Filter by status if requested
     if let Some(ref status) = params.status {
         runs.retain(|r| r.status == *status);
     }
 
-    // Most recent first
     runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     runs.truncate(limit);
 
@@ -126,7 +163,6 @@ pub async fn get_run(
         .find(|r| r.run_id == run_id)
         .ok_or_else(|| ApiError::NotFound(format!("Run '{}' not found", run_id)))?;
 
-    // Return the run directly — field names match DagRunInfo serde renames
     Ok(Json(json!({
         "id": run.run_id,
         "dagId": run.dag_id,

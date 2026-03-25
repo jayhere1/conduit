@@ -79,6 +79,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/lineage/graph", post(handlers::lineage::lineage_graph))
         .route("/lineage/schema/diff", post(handlers::lineage::schema_diff))
         .route("/lineage/contracts/validate", post(handlers::lineage::validate_contract))
+        .route("/lineage/catalog/refresh", post(handlers::lineage::refresh_catalog))
 
         // ── Contracts ────────────────────────────────────────────
         .route("/contracts", get(handlers::contracts::list_contracts))

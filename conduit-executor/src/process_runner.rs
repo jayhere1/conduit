@@ -84,6 +84,16 @@ impl ProcessRunner {
             // Fall through to subprocess-based execution
         }
 
+        // For Sensor tasks, poll at poke_interval until success or timeout
+        if let TaskType::Sensor { poke_interval, .. } = &task.task_type {
+            return Self::run_sensor_with_polling(task, context, poke_interval.as_deref()).await;
+        }
+
+        Self::run_subprocess(task, context).await
+    }
+
+    /// Execute a task as a subprocess (the common path for Python, Bash, SQL, Executable).
+    async fn run_subprocess(task: &Task, context: &TaskContext) -> ConduitResult<ProcessOutput> {
         let start = std::time::Instant::now();
 
         let mut cmd = Self::build_command(task, context)?;
@@ -133,6 +143,113 @@ impl ProcessRunner {
         })
     }
 
+    /// Execute a sensor task with polling.
+    ///
+    /// Runs the sensor's check command repeatedly at `poke_interval` until it
+    /// exits with code 0 (success) or the task timeout is reached.
+    /// Default poke interval: 30 seconds. Default timeout: 1 hour.
+    async fn run_sensor_with_polling(
+        task: &Task,
+        context: &TaskContext,
+        poke_interval: Option<&str>,
+    ) -> ConduitResult<ProcessOutput> {
+        let interval = Self::parse_duration_str(poke_interval.unwrap_or("30s"));
+        let timeout = Self::parse_duration_str(task.timeout.as_deref().unwrap_or("1h"));
+
+        let start = std::time::Instant::now();
+        let mut attempt = 0u32;
+        #[allow(unused_assignments)]
+        let mut last_output: Option<ProcessOutput> = None;
+
+        info!(
+            task_id = %context.task_id,
+            interval_secs = interval.as_secs(),
+            timeout_secs = timeout.as_secs(),
+            "Starting sensor polling"
+        );
+
+        loop {
+            attempt += 1;
+
+            let result = Self::run_subprocess(task, context).await?;
+
+            if result.exit_code == 0 {
+                info!(
+                    task_id = %context.task_id,
+                    attempts = attempt,
+                    elapsed_secs = start.elapsed().as_secs(),
+                    "Sensor condition met"
+                );
+                return Ok(ProcessOutput {
+                    duration: start.elapsed(),
+                    ..result
+                });
+            }
+
+            last_output = Some(result);
+
+            // Check timeout
+            if start.elapsed() >= timeout {
+                info!(
+                    task_id = %context.task_id,
+                    attempts = attempt,
+                    "Sensor timed out"
+                );
+                let output = last_output.unwrap();
+                return Ok(ProcessOutput {
+                    exit_code: 1,
+                    stdout: format!(
+                        "{}\nCONDUIT::LOG::ERROR::Sensor timed out after {} attempts ({:.0}s)",
+                        output.stdout, attempt, start.elapsed().as_secs_f64()
+                    ),
+                    stderr: output.stderr,
+                    duration: start.elapsed(),
+                    xcom: None,
+                    evidence: output.evidence,
+                });
+            }
+
+            trace!(
+                task_id = %context.task_id,
+                attempt = attempt,
+                next_check_secs = interval.as_secs(),
+                "Sensor condition not met, waiting for next poke"
+            );
+
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    /// Parse a duration string like "30s", "5m", "1h", "2d" into a Duration.
+    fn parse_duration_str(s: &str) -> Duration {
+        let s = s.trim();
+        if s.is_empty() {
+            return Duration::from_secs(30);
+        }
+
+        let (num_str, unit) = if s.ends_with('s') {
+            (&s[..s.len() - 1], "s")
+        } else if s.ends_with('m') {
+            (&s[..s.len() - 1], "m")
+        } else if s.ends_with('h') {
+            (&s[..s.len() - 1], "h")
+        } else if s.ends_with('d') {
+            (&s[..s.len() - 1], "d")
+        } else {
+            // Assume seconds if no unit
+            (s, "s")
+        };
+
+        let num: u64 = num_str.parse().unwrap_or(30);
+        match unit {
+            "s" => Duration::from_secs(num),
+            "m" => Duration::from_secs(num * 60),
+            "h" => Duration::from_secs(num * 3600),
+            "d" => Duration::from_secs(num * 86400),
+            _ => Duration::from_secs(30),
+        }
+    }
+
     /// Execute a SQL query via a native provider (no child process).
     async fn execute_sql_native(
         provider: &dyn conduit_providers::traits::SqlProvider,
@@ -153,7 +270,6 @@ impl ProcessRunner {
         stdout.push_str(&format!("[INFO] SQL execution started via provider '{}'\n", connection_name));
         stdout.push_str(&format!("[INFO] Executing: {}\n", query));
 
-        // Substitute parameters into the query
         let params: HashMap<String, String> = context.params.clone();
 
         let result = provider.execute(query, &params).await.map_err(|e| {
@@ -168,10 +284,8 @@ impl ProcessRunner {
 
         stdout.push_str(&format!("[INFO] SQL execution completed: {} rows, {} columns\n", row_count, col_count));
 
-        // Emit metrics as protocol messages
         evidence.record("row_count", row_count as f64);
 
-        // Convert result to protocol output and append
         let protocol_output = result.to_protocol_output();
         stdout.push_str(&protocol_output);
 
@@ -233,10 +347,63 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
                 }
                 Ok(cmd)
             }
-            TaskType::Sensor { .. } => {
-                Err(ConduitError::ExecutionError(
-                    "Sensor tasks are not yet supported in process runner".to_string(),
-                ))
+            TaskType::Sensor { sensor_type, poke_interval } => {
+                let interval = poke_interval.as_deref().unwrap_or("30s");
+
+                // Sensor scripts use environment variables instead of shell
+                // interpolation to prevent command injection. User-controlled
+                // params are passed as CONDUIT_SENSOR_* env vars.
+                let script = match sensor_type.as_str() {
+                    "file" => {
+                        // $CONDUIT_SENSOR_FILEPATH is set via env, never interpolated
+                        r#"test -f "$CONDUIT_SENSOR_FILEPATH" && echo 'CONDUIT::LOG::INFO::File found' && exit 0 || exit 1"#.to_string()
+                    }
+                    "http" => {
+                        // $CONDUIT_SENSOR_URL is set via env, never interpolated
+                        r#"curl -sf "$CONDUIT_SENSOR_URL" > /dev/null && echo 'CONDUIT::LOG::INFO::Endpoint ready' && exit 0 || exit 1"#.to_string()
+                    }
+                    "sql" => {
+                        // SQL sensor: the query must return at least one row for
+                        // the condition to be met. Without a native provider
+                        // connection, we can't execute the query from bash, so
+                        // we fail with a clear message directing users to
+                        // configure a provider connection for native execution.
+                        r#"echo 'CONDUIT::LOG::ERROR::SQL sensor requires a native provider connection. Configure the connection in conduit.yaml.' && exit 1"#.to_string()
+                    }
+                    _ => {
+                        match context.params.get("command") {
+                            Some(command) => command.clone(),
+                            None => {
+                                return Err(ConduitError::ExecutionError(
+                                    format!(
+                                        "Unknown sensor type '{}' and no 'command' param provided",
+                                        sensor_type
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                };
+
+                let mut cmd = Command::new("bash");
+                Self::inject_context_env(&mut cmd, context);
+                cmd.env("CONDUIT_SENSOR_TYPE", sensor_type)
+                    .env("CONDUIT_POKE_INTERVAL", interval);
+                // Pass user params as env vars (safe from shell injection)
+                if let Some(v) = context.params.get("filepath") {
+                    cmd.env("CONDUIT_SENSOR_FILEPATH", v);
+                }
+                if let Some(v) = context.params.get("url") {
+                    cmd.env("CONDUIT_SENSOR_URL", v);
+                }
+                if let Some(v) = context.params.get("query") {
+                    cmd.env("CONDUIT_SENSOR_QUERY", v);
+                }
+                if let Some(v) = context.params.get("connection") {
+                    cmd.env("CONDUIT_SENSOR_CONNECTION", v);
+                }
+                cmd.arg("-c").arg(script);
+                Ok(cmd)
             }
         }
     }
@@ -284,7 +451,6 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
                         stdout.push_str(&format!("[PROGRESS] {}%\n", percent));
                     }
                     ProtocolMessage::Metric { name, value } => {
-                        // Collect into evidence for contract evaluation
                         evidence.record(&name, value);
                         stdout.push_str(&format!("[METRIC] {} = {}\n", name, value));
                     }

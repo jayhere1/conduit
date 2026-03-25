@@ -435,9 +435,9 @@ fn migrate_skips_non_airflow_files() {
 #[test]
 fn snapshot_store_persist_and_reload() {
     let dir = TempDir::new().unwrap();
-    let snap_file = dir.path().join("snapshots.json");
+    let snap_dir = dir.path().join("snapshots_db");
 
-    let store = conduit_state::SnapshotStore::new();
+    let store = conduit_state::SnapshotStore::open(&snap_dir).unwrap();
 
     let snapshot = conduit_common::snapshot::Snapshot {
         id: "snap_001".to_string(),
@@ -452,10 +452,10 @@ fn snapshot_store_persist_and_reload() {
     store.put(snapshot).unwrap();
     assert_eq!(store.count(), 1);
 
-    store.save_to_file(&snap_file).unwrap();
+    // Drop and reopen to verify RocksDB persistence
+    drop(store);
 
-    // Reload
-    let reloaded = conduit_state::SnapshotStore::from_file(&snap_file).unwrap();
+    let reloaded = conduit_state::SnapshotStore::open(&snap_dir).unwrap();
     assert_eq!(reloaded.count(), 1);
 }
 

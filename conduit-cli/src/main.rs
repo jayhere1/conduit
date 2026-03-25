@@ -84,14 +84,10 @@ impl PersistentState {
             conduit_state::EnvironmentManager::new()
         };
 
-        // Load snapshot store from disk if it exists
-        let snap_file = state_dir.join("snapshots.json");
-        let snapshot_store = if snap_file.exists() {
-            conduit_state::SnapshotStore::from_file(&snap_file)
-                .unwrap_or_else(|_| conduit_state::SnapshotStore::new())
-        } else {
-            conduit_state::SnapshotStore::new()
-        };
+        // Open snapshot store backed by RocksDB
+        let snap_dir = state_dir.join("snapshots_db");
+        let snapshot_store = conduit_state::SnapshotStore::open(&snap_dir)
+            .unwrap_or_else(|_| conduit_state::SnapshotStore::new());
 
         Ok(Self {
             env_manager,
@@ -109,9 +105,7 @@ impl PersistentState {
             std::fs::write(&env_file, data)?;
         }
 
-        // Save snapshots
-        let snap_file = self.state_dir.join("snapshots.json");
-        self.snapshot_store.save_to_file(&snap_file)?;
+        // Snapshots are persisted via RocksDB — no explicit save needed
 
         Ok(())
     }
@@ -1183,11 +1177,191 @@ async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathB
     // Seed realistic demo run history so the UI has data to display immediately
     state.seed_demo_data();
     println!("  Demo data:   seeded {} historical runs", state.get_runs(None).len());
+
+    // ── Wire up scheduler + executor so API-triggered runs actually execute ──
+    {
+        use std::collections::HashMap;
+        use conduit_scheduler::{Scheduler, SchedulerEvent, SchedulerCommand, RunStatus, PoolManager};
+        use conduit_executor::process_runner::{ProcessRunner, TaskContext};
+
+        // Compile DAGs so the scheduler knows about them
+        let dag_map = match ConduitPlan::compile(dags_path) {
+            Ok((plan, stats)) => {
+                println!("  Scheduler:   {} DAGs loaded ({} tasks)",
+                    stats.dags_compiled, stats.tasks_total);
+                plan.dags
+            }
+            Err(e) => {
+                eprintln!("  Scheduler:   WARNING — failed to compile DAGs: {}", e);
+                HashMap::new()
+            }
+        };
+
+        // Create scheduler channels
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
+
+        // Attach event sender to AppState so trigger_run can dispatch events
+        state.with_scheduler(event_tx.clone());
+
+        // Spawn the scheduler event loop
+        let pools = PoolManager::new(vec![]);
+        let scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map.clone())?;
+        tokio::spawn(async move { scheduler.run().await });
+
+        // Spawn the executor loop — receives SchedulerCommands, runs tasks,
+        // updates AppState, and broadcasts WebSocket events
+        let exec_state = state.clone();
+        let exec_event_tx = event_tx;
+        let exec_dag_map = dag_map;
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SchedulerCommand::DispatchTask { dag_id, run_id, task_id, attempt } => {
+                        let task = match exec_dag_map.get(&dag_id)
+                            .and_then(|d| d.tasks.get(&task_id))
+                        {
+                            Some(t) => t.clone(),
+                            None => {
+                                tracing::error!(dag = %dag_id, task = %task_id, "Task definition not found");
+                                let _ = exec_event_tx.send(SchedulerEvent::TaskFailed {
+                                    dag_id, run_id, task_id,
+                                    error: "Task definition not found".into(),
+                                    attempt,
+                                });
+                                continue;
+                            }
+                        };
+
+                        // Mark task as running
+                        update_run_task_state(&exec_state, &run_id, &task_id, "running");
+                        exec_state.broadcast_event(&serde_json::json!({
+                            "type": "task_state_changed",
+                            "dagId": dag_id, "runId": run_id,
+                            "taskId": task_id, "state": "running",
+                        }).to_string());
+
+                        let context = TaskContext {
+                            dag_id: dag_id.clone(),
+                            run_id: run_id.clone(),
+                            task_id: task_id.clone(),
+                            attempt,
+                            logical_date: chrono::Utc::now(),
+                            environment: "production".to_string(),
+                            params: HashMap::new(),
+                        };
+
+                        // Spawn each task so independent tasks run concurrently
+                        // instead of blocking the command dispatch loop.
+                        let spawn_state = exec_state.clone();
+                        let spawn_event_tx = exec_event_tx.clone();
+                        tokio::spawn(async move {
+                            let task_start = Instant::now();
+                            match ProcessRunner::run(&task, &context).await {
+                                Ok(output) => {
+                                    let duration = task_start.elapsed();
+                                    if output.exit_code == 0 {
+                                        update_run_task_state(&spawn_state, &run_id, &task_id, "success");
+                                        spawn_state.broadcast_event(&serde_json::json!({
+                                            "type": "task_state_changed",
+                                            "dagId": dag_id, "runId": run_id,
+                                            "taskId": task_id, "state": "success",
+                                            "durationMs": duration.as_millis() as u64,
+                                        }).to_string());
+                                        let _ = spawn_event_tx.send(SchedulerEvent::TaskCompleted {
+                                            dag_id, run_id, task_id,
+                                            snapshot_id: None,
+                                            duration_ms: duration.as_millis() as u64,
+                                        });
+                                    } else {
+                                        let err = output.stderr.trim().to_string();
+                                        update_run_task_state(&spawn_state, &run_id, &task_id, "failed");
+                                        spawn_state.broadcast_event(&serde_json::json!({
+                                            "type": "task_state_changed",
+                                            "dagId": dag_id, "runId": run_id,
+                                            "taskId": task_id, "state": "failed",
+                                            "error": err,
+                                        }).to_string());
+                                        let _ = spawn_event_tx.send(SchedulerEvent::TaskFailed {
+                                            dag_id, run_id, task_id, error: err, attempt,
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    update_run_task_state(&spawn_state, &run_id, &task_id, "failed");
+                                    spawn_state.broadcast_event(&serde_json::json!({
+                                        "type": "task_state_changed",
+                                        "dagId": dag_id, "runId": run_id,
+                                        "taskId": task_id, "state": "failed",
+                                        "error": e.to_string(),
+                                    }).to_string());
+                                    let _ = spawn_event_tx.send(SchedulerEvent::TaskFailed {
+                                        dag_id, run_id, task_id,
+                                        error: e.to_string(), attempt,
+                                    });
+                                }
+                            }
+                        });
+                    }
+                    SchedulerCommand::CompleteDagRun { dag_id, run_id, status } => {
+                        let status_str = match status {
+                            RunStatus::Success => "success",
+                            RunStatus::Failed => "failed",
+                            RunStatus::Cancelled => "cancelled",
+                        };
+                        update_run_status(&exec_state, &run_id, status_str);
+                        exec_state.broadcast_event(&serde_json::json!({
+                            "type": "dag_run_completed",
+                            "dagId": dag_id, "runId": run_id,
+                            "status": status_str,
+                        }).to_string());
+                    }
+                    SchedulerCommand::SkipTask { dag_id, run_id, task_id, reason } => {
+                        update_run_task_state(&exec_state, &run_id, &task_id, "skipped");
+                        exec_state.broadcast_event(&serde_json::json!({
+                            "type": "task_state_changed",
+                            "dagId": dag_id, "runId": run_id,
+                            "taskId": task_id, "state": "skipped",
+                            "reason": reason,
+                        }).to_string());
+                    }
+                    SchedulerCommand::RetryTask { task_id, delay, .. } => {
+                        tracing::info!(task = %task_id, delay_ms = delay.num_milliseconds(), "Task retry scheduled");
+                    }
+                }
+            }
+        });
+
+        println!("  Executor:    running (scheduler attached)");
+    }
     println!();
 
     conduit_api::serve(state, addr).await?;
 
     Ok(())
+}
+
+/// Update a specific task's state within a run.
+fn update_run_task_state(state: &conduit_api::AppState, run_id: &str, task_id: &str, task_state: &str) {
+    if let Ok(mut runs) = state.runs.write() {
+        if let Some(run) = runs.iter_mut().find(|r| r.run_id == run_id) {
+            run.task_states.insert(task_id.to_string(), task_state.to_string());
+            // If the run was "dispatched" or "queued", mark it as "running"
+            if run.status == "dispatched" || run.status == "queued" || run.status == "pending" {
+                run.status = "running".to_string();
+            }
+        }
+    }
+}
+
+/// Update a run's overall status (success, failed, cancelled).
+fn update_run_status(state: &conduit_api::AppState, run_id: &str, status: &str) {
+    if let Ok(mut runs) = state.runs.write() {
+        if let Some(run) = runs.iter_mut().find(|r| r.run_id == run_id) {
+            run.status = status.to_string();
+            run.finished_at = Some(chrono::Utc::now());
+        }
+    }
 }
 
 // ─── conduit status ──────────────────────────────────────────────────────────

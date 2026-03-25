@@ -11,12 +11,14 @@
 //! task level only. Conduit traces data flow through SQL queries, Python
 //! transforms, and schema declarations to build a column-level dependency graph.
 
+pub mod catalog;
 pub mod schema;
 pub mod sql_parser;
 pub mod lineage_graph;
 pub mod impact;
 pub mod contracts;
 
+pub use catalog::{CatalogColumn, TableCatalog, parse_sql_type};
 pub use schema::{Schema, Column, ColumnType, SchemaRegistry};
 pub use sql_parser::SqlLineageExtractor;
 pub use lineage_graph::{LineageGraph, LineageEdge, ColumnRef};

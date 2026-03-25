@@ -2,8 +2,11 @@
 Demo pipeline — a working DAG that exercises the scheduler end-to-end.
 """
 
+import os
 import sys
-sys.path.insert(0, '/Users/jay/Workspace/Personal_projects/rust_exploration/conduit/sdk/python')
+
+# Add the SDK to the path relative to this file's location
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'sdk', 'python'))
 
 from conduit_sdk import dag, task
 

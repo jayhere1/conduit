@@ -4,14 +4,17 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
+use conduit_lineage::TableCatalog;
 use conduit_providers::ProviderRegistry;
 use conduit_providers::registry::ConnectionSummary;
 use conduit_providers::traits::ConnectionTestResult;
+use conduit_scheduler::SchedulerEvent;
 use conduit_state::{EnvironmentManager, SnapshotStore};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use crate::auth::{AuthStore, ApiKey};
 
@@ -52,6 +55,13 @@ pub struct AppState {
     pub provider_registry: RwLock<Option<ProviderRegistry>>,
     /// Authentication store: API keys, roles, and permissions.
     pub auth_store: AuthStore,
+    /// Optional channel to dispatch events to the scheduler.
+    /// When set, triggered runs are sent to the scheduler for execution.
+    /// When absent, runs are recorded as intent only (backward compatible).
+    pub scheduler_tx: OnceLock<mpsc::UnboundedSender<SchedulerEvent>>,
+    /// Cached table catalog for enhanced SQL lineage resolution.
+    /// Populated via `/api/v1/lineage/catalog/refresh` or on-demand per query.
+    pub catalog_cache: RwLock<Option<TableCatalog>>,
 }
 
 impl AppState {
@@ -95,7 +105,23 @@ impl AppState {
             event_tx,
             provider_registry: RwLock::new(None),
             auth_store,
+            scheduler_tx: OnceLock::new(),
+            catalog_cache: RwLock::new(None),
         })
+    }
+
+    /// Attach a scheduler event sender to enable run dispatching.
+    ///
+    /// Must be called before the server starts accepting requests.
+    /// When this channel is set, `trigger_run` will send `SchedulerEvent::DagRunRequested`
+    /// to the scheduler instead of merely recording intent.
+    ///
+    /// # Panics
+    /// Panics if called more than once (scheduler channel can only be set once).
+    pub fn with_scheduler(&self, sender: mpsc::UnboundedSender<SchedulerEvent>) {
+        self.scheduler_tx
+            .set(sender)
+            .expect("scheduler channel already configured");
     }
 
     /// Persist API keys to disk.
@@ -138,7 +164,6 @@ impl AppState {
 
     /// Broadcast an event to all WebSocket subscribers.
     pub fn broadcast_event(&self, event_json: &str) {
-        // Ignore send errors (no subscribers)
         let _ = self.event_tx.send(event_json.to_string());
     }
 
@@ -167,7 +192,6 @@ impl AppState {
     pub fn seed_demo_data(&self) {
         let now = Utc::now();
 
-        // ── E-Commerce Analytics — 7 days of daily runs ─────────────────
         let ecommerce_tasks = vec![
             "extract_orders", "extract_products", "extract_customers",
             "extract_inventory", "extract_clickstream", "validate_sources",
@@ -177,7 +201,7 @@ impl AppState {
         ];
 
         for day in 0..7 {
-            let started = now - Duration::days(day) - Duration::hours(19); // 05:00 UTC
+            let started = now - Duration::days(day) - Duration::hours(19);
             let status = if day == 2 { "failed" } else { "success" };
             let ended = if status == "success" {
                 Some(started + Duration::minutes(42) + Duration::seconds(day * 13))
@@ -209,7 +233,6 @@ impl AppState {
             });
         }
 
-        // ── SaaS Metrics — 3 monthly runs ───────────────────────────────
         let saas_tasks = vec![
             "wait_for_billing_close", "extract_subscriptions",
             "extract_billing_events", "extract_usage_data",
@@ -237,7 +260,6 @@ impl AppState {
             });
         }
 
-        // ── ML Feature Pipeline — 7 days of daily runs ──────────────────
         let ml_tasks = vec![
             "extract_training_data", "validate_raw_data",
             "compute_user_features", "compute_product_features",
@@ -248,8 +270,7 @@ impl AppState {
         ];
 
         for day in 0..7 {
-            let started = now - Duration::days(day) - Duration::hours(22); // 02:00 UTC
-            // Day 1: drift detected → promotion rejected, day 4: still running
+            let started = now - Duration::days(day) - Duration::hours(22);
             let (status, duration_min) = match day {
                 1 => ("failed", 95),
                 4 => ("running", 0),
@@ -265,7 +286,7 @@ impl AppState {
                         (4, "running", 8) => "running",
                         (4, "running", _) => "pending",
                         (1, "failed", idx) if idx < 9 => "success",
-                        (1, "failed", 9) => "failed", // detect_drift failed
+                        (1, "failed", 9) => "failed",
                         (1, "failed", _) => "skipped",
                         _ => "success",
                     };
@@ -290,14 +311,13 @@ impl AppState {
             });
         }
 
-        // ── Daily ETL (existing example) — a few recent runs ────────────
         let etl_tasks = vec![
             "extract_orders", "extract_customers", "validate_extracts",
             "transform_orders", "build_customer_360", "notify_completion",
         ];
 
         for day in 0..5 {
-            let started = now - Duration::days(day) - Duration::hours(18); // 06:00 UTC
+            let started = now - Duration::days(day) - Duration::hours(18);
             let task_states: HashMap<String, String> = etl_tasks
                 .iter()
                 .map(|t| (t.to_string(), "success".to_string()))
@@ -314,23 +334,18 @@ impl AppState {
             });
         }
 
-        // ── Seed demo environments ──────────────────────────────────────
-        // production already exists from EnvironmentManager::new()
         let _ = self.env_manager.create("staging", Some("production"));
         let _ = self.env_manager.create("dev", Some("production"));
 
-        // ── Seed demo connections ────────────────────────────────────────
         self.seed_demo_connections();
     }
 
-    /// Seed the provider registry with demo connection configs.
     fn seed_demo_connections(&self) {
         use conduit_common::config::ConnectionConfig;
         use serde_json::json;
 
         let mut connections = HashMap::new();
 
-        // SQL databases used by demo pipelines
         let sql_connections = vec![
             ("shopify_replica", "postgres", "shopify-replica.internal", 5432, "shopify"),
             ("warehouse_mgmt", "postgres", "warehouse-db.internal", 5432, "warehouse"),
@@ -352,7 +367,6 @@ impl AppState {
             });
         }
 
-        // Snowflake warehouses
         for (name, wh, schema) in [
             ("analytics_warehouse", "etl_wh_medium", "analytics"),
             ("warehouse", "transform_wh_large", "staging"),
@@ -373,7 +387,6 @@ impl AppState {
             });
         }
 
-        // S3 storage
         connections.insert("data_lake_s3".to_string(), ConnectionConfig {
             conn_type: "s3".to_string(),
             host: None,
@@ -398,7 +411,6 @@ impl AppState {
             ].into_iter().collect(),
         });
 
-        // HTTP/Webhook
         connections.insert("slack_notifications".to_string(), ConnectionConfig {
             conn_type: "webhook".to_string(),
             host: Some("https://hooks.slack.com".to_string()),
@@ -408,7 +420,6 @@ impl AppState {
             extra: [("base_path".to_string(), json!("/services/T00/B00/pipeline-alerts"))].into_iter().collect(),
         });
 
-        // Kafka
         connections.insert("event_bus".to_string(), ConnectionConfig {
             conn_type: "kafka".to_string(),
             host: Some("kafka-1.internal:9092,kafka-2.internal:9092,kafka-3.internal:9092".to_string()),
@@ -422,17 +433,14 @@ impl AppState {
             ].into_iter().collect(),
         });
 
-        // Initialize the registry synchronously (providers don't need async for config-only init)
         let registry = tokio::runtime::Handle::try_current()
             .ok()
             .map(|handle| {
-                // We're inside a tokio runtime, use block_in_place
                 tokio::task::block_in_place(|| {
                     handle.block_on(ProviderRegistry::from_configs(&connections))
                 })
             })
             .unwrap_or_else(|| {
-                // Fallback: create a temporary runtime
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(ProviderRegistry::from_configs(&connections))
             });
