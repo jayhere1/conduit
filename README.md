@@ -4,7 +4,11 @@
 
 Conduit is not "Airflow but faster." It solves problems that Airflow architecturally *cannot* solve — virtual pipeline environments, time-travel debugging, compile-time DAG validation, and plan/apply deployments — all in a single binary with zero external dependencies.
 
+![Conduit Web UI](conduit-demo-final.gif)
+
 ## Quick Start
+
+![CLI Demo](demo.gif)
 
 ```bash
 # Build
