@@ -120,6 +120,8 @@ impl DependencyResolver {
             execution_order,
             source_file: parsed.source_file,
             compiled_at: chrono::Utc::now(),
+            catchup: true,
+            max_catchup_runs: None,
         })
     }
 

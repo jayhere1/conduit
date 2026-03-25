@@ -436,6 +436,9 @@ fn main() -> Result<()> {
         .compact()
         .init();
 
+    // Initialize global Prometheus metrics registry
+    conduit_common::metrics::init();
+
     // Use tokio runtime for async commands
     let rt = tokio::runtime::Runtime::new()?;
 

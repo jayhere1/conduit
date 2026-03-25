@@ -11,6 +11,7 @@ pub mod error;
 pub mod event;
 pub mod fingerprint;
 pub mod incremental;
+pub mod metrics;
 pub mod snapshot;
 
 pub use backfill::{BackfillRequest, BackfillPartition, BackfillResult, PartitionStatus};

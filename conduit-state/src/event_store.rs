@@ -384,6 +384,113 @@ impl EventStore {
         Ok(count)
     }
 
+    // ─── DAG-specific Queries ────────────────────────────────────────────
+
+    /// Find the logical_date of the most recent DagRunCreated event for a DAG.
+    ///
+    /// Scans backwards from the latest event to find the last run, which is
+    /// more efficient than a forward scan when the event store is large.
+    pub fn last_run_logical_date(&self, dag_id: &str) -> ConduitResult<Option<DateTime<Utc>>> {
+        let current = self.current_sequence();
+        if current == 0 {
+            return Ok(None);
+        }
+
+        // Scan backward from latest
+        let mut iter = self.db.raw_iterator();
+        iter.seek_to_last();
+
+        while iter.valid() {
+            if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
+                if key.len() == 8 {
+                    if let Ok(event) = serde_json::from_slice::<Event>(value) {
+                        if let EventKind::DagRunCreated {
+                            dag_id: ref id,
+                            logical_date,
+                            ..
+                        } = event.kind
+                        {
+                            if id == dag_id {
+                                return Ok(Some(logical_date));
+                            }
+                        }
+                    }
+                }
+            }
+            iter.prev();
+        }
+
+        Ok(None)
+    }
+
+    /// Find the logical_date of the most recent successfully completed run for a DAG.
+    pub fn last_successful_run_date(&self, dag_id: &str) -> ConduitResult<Option<DateTime<Utc>>> {
+        let current = self.current_sequence();
+        if current == 0 {
+            return Ok(None);
+        }
+
+        // Collect completed run IDs scanning backward
+        let mut iter = self.db.raw_iterator();
+        iter.seek_to_last();
+
+        // First find the most recent DagRunCompleted with Success for this DAG
+        let mut success_run_id: Option<String> = None;
+        while iter.valid() {
+            if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
+                if key.len() == 8 {
+                    if let Ok(event) = serde_json::from_slice::<Event>(value) {
+                        if let EventKind::DagRunCompleted {
+                            dag_id: ref id,
+                            ref run_id,
+                            ref status,
+                            ..
+                        } = event.kind
+                        {
+                            if id == dag_id
+                                && *status == conduit_common::event::RunStatus::Success
+                            {
+                                success_run_id = Some(run_id.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            iter.prev();
+        }
+
+        let run_id = match success_run_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        // Now find the DagRunCreated event for that run_id to get its logical_date
+        iter.seek_to_first();
+        while iter.valid() {
+            if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
+                if key.len() == 8 {
+                    if let Ok(event) = serde_json::from_slice::<Event>(value) {
+                        if let EventKind::DagRunCreated {
+                            dag_id: ref id,
+                            run_id: ref rid,
+                            logical_date,
+                            ..
+                        } = event.kind
+                        {
+                            if id == dag_id && *rid == run_id {
+                                return Ok(Some(logical_date));
+                            }
+                        }
+                    }
+                }
+            }
+            iter.next();
+        }
+
+        Ok(None)
+    }
+
     // ─── Internal helpers ───────────────────────────────────────────────
 
     /// Compute the cutoff sequence based on retention policy.
@@ -820,6 +927,91 @@ mod tests {
         // Second compaction should be a no-op
         let r2 = store.compact().unwrap();
         assert_eq!(r2.events_deleted, 0);
+    }
+
+    #[test]
+    fn last_run_logical_date_finds_most_recent() {
+        let dir = tempdir().unwrap();
+        let store = EventStore::open(dir.path()).unwrap();
+
+        let date1 = chrono::Utc::now() - chrono::Duration::hours(2);
+        let date2 = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        store.append(EventKind::DagRunCreated {
+            dag_id: "my_dag".to_string(),
+            run_id: "run_1".to_string(),
+            logical_date: date1,
+            environment: "production".to_string(),
+            triggered_by: "scheduler".to_string(),
+        }).unwrap();
+
+        store.append(EventKind::DagRunCreated {
+            dag_id: "my_dag".to_string(),
+            run_id: "run_2".to_string(),
+            logical_date: date2,
+            environment: "production".to_string(),
+            triggered_by: "scheduler".to_string(),
+        }).unwrap();
+
+        // Should return the most recent (date2)
+        let result = store.last_run_logical_date("my_dag").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), date2);
+    }
+
+    #[test]
+    fn last_run_logical_date_returns_none_for_unknown_dag() {
+        let dir = tempdir().unwrap();
+        let store = EventStore::open(dir.path()).unwrap();
+
+        store.append(make_event_kind("other_dag")).unwrap();
+
+        let result = store.last_run_logical_date("unknown_dag").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn last_successful_run_date_skips_failures() {
+        let dir = tempdir().unwrap();
+        let store = EventStore::open(dir.path()).unwrap();
+
+        let date1 = chrono::Utc::now() - chrono::Duration::hours(3);
+        let date2 = chrono::Utc::now() - chrono::Duration::hours(2);
+
+        // First run: success
+        store.append(EventKind::DagRunCreated {
+            dag_id: "my_dag".to_string(),
+            run_id: "run_1".to_string(),
+            logical_date: date1,
+            environment: "production".to_string(),
+            triggered_by: "scheduler".to_string(),
+        }).unwrap();
+        store.append(EventKind::DagRunCompleted {
+            dag_id: "my_dag".to_string(),
+            run_id: "run_1".to_string(),
+            status: conduit_common::event::RunStatus::Success,
+            duration_ms: 1000,
+        }).unwrap();
+
+        // Second run: failed
+        store.append(EventKind::DagRunCreated {
+            dag_id: "my_dag".to_string(),
+            run_id: "run_2".to_string(),
+            logical_date: date2,
+            environment: "production".to_string(),
+            triggered_by: "scheduler".to_string(),
+        }).unwrap();
+        store.append(EventKind::DagRunCompleted {
+            dag_id: "my_dag".to_string(),
+            run_id: "run_2".to_string(),
+            status: conduit_common::event::RunStatus::Failed,
+            duration_ms: 500,
+        }).unwrap();
+
+        // Should return date1 (last successful), not date2 (failed)
+        let result = store.last_successful_run_date("my_dag").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), date1);
     }
 
     #[test]

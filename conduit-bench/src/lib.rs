@@ -172,6 +172,8 @@ pub fn generate_dag(dag_id: &str, n_tasks: usize) -> Dag {
         on_failure: None,
         source_file: "bench.py".to_string(),
         compiled_at: Utc::now(),
+        catchup: true,
+        max_catchup_runs: None,
     }
 }
 

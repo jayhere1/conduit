@@ -119,6 +119,8 @@ fn make_etl_dag() -> Dag {
         ],
         source_file: "test_dag.py".to_string(),
         compiled_at: Utc::now(),
+        catchup: true,
+        max_catchup_runs: None,
     }
 }
 
@@ -221,6 +223,8 @@ fn make_diamond_dag() -> Dag {
         ],
         source_file: "diamond_dag.py".to_string(),
         compiled_at: Utc::now(),
+        catchup: true,
+        max_catchup_runs: None,
     }
 }
 

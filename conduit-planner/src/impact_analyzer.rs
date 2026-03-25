@@ -294,6 +294,8 @@ mod tests {
             execution_order: order.into_iter().map(String::from).collect(),
             source_file: "test.py".to_string(),
             compiled_at: Utc::now(),
+            catchup: true,
+            max_catchup_runs: None,
         };
         let mut dags = HashMap::new();
         dags.insert(dag_id.to_string(), dag);
@@ -431,6 +433,8 @@ mod tests {
             execution_order: vec!["a", "b", "c", "d"].into_iter().map(String::from).collect(),
             source_file: "test.py".to_string(),
             compiled_at: Utc::now(),
+            catchup: true,
+            max_catchup_runs: None,
         };
 
         let all_tasks: HashSet<_> = vec!["a", "b", "c", "d"]

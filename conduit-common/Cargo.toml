@@ -13,3 +13,4 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+prometheus-client = { workspace = true }

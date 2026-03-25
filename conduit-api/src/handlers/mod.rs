@@ -13,6 +13,7 @@ pub mod lineage;
 pub mod metrics;
 pub mod cluster;
 pub mod docs;
+pub mod prometheus;
 
 use std::sync::Arc;
 

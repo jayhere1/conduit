@@ -49,6 +49,20 @@ pub struct Dag {
 
     /// When this DAG definition was last compiled.
     pub compiled_at: DateTime<Utc>,
+
+    /// Whether to automatically catch up on missed cron runs after downtime.
+    /// Defaults to true for backward compatibility.
+    #[serde(default = "default_catchup")]
+    pub catchup: bool,
+
+    /// Maximum number of catchup runs to schedule per startup.
+    /// Prevents a flood of runs after extended downtime. None means no limit.
+    #[serde(default)]
+    pub max_catchup_runs: Option<u32>,
+}
+
+fn default_catchup() -> bool {
+    true
 }
 
 /// A single task within a DAG.
