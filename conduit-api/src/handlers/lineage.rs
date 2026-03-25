@@ -2,6 +2,11 @@
 //!
 //! Provides endpoints for column-level lineage tracing, schema inspection,
 //! impact analysis, and schema contract validation.
+//!
+//! The `/lineage/sql` endpoint supports enhanced resolution via:
+//! - `connection`: introspect a SQL provider for table schemas
+//! - `tables`: provide table schemas inline in the request
+//! - Cached global catalog (populated via `/lineage/catalog/refresh`)
 
 use std::sync::Arc;
 
@@ -11,9 +16,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use conduit_lineage::{
-    ColumnRef, ColumnType, Column, LineageGraph, Schema, SchemaChangeDetector,
-    SchemaContract, ContractValidator, SqlLineageExtractor,
+    CatalogColumn, ColumnRef, ColumnType, Column, LineageGraph, Schema,
+    SchemaChangeDetector, SchemaContract, ContractValidator, SqlLineageExtractor,
+    TableCatalog, parse_sql_type,
 };
+use conduit_providers::registry::ProviderInstance;
 
 use crate::error::ApiError;
 use crate::AppState;
@@ -30,6 +37,33 @@ pub struct TraceRequest {
 pub struct SqlLineageRequest {
     pub sql: String,
     pub source_task_id: String,
+    /// Optional connection name — if provided, introspects table schemas
+    /// from this SQL provider for enhanced column resolution.
+    #[serde(default)]
+    pub connection: Option<String>,
+    /// Optional inline table schemas — provide column metadata directly
+    /// without needing a live database connection.
+    #[serde(default)]
+    pub tables: Option<Vec<TableSchemaInput>>,
+}
+
+#[derive(Deserialize)]
+pub struct TableSchemaInput {
+    #[serde(default)]
+    pub schema: Option<String>,
+    pub table: String,
+    pub columns: Vec<TableColumnInput>,
+}
+
+#[derive(Deserialize)]
+pub struct TableColumnInput {
+    pub name: String,
+    #[serde(default = "default_column_type")]
+    pub data_type: String,
+}
+
+fn default_column_type() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Deserialize)]
@@ -90,38 +124,182 @@ pub struct RequiredColumnInput {
 
 /// POST /api/v1/lineage/sql — Extract column-level lineage from a SQL query.
 ///
-/// Takes a SQL query and returns the extracted column references,
-/// source tables, joins, and derived column mappings.
+/// Supports enhanced resolution via:
+/// - `connection`: name of a configured SQL provider to introspect for table schemas
+/// - `tables`: inline table schemas (array of {schema?, table, columns})
+/// - Falls back to cached catalog if neither is provided
+///
+/// Without any catalog, bare columns default to the first table in FROM
+/// and `SELECT *` produces a wildcard mapping.
 pub async fn extract_sql_lineage(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<SqlLineageRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let lineage = SqlLineageExtractor::extract(&req.sql);
+    // Build catalog from request or cache
+    let catalog = if let Some(ref tables) = req.tables {
+        // Inline table schemas provided
+        Some(build_catalog_from_inline(tables))
+    } else if let Some(ref connection) = req.connection {
+        // Introspect from a live SQL provider
+        let initial = SqlLineageExtractor::extract(&req.sql);
+        Some(build_catalog_from_provider(&state, connection, &initial.source_tables).await?)
+    } else {
+        // Fall back to cached catalog
+        state
+            .catalog_cache
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    };
 
-    let output_cols: Vec<Value> = lineage.output_columns.iter().map(|c| json!({
-        "name": c.name,
-        "expression": c.expression,
-        "is_computed": c.is_computed,
-    })).collect();
+    // Parse SQL (with or without catalog)
+    let lineage = if let Some(ref cat) = catalog {
+        SqlLineageExtractor::extract_with_catalog(&req.sql, cat)
+    } else {
+        SqlLineageExtractor::extract(&req.sql)
+    };
 
-    let source_tables: Vec<Value> = lineage.source_tables.iter().map(|t| json!({
-        "name": t.name,
-        "alias": t.alias,
-        "schema": t.schema,
-    })).collect();
+    let output_cols: Vec<Value> = lineage
+        .output_columns
+        .iter()
+        .map(|c| {
+            json!({
+                "name": c.name,
+                "expression": c.expression,
+                "is_computed": c.is_computed,
+            })
+        })
+        .collect();
 
-    let mappings: Vec<Value> = lineage.column_mappings.iter().map(|m| json!({
-        "output": m.output,
-        "inputs": m.inputs,
-    })).collect();
+    let source_tables: Vec<Value> = lineage
+        .source_tables
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "alias": t.alias,
+                "schema": t.schema,
+            })
+        })
+        .collect();
+
+    let mappings: Vec<Value> = lineage
+        .column_mappings
+        .iter()
+        .map(|m| {
+            json!({
+                "output": m.output,
+                "inputs": m.inputs,
+            })
+        })
+        .collect();
 
     Ok(Json(json!({
         "source_task_id": req.source_task_id,
         "sql": req.sql,
+        "catalog_used": catalog.is_some(),
         "output_columns": output_cols,
         "source_tables": source_tables,
         "column_mappings": mappings,
     })))
+}
+
+/// POST /api/v1/lineage/catalog/refresh — Rebuild the cached table catalog.
+///
+/// Accepts a list of connections and tables to introspect. The resulting
+/// catalog is cached for subsequent `/lineage/sql` requests.
+///
+/// Request body:
+/// ```json
+/// {
+///   "sources": [
+///     { "connection": "warehouse", "schema": "public", "tables": ["orders", "customers"] }
+///   ]
+/// }
+/// ```
+pub async fn refresh_catalog(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CatalogRefreshRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let mut catalog = TableCatalog::new();
+    let mut tables_registered = 0u64;
+    let mut errors = Vec::new();
+
+    for source in &req.sources {
+        // Get the SQL provider Arc (clone to drop lock before await)
+        let provider = {
+            let guard = state
+                .provider_registry
+                .read()
+                .map_err(|_| ApiError::Internal("Failed to read provider registry".into()))?;
+            let registry = guard
+                .as_ref()
+                .ok_or_else(|| ApiError::NotFound("Provider registry not initialized".into()))?;
+            let instance = registry.get(&source.connection).ok_or_else(|| {
+                ApiError::NotFound(format!("Connection '{}' not found", source.connection))
+            })?;
+            match instance {
+                ProviderInstance::Sql(p) => p.clone(),
+                _ => {
+                    errors.push(format!(
+                        "Connection '{}' is not a SQL provider",
+                        source.connection
+                    ));
+                    continue;
+                }
+            }
+        };
+
+        let schema = source.schema.as_deref().unwrap_or("public");
+        for table_name in &source.tables {
+            match provider.describe_table(schema, table_name).await {
+                Ok(columns) => {
+                    let cat_columns = columns
+                        .into_iter()
+                        .map(|c| {
+                            let mut col =
+                                CatalogColumn::new(&c.name, parse_sql_type(&c.data_type));
+                            if !c.is_nullable {
+                                col = col.not_null();
+                            }
+                            col
+                        })
+                        .collect();
+                    catalog.register_table(Some(schema), table_name, cat_columns);
+                    tables_registered += 1;
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "{}.{}: {}",
+                        schema, table_name, e
+                    ));
+                }
+            }
+        }
+    }
+
+    // Cache the catalog
+    if let Ok(mut guard) = state.catalog_cache.write() {
+        *guard = Some(catalog);
+    }
+
+    Ok(Json(json!({
+        "tables_registered": tables_registered,
+        "errors": errors,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct CatalogRefreshRequest {
+    pub sources: Vec<CatalogSourceInput>,
+}
+
+#[derive(Deserialize)]
+pub struct CatalogSourceInput {
+    pub connection: String,
+    #[serde(default)]
+    pub schema: Option<String>,
+    pub tables: Vec<String>,
 }
 
 /// POST /api/v1/lineage/trace/upstream — Trace upstream dependencies for a column.
@@ -273,6 +451,80 @@ pub async fn validate_contract(
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
+/// Build a TableCatalog from inline table schemas in the request.
+fn build_catalog_from_inline(tables: &[TableSchemaInput]) -> TableCatalog {
+    let mut catalog = TableCatalog::new();
+    for table in tables {
+        let columns = table
+            .columns
+            .iter()
+            .map(|c| CatalogColumn::new(&c.name, parse_sql_type(&c.data_type)))
+            .collect();
+        catalog.register_table(table.schema.as_deref(), &table.table, columns);
+    }
+    catalog
+}
+
+/// Build a TableCatalog by introspecting a SQL provider for specific tables.
+async fn build_catalog_from_provider(
+    state: &AppState,
+    connection: &str,
+    source_tables: &[conduit_lineage::sql_parser::TableRef],
+) -> Result<TableCatalog, ApiError> {
+    // Get the SQL provider Arc (clone to drop lock before await)
+    let provider = {
+        let guard = state
+            .provider_registry
+            .read()
+            .map_err(|_| ApiError::Internal("Failed to read provider registry".into()))?;
+        let registry = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NotFound("Provider registry not initialized".into()))?;
+        let instance = registry.get(connection).ok_or_else(|| {
+            ApiError::NotFound(format!("Connection '{}' not found", connection))
+        })?;
+        match instance {
+            ProviderInstance::Sql(p) => p.clone(),
+            _ => {
+                return Err(ApiError::BadRequest(format!(
+                    "Connection '{}' is not a SQL provider",
+                    connection
+                )));
+            }
+        }
+    };
+
+    let mut catalog = TableCatalog::new();
+    for table in source_tables {
+        let schema = table.schema.as_deref().unwrap_or("public");
+        match provider.describe_table(schema, &table.name).await {
+            Ok(columns) => {
+                let cat_columns = columns
+                    .into_iter()
+                    .map(|c| {
+                        let mut col = CatalogColumn::new(&c.name, parse_sql_type(&c.data_type));
+                        if !c.is_nullable {
+                            col = col.not_null();
+                        }
+                        col
+                    })
+                    .collect();
+                catalog.register_table(table.schema.as_deref(), &table.name, cat_columns);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    connection = connection,
+                    table = %table.name,
+                    error = %e,
+                    "Failed to describe table for catalog"
+                );
+            }
+        }
+    }
+
+    Ok(catalog)
+}
+
 #[derive(Deserialize)]
 pub struct TraceWithGraphRequest {
     pub target: TraceRequest,
@@ -302,7 +554,9 @@ fn build_graph_from_edges(edges: &[EdgeInput]) -> LineageGraph {
     let mut graph = LineageGraph::new();
     for edge in edges {
         let transform = match edge.transform.to_lowercase().as_str() {
-            "aggregation" => conduit_lineage::lineage_graph::TransformType::Aggregation("unknown".to_string()),
+            "aggregation" => {
+                conduit_lineage::lineage_graph::TransformType::Aggregation("unknown".to_string())
+            }
             "computation" => conduit_lineage::lineage_graph::TransformType::Computation,
             "cast" => conduit_lineage::lineage_graph::TransformType::Cast,
             "filter" => conduit_lineage::lineage_graph::TransformType::Filter,

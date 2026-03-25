@@ -17,6 +17,8 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+sqlx = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
