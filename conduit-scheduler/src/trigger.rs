@@ -198,6 +198,8 @@ mod tests {
             execution_order,
             source_file: "test.py".to_string(),
             compiled_at: Utc::now(),
+            catchup: true,
+            max_catchup_runs: None,
         }
     }
 

@@ -105,7 +105,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let ws_routes = Router::new()
         .route("/events", get(websocket::ws_handler));
 
+    // Prometheus scrape endpoint at top-level /metrics
+    let metrics_route = Router::new()
+        .route("/metrics", get(handlers::prometheus::prometheus_metrics));
+
     let mut router = Router::new()
+        .merge(metrics_route)
         .nest("/api/v1", api_routes)
         .nest("/ws", ws_routes);
 

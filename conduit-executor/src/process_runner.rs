@@ -43,6 +43,20 @@ pub struct ProcessOutput {
     pub evidence: Evidence,
 }
 
+/// Guard that kills the child process on drop, preventing orphaned processes
+/// when tasks are cancelled or timed out.
+struct ChildGuard {
+    child: tokio::process::Child,
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        // Best-effort kill. If the process already exited, start_kill returns Err
+        // which we intentionally ignore.
+        let _ = self.child.start_kill();
+    }
+}
+
 /// Process runner for executing tasks as child processes.
 ///
 /// For SQL tasks, it will attempt to use a registered provider from the
@@ -114,10 +128,14 @@ impl ProcessRunner {
             .take()
             .ok_or_else(|| ConduitError::ExecutionError("Failed to capture stderr".to_string()))?;
 
+        // Wrap in ChildGuard so the process is killed if this future is
+        // dropped (e.g., due to timeout or cancellation).
+        let mut guard = ChildGuard { child };
+
         let (stdout_str, xcom, evidence) = Self::read_stdout(stdout_reader).await?;
         let stderr_str = Self::read_stderr(stderr_reader).await?;
 
-        let status = child
+        let status = guard.child
             .wait()
             .await
             .map_err(|e| ConduitError::ExecutionError(format!("Failed to wait for process: {}", e)))?;

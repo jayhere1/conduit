@@ -95,6 +95,31 @@ impl CronSchedule {
         }
         None
     }
+    /// Calculate all times this schedule is due between `from` (exclusive) and `to` (inclusive).
+    ///
+    /// Uses `next_from()` iteratively which is efficient for sparse schedules.
+    /// Returns at most `limit` occurrences to prevent runaway catchup.
+    pub fn occurrences_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        limit: usize,
+    ) -> Vec<DateTime<Utc>> {
+        let mut times = Vec::new();
+        let mut current = from;
+
+        loop {
+            match self.next_from(current) {
+                Some(next) if next <= to && times.len() < limit => {
+                    times.push(next);
+                    current = next;
+                }
+                _ => break,
+            }
+        }
+
+        times
+    }
 }
 
 /// Parse a single cron field.
@@ -270,6 +295,41 @@ mod tests {
         let next = cron.next_from(dt).unwrap();
         let expected = Utc.with_ymd_and_hms(2026, 3, 22, 6, 0, 0).unwrap();
         assert_eq!(next, expected);
+    }
+
+    #[test]
+    fn test_occurrences_between() {
+        let cron = CronSchedule::parse("0 */6 * * *").unwrap(); // Every 6 hours
+        let from = Utc.with_ymd_and_hms(2026, 3, 22, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 3, 23, 0, 0, 0).unwrap();
+
+        let times = cron.occurrences_between(from, to, 100);
+        // Should get: 06:00, 12:00, 18:00, 00:00 (next day)
+        assert_eq!(times.len(), 4);
+        assert_eq!(times[0].hour(), 6);
+        assert_eq!(times[1].hour(), 12);
+        assert_eq!(times[2].hour(), 18);
+        assert_eq!(times[3].hour(), 0);
+    }
+
+    #[test]
+    fn test_occurrences_between_with_limit() {
+        let cron = CronSchedule::parse("* * * * *").unwrap(); // Every minute
+        let from = Utc.with_ymd_and_hms(2026, 3, 22, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 3, 23, 0, 0, 0).unwrap();
+
+        let times = cron.occurrences_between(from, to, 5);
+        assert_eq!(times.len(), 5); // Limited to 5 even though there are 1440
+    }
+
+    #[test]
+    fn test_occurrences_between_empty() {
+        let cron = CronSchedule::parse("0 6 * * *").unwrap(); // Daily at 6AM
+        let from = Utc.with_ymd_and_hms(2026, 3, 22, 6, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 3, 22, 7, 0, 0).unwrap();
+
+        let times = cron.occurrences_between(from, to, 100);
+        assert_eq!(times.len(), 0); // No occurrence between 6:00 and 7:00 (next is tomorrow)
     }
 
     #[test]

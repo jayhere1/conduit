@@ -10,12 +10,15 @@
 //! and time-travel debugging.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use conduit_common::dag::{Dag, DagId, TaskId, TriggerRule};
 use conduit_common::error::ConduitResult;
+use conduit_common::metrics;
+use conduit_state::EventStore;
 
 use crate::cron::CronSchedule;
 use crate::trigger::TriggerRuleEvaluator;
@@ -157,6 +160,8 @@ pub struct Scheduler {
     pools: PoolManager,
     plans: HashMap<DagId, Dag>,
     cron_schedules: HashMap<DagId, CronSchedule>,
+    /// Optional persistent event store for catchup queries.
+    event_store: Option<Arc<EventStore>>,
 }
 
 impl Scheduler {
@@ -193,14 +198,126 @@ impl Scheduler {
             pools,
             plans,
             cron_schedules,
+            event_store: None,
         })
     }
+
+    /// Attach a persistent event store for catchup-on-missed-runs.
+    pub fn with_event_store(mut self, store: Arc<EventStore>) -> Self {
+        self.event_store = Some(store);
+        self
+    }
+
+    /// Send a command to the executor, logging and recording metrics on failure.
+    fn send_command(&self, cmd: SchedulerCommand) {
+        if let Err(e) = self.command_tx.send(cmd) {
+            error!(error = %e, "Failed to send scheduler command — executor channel closed");
+            if let Some(m) = metrics::try_global() {
+                m.command_send_errors_total.inc();
+            }
+        }
+    }
+
+    // ─── Catchup ─────────────────────────────────────────────────────────
+
+    /// Check for missed cron runs since the last recorded run and schedule them.
+    ///
+    /// Called once on startup before entering the event loop. For each DAG with
+    /// `catchup: true`, queries the event store for the last run's logical_date,
+    /// then calculates all cron occurrences between that time and now.
+    pub fn perform_catchup(&mut self) {
+        let store = match &self.event_store {
+            Some(s) => Arc::clone(s),
+            None => {
+                debug!("No event store attached, skipping catchup");
+                return;
+            }
+        };
+
+        let now = Utc::now();
+
+        // Collect catchup work to avoid borrow conflicts with handle_dag_run_requested
+        let mut catchup_runs: Vec<(DagId, DateTime<Utc>)> = Vec::new();
+
+        for (dag_id, cron) in &self.cron_schedules {
+            let dag = match self.plans.get(dag_id) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            if !dag.catchup {
+                debug!(dag_id = %dag_id, "Catchup disabled, skipping");
+                continue;
+            }
+
+            let last_run = match store.last_run_logical_date(dag_id) {
+                Ok(Some(dt)) => dt,
+                Ok(None) => {
+                    debug!(dag_id = %dag_id, "No previous runs found, skipping catchup");
+                    continue;
+                }
+                Err(e) => {
+                    warn!(dag_id = %dag_id, error = %e, "Failed to query last run for catchup");
+                    continue;
+                }
+            };
+
+            let limit = dag.max_catchup_runs.map(|n| n as usize).unwrap_or(100);
+            let missed = cron.occurrences_between(last_run, now, limit);
+
+            if !missed.is_empty() {
+                info!(
+                    dag_id = %dag_id,
+                    missed_count = missed.len(),
+                    last_run = %last_run,
+                    "Scheduling catchup runs for missed intervals"
+                );
+            }
+
+            for logical_date in missed {
+                catchup_runs.push((dag_id.clone(), logical_date));
+            }
+        }
+
+        // Now schedule the collected catchup runs
+        for (dag_id, logical_date) in catchup_runs {
+            let run_id = format!("catchup_{}_{}", dag_id, logical_date.timestamp());
+            info!(dag_id = %dag_id, logical_date = %logical_date, run_id = %run_id, "Scheduling catchup run");
+            self.handle_dag_run_requested(&dag_id, &run_id, logical_date, HashMap::new());
+
+            if let Some(m) = metrics::try_global() {
+                m.catchup_runs_total.inc();
+            }
+        }
+    }
+
+    // ─── Event Loop ──────────────────────────────────────────────────────
 
     /// Run the scheduler event loop (blocks until shutdown).
     pub async fn run(mut self) -> ConduitResult<()> {
         info!("Scheduler event loop started");
 
+        // Perform catchup on startup before processing new events
+        self.perform_catchup();
+
         while let Some(event) = self.event_rx.recv().await {
+            // Record scheduler event metric
+            if let Some(m) = metrics::try_global() {
+                let event_type = match &event {
+                    SchedulerEvent::DagRunRequested { .. } => "dag_run_requested",
+                    SchedulerEvent::TaskCompleted { .. } => "task_completed",
+                    SchedulerEvent::TaskFailed { .. } => "task_failed",
+                    SchedulerEvent::CronTick { .. } => "cron_tick",
+                    SchedulerEvent::SensorTriggered { .. } => "sensor_triggered",
+                    SchedulerEvent::Shutdown => "shutdown",
+                };
+                m.scheduler_events_total
+                    .get_or_create(&metrics::EventLabels {
+                        event_type: event_type.to_string(),
+                    })
+                    .inc();
+            }
+
             match event {
                 SchedulerEvent::DagRunRequested {
                     dag_id,
@@ -235,6 +352,9 @@ impl Scheduler {
                     self.handle_task_failed(&dag_id, &run_id, &task_id, error, attempt);
                 }
                 SchedulerEvent::CronTick { timestamp } => {
+                    if let Some(m) = metrics::try_global() {
+                        m.cron_ticks_total.inc();
+                    }
                     self.handle_cron_tick(timestamp);
                 }
                 SchedulerEvent::SensorTriggered {
@@ -296,6 +416,17 @@ impl Scheduler {
             "DAG run created"
         );
 
+        // Record metrics
+        if let Some(m) = metrics::try_global() {
+            m.dag_runs_total
+                .get_or_create(&metrics::DagStatusLabels {
+                    dag_id: dag_id.clone(),
+                    status: "created".to_string(),
+                })
+                .inc();
+            m.active_dag_runs.inc();
+        }
+
         // Evaluate which root tasks are ready
         self.evaluate_ready_tasks(dag, &run_state);
     }
@@ -338,6 +469,18 @@ impl Scheduler {
             duration_ms = %duration_ms,
             "Task completed"
         );
+
+        // Record metrics
+        if let Some(m) = metrics::try_global() {
+            m.tasks_total
+                .get_or_create(&metrics::StatusLabels {
+                    status: "completed".to_string(),
+                })
+                .inc();
+            m.task_duration_seconds
+                .observe(duration_ms as f64 / 1000.0);
+            m.active_tasks.dec();
+        }
 
         let dag = match self.plans.get(dag_id) {
             Some(d) => d,
@@ -430,7 +573,15 @@ impl Scheduler {
                 "Task will be retried"
             );
 
-            let _ = self.command_tx.send(SchedulerCommand::RetryTask {
+            if let Some(m) = metrics::try_global() {
+                m.tasks_total
+                    .get_or_create(&metrics::StatusLabels {
+                        status: "retried".to_string(),
+                    })
+                    .inc();
+            }
+
+            self.send_command(SchedulerCommand::RetryTask {
                 dag_id: dag_id.clone(),
                 run_id: run_id.to_string(),
                 task_id: task_id.clone(),
@@ -444,6 +595,15 @@ impl Scheduler {
                 error = %error,
                 "Task failed with no retries remaining"
             );
+
+            if let Some(m) = metrics::try_global() {
+                m.tasks_total
+                    .get_or_create(&metrics::StatusLabels {
+                        status: "failed".to_string(),
+                    })
+                    .inc();
+                m.active_tasks.dec();
+            }
 
             // Evaluate impact — clone dag to avoid borrow conflict with &mut self
             if let Some(dag) = self.plans.get(dag_id).cloned() {
@@ -508,8 +668,16 @@ impl Scheduler {
             );
 
             if is_ready {
-                // Queue the task
-                let _ = self.command_tx.send(SchedulerCommand::DispatchTask {
+                if let Some(m) = metrics::try_global() {
+                    m.tasks_total
+                        .get_or_create(&metrics::StatusLabels {
+                            status: "dispatched".to_string(),
+                        })
+                        .inc();
+                    m.active_tasks.inc();
+                }
+
+                self.send_command(SchedulerCommand::DispatchTask {
                     dag_id: dag.id.clone(),
                     run_id: run_state.run_id.clone(),
                     task_id: task_id.clone(),
@@ -553,7 +721,23 @@ impl Scheduler {
                 "DAG run completed"
             );
 
-            let _ = self.command_tx.send(SchedulerCommand::CompleteDagRun {
+            // Record metrics
+            if let Some(m) = metrics::try_global() {
+                let status_str = match status {
+                    RunStatus::Success => "success",
+                    RunStatus::Failed => "failed",
+                    RunStatus::Cancelled => "cancelled",
+                };
+                m.dag_runs_total
+                    .get_or_create(&metrics::DagStatusLabels {
+                        dag_id: dag.id.clone(),
+                        status: status_str.to_string(),
+                    })
+                    .inc();
+                m.active_dag_runs.dec();
+            }
+
+            self.send_command(SchedulerCommand::CompleteDagRun {
                 dag_id: dag.id.clone(),
                 run_id: run_state.run_id.clone(),
                 status,
@@ -589,7 +773,8 @@ impl Scheduler {
             return;
         };
 
-        // Apply skips to internal state and send commands.
+        // Apply skips to internal state, collecting commands to send afterward.
+        let mut commands_to_send: Vec<SchedulerCommand> = Vec::new();
         if let Some(run_state_mut) = self.dag_runs.get_mut(run_key) {
             for task_id in &tasks_to_skip {
                 run_state_mut.task_states.insert(
@@ -600,13 +785,26 @@ impl Scheduler {
                     },
                 );
 
-                let _ = self.command_tx.send(SchedulerCommand::SkipTask {
+                if let Some(m) = metrics::try_global() {
+                    m.tasks_total
+                        .get_or_create(&metrics::StatusLabels {
+                            status: "skipped".to_string(),
+                        })
+                        .inc();
+                }
+
+                commands_to_send.push(SchedulerCommand::SkipTask {
                     dag_id: dag.id.clone(),
                     run_id: run_state_mut.run_id.clone(),
                     task_id: task_id.clone(),
                     reason: "Upstream task failed".to_string(),
                 });
             }
+        }
+
+        // Send commands after releasing the mutable borrow.
+        for cmd in commands_to_send {
+            self.send_command(cmd);
         }
 
         // Re-borrow immutably to check if the run is now complete.

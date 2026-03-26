@@ -192,7 +192,7 @@ function ProgressIndicator({ taskStates }) {
 
 // ─── Gantt Timeline ──────────────────────────────────────────────────────
 
-function GanttTimeline({ taskStates, run }) {
+function GanttTimeline({ taskStates, run, onSelectTask, selectedTask }) {
   if (!taskStates || !run?.tasks) return null;
 
   const tasks = run.tasks.filter(t => t.name && taskStates[t.name]);
@@ -200,15 +200,27 @@ function GanttTimeline({ taskStates, run }) {
 
   const runStart = run.startedAt ? new Date(run.startedAt) : new Date();
   const now = new Date();
-  const timeSpan = Math.max((now - runStart) / 1000, 1); // seconds
+  const timeSpan = Math.max((now - runStart) / 1000, 1);
+
+  // Find critical path (longest cumulative duration chain)
+  const taskDurations = {};
+  tasks.forEach(t => {
+    const s = t.startedAt ? new Date(t.startedAt) : null;
+    const e = t.endedAt ? new Date(t.endedAt) : (taskStates[t.name]?.toLowerCase() === 'running' ? now : null);
+    taskDurations[t.name] = s && e ? (e - s) / 1000 : 0;
+  });
+  const maxTaskDuration = Math.max(...Object.values(taskDurations), 0);
+  const criticalThreshold = maxTaskDuration * 0.8;
 
   return (
-    <Card title="Execution Timeline" subtitle="Task duration and timing">
-      <div className="space-y-3">
-        {tasks.slice(0, 8).map((task) => {
+    <Card title="Execution Timeline" subtitle={`All ${tasks.length} tasks — click to inspect`}>
+      <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1 -mr-1">
+        {tasks.map((task) => {
           const status = taskStates[task.name]?.toLowerCase() || 'pending';
           const taskStart = task.startedAt ? new Date(task.startedAt) : null;
           const taskEnd = task.endedAt ? new Date(task.endedAt) : null;
+          const isSelected = selectedTask === task.name;
+          const isCritical = taskDurations[task.name] >= criticalThreshold && criticalThreshold > 0;
 
           let startOffset = 0;
           let barWidth = 0;
@@ -223,39 +235,40 @@ function GanttTimeline({ taskStates, run }) {
           }
 
           const bgColor = {
-            success: 'bg-emerald-500',
+            success: isCritical ? 'bg-amber-500' : 'bg-emerald-500',
             running: 'bg-blue-500',
             failed: 'bg-red-500',
             pending: 'bg-gray-700',
+            skipped: 'bg-gray-600',
           }[status] || 'bg-gray-700';
 
           return (
-            <div key={task.name} className="space-y-1">
+            <div
+              key={task.name}
+              className={clsx('space-y-0.5 px-2 py-1 rounded-lg cursor-pointer transition-all', isSelected ? 'bg-purple-500/10 ring-1 ring-purple-500/30' : 'hover:bg-conduit-800/20')}
+              onClick={() => onSelectTask?.(task.name)}
+            >
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-gray-300 truncate flex-1 pr-2">
+                <span className="text-[11px] font-medium text-gray-300 truncate flex-1 pr-2">
                   {task.name}
+                  {isCritical && status === 'success' && <span className="ml-1.5 text-[9px] text-amber-400/70 font-normal">slow</span>}
                 </span>
-                <span className="text-xs text-gray-500 font-mono">
-                  {status === 'pending' ? '—' : taskEnd ? ((taskEnd - (taskStart || runStart)) / 1000).toFixed(1) + 's' : ((now - (taskStart || runStart)) / 1000).toFixed(1) + 's'}
+                <span className="text-[11px] text-gray-500 font-mono tabular-nums">
+                  {status === 'pending' || status === 'skipped' ? '—' : taskEnd ? ((taskEnd - (taskStart || runStart)) / 1000).toFixed(1) + 's' : ((now - (taskStart || runStart)) / 1000).toFixed(1) + 's'}
                 </span>
               </div>
-              <div className="h-2 bg-conduit-900/50 rounded-full overflow-hidden border border-conduit-800/20 relative">
+              <div className="h-[6px] bg-conduit-900/50 rounded-full overflow-hidden border border-conduit-800/20 relative">
                 <div
                   className={clsx(bgColor, 'h-full rounded-full transition-all', status === 'running' && 'gantt-bar-running')}
                   style={{
                     marginLeft: `${startOffset}%`,
-                    width: `${Math.max(barWidth, 2)}%`,
+                    width: `${Math.max(barWidth, status === 'pending' ? 0 : 1.5)}%`,
                   }}
                 />
               </div>
             </div>
           );
         })}
-        {tasks.length > 8 && (
-          <div className="text-xs text-gray-500 pt-2">
-            +{tasks.length - 8} more tasks
-          </div>
-        )}
       </div>
     </Card>
   );
@@ -751,13 +764,16 @@ export default function RunExecution() {
             }
           />
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           <StatusBadge status={run?.status} dot />
-          {isRunning && (
-            <span className="text-xs text-gray-500 font-mono animate-pulse">
-              {formatDuration(run?.started_at || run?.startedAt, null)}
+          <div className="text-right">
+            <span className="text-lg font-mono font-bold text-conduit-200 tabular-nums tracking-tight">
+              {formatDuration(run?.started_at || run?.startedAt, run?.status?.toLowerCase() === 'running' ? null : (run?.endedAt || run?.ended_at))}
             </span>
-          )}
+            {isRunning && (
+              <span className="block text-[10px] text-blue-400 animate-pulse">elapsed</span>
+            )}
+          </div>
           <Button onClick={refetch} variant="secondary" size="sm">
             <RefreshCw size={14} />
           </Button>
@@ -799,7 +815,7 @@ export default function RunExecution() {
 
       {/* Gantt Timeline */}
       <div className="mb-6">
-        <GanttTimeline taskStates={taskStates} run={run} />
+        <GanttTimeline taskStates={taskStates} run={run} onSelectTask={setSelectedTask} selectedTask={selectedTask} />
       </div>
 
       {/* Main Content: Graph + Sidebar */}
@@ -823,11 +839,11 @@ export default function RunExecution() {
             )}
           </Card>
 
-          {/* Task Status Grid (compact view below graph) */}
+          {/* Task Status Grid (compact) */}
           {Object.keys(taskStates).length > 0 && (
             <div className="mt-4">
               <Card title="Task Status" icon={Timer}>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-1">
                   {Object.entries(taskStates).map(([taskId, status]) => {
                     const cfg = getStatusConfig(status);
                     const StatusIcon = cfg.Icon;
@@ -836,17 +852,17 @@ export default function RunExecution() {
                         key={taskId}
                         onClick={() => setSelectedTask(taskId)}
                         className={clsx(
-                          'flex items-center gap-2 px-3 py-2 rounded-lg border transition-all text-left',
+                          'flex items-center gap-1.5 px-2 py-1.5 rounded border transition-all text-left',
                           selectedTask === taskId
                             ? 'border-purple-500/50 bg-purple-500/10'
                             : 'border-conduit-800/30 bg-conduit-900/30 hover:bg-conduit-800/30'
                         )}
                       >
                         <StatusIcon
-                          size={12}
+                          size={10}
                           className={clsx(cfg.textClass, cfg.pulse && 'animate-spin')}
                         />
-                        <span className="text-xs text-gray-300 truncate">{taskId}</span>
+                        <span className="text-[11px] text-gray-300 truncate">{taskId}</span>
                       </button>
                     );
                   })}
