@@ -4,6 +4,9 @@
 //! [`StorageProvider`], etc.) and can be instantiated from a
 //! [`ConnectionConfig`].
 
+// ── Security Sanitization ────────────────────────────────────────────────
+pub mod sanitize;
+
 // ── SQL Providers ─────────────────────────────────────────────────────────
 pub mod postgres;
 pub mod snowflake;

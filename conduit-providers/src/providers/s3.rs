@@ -79,6 +79,7 @@ impl S3Provider {
     }
 
     /// Check if credentials are available
+    #[allow(dead_code)]
     fn has_credentials(&self) -> bool {
         self.access_key_id.is_some() && self.secret_access_key.is_some()
     }
@@ -101,30 +102,45 @@ impl Provider for S3Provider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        let start = Instant::now();
+        use tokio::net::TcpStream;
+        use tokio::time::{timeout, Duration};
 
-        // Validate configuration
-        if !self.has_credentials() {
-            return Ok(ConnectionTestResult {
+        let start = Instant::now();
+        let addr = if let Some(ref endpoint) = self.endpoint_url {
+            // Custom endpoint (MinIO, etc.) -- extract host:port
+            let stripped = endpoint
+                .strip_prefix("https://")
+                .or_else(|| endpoint.strip_prefix("http://"))
+                .unwrap_or(endpoint);
+            if stripped.contains(':') {
+                stripped.to_string()
+            } else {
+                format!("{}:443", stripped)
+            }
+        } else {
+            format!("s3.{}.amazonaws.com:443", self.region)
+        };
+
+        match timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await {
+            Ok(Ok(_)) => Ok(ConnectionTestResult {
                 success: true,
-                message: format!(
-                    "S3 configured (using default AWS credential chain): bucket={} region={}",
-                    self.bucket, self.region
-                ),
+                message: format!("TCP connection to {} successful (bucket={})", addr, self.bucket),
                 latency_ms: start.elapsed().as_millis() as u64,
                 server_version: None,
-            });
+            }),
+            Ok(Err(e)) => Ok(ConnectionTestResult {
+                success: false,
+                message: format!("Connection failed: {}", e),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+            Err(_) => Ok(ConnectionTestResult {
+                success: false,
+                message: format!("Connection timed out after 5s to {}", addr),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
         }
-
-        Ok(ConnectionTestResult {
-            success: true,
-            message: format!(
-                "S3 configured with static credentials: bucket={} region={}",
-                self.bucket, self.region
-            ),
-            latency_ms: start.elapsed().as_millis() as u64,
-            server_version: None,
-        })
     }
 
     async fn close(&self) -> Result<(), ProviderError> {

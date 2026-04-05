@@ -30,6 +30,7 @@ pub struct SqliteProvider {
     database: String,
     journal_mode: String,
     busy_timeout: u64,
+    max_connections: u32,
     pool: OnceCell<SqlitePool>,
 }
 
@@ -43,12 +44,14 @@ impl SqliteProvider {
             .unwrap_or_else(|| ":memory:".to_string());
         let journal_mode = extra_str(config, "journal_mode").unwrap_or_else(|| "wal".to_string());
         let busy_timeout = extra_u64(config, "busy_timeout").unwrap_or(5000);
+        let max_connections = extra_u64(config, "max_connections").unwrap_or(5) as u32;
 
         Ok(Self {
             name: name.to_string(),
             database,
             journal_mode,
             busy_timeout,
+            max_connections,
             pool: OnceCell::new(),
         })
     }
@@ -64,12 +67,12 @@ impl SqliteProvider {
                 };
 
                 let pool = SqlitePoolOptions::new()
-                    .max_connections(5)
+                    .max_connections(self.max_connections)
                     .connect(&url)
                     .await
                     .map_err(|e| ProviderError::ConnectionFailed {
                         name: self.name.clone(),
-                        reason: e.to_string(),
+                        reason: super::sanitize::sanitize_error(&e.to_string()),
                     })?;
 
                 let pragma_journal = format!("PRAGMA journal_mode = {}", self.journal_mode);
@@ -78,7 +81,7 @@ impl SqliteProvider {
                     .await
                     .map_err(|e| ProviderError::ConnectionFailed {
                         name: self.name.clone(),
-                        reason: format!("failed to set journal_mode: {}", e),
+                        reason: super::sanitize::sanitize_error(&format!("failed to set journal_mode: {}", e)),
                     })?;
 
                 let pragma_timeout = format!("PRAGMA busy_timeout = {}", self.busy_timeout);
@@ -87,7 +90,7 @@ impl SqliteProvider {
                     .await
                     .map_err(|e| ProviderError::ConnectionFailed {
                         name: self.name.clone(),
-                        reason: format!("failed to set busy_timeout: {}", e),
+                        reason: super::sanitize::sanitize_error(&format!("failed to set busy_timeout: {}", e)),
                     })?;
 
                 Ok(pool)
@@ -145,7 +148,7 @@ impl Provider for SqliteProvider {
             .await
             .map_err(|e| ProviderError::ConnectionFailed {
                 name: self.name.clone(),
-                reason: e.to_string(),
+                reason: super::sanitize::sanitize_error(&e.to_string()),
             })?;
 
         let latency = start.elapsed().as_millis() as u64;
@@ -179,6 +182,7 @@ impl SqlProvider for SqliteProvider {
         query: &str,
         _params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
+        let query = super::sanitize::sanitize_query(query, &self.name)?;
         let start = std::time::Instant::now();
         let pool = self.ensure_pool().await?;
 
@@ -186,12 +190,12 @@ impl SqlProvider for SqliteProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(query)
+            let rows = sqlx::query(&query)
                 .fetch_all(pool)
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
@@ -226,12 +230,12 @@ impl SqlProvider for SqliteProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(query)
+            let result = sqlx::query(&query)
                 .execute(pool)
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
@@ -266,7 +270,7 @@ impl SqlProvider for SqliteProvider {
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
         Ok(rows.into_iter().map(|(s,)| s).collect())
@@ -296,7 +300,7 @@ impl SqlProvider for SqliteProvider {
         .await
         .map_err(|e| ProviderError::QueryFailed {
             connection: self.name.clone(),
-            reason: e.to_string(),
+            reason: super::sanitize::sanitize_error(&e.to_string()),
         })?;
 
         Ok(rows

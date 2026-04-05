@@ -15,7 +15,7 @@
 //!     user: conduit
 //!     ssl_mode: verify-full
 //!     connection_timeout: 30   # seconds
-//!     statement_timeout: 3600  # seconds
+//!     statement_timeout: 300   # seconds
 //! ```
 
 use std::collections::HashMap;
@@ -41,6 +41,7 @@ pub struct CockroachDbProvider {
     ssl_mode: String,
     connection_timeout: u64,
     statement_timeout: u64,
+    max_connections: u32,
     connection_string: String,
     pool: OnceCell<PgPool>,
 }
@@ -54,7 +55,8 @@ impl CockroachDbProvider {
         let schema = extra_str(config, "schema").unwrap_or_else(|| "public".to_string());
         let ssl_mode = extra_str(config, "ssl_mode").unwrap_or_else(|| "verify-full".to_string());
         let connection_timeout = extra_u64(config, "connection_timeout").unwrap_or(30);
-        let statement_timeout = extra_u64(config, "statement_timeout").unwrap_or(3600);
+        let statement_timeout = extra_u64(config, "statement_timeout").unwrap_or(300);
+        let max_connections = extra_u64(config, "max_connections").unwrap_or(5) as u32;
 
         let password = config
             .credentials
@@ -80,6 +82,7 @@ impl CockroachDbProvider {
             ssl_mode,
             connection_timeout,
             statement_timeout,
+            max_connections,
             connection_string,
             pool: OnceCell::new(),
         })
@@ -100,13 +103,13 @@ impl CockroachDbProvider {
         self.pool
             .get_or_try_init(|| async {
                 PgPoolOptions::new()
-                    .max_connections(5)
+                    .max_connections(self.max_connections)
                     .acquire_timeout(std::time::Duration::from_secs(self.connection_timeout))
                     .connect(&self.connection_string)
                     .await
                     .map_err(|e| ProviderError::ConnectionFailed {
                         name: self.name.clone(),
-                        reason: e.to_string(),
+                        reason: super::sanitize::sanitize_error(&e.to_string()),
                     })
             })
             .await
@@ -172,7 +175,7 @@ impl Provider for CockroachDbProvider {
             .await
             .map_err(|e| ProviderError::ConnectionFailed {
                 name: self.name.clone(),
-                reason: e.to_string(),
+                reason: super::sanitize::sanitize_error(&e.to_string()),
             })?;
 
         let latency = start.elapsed().as_millis() as u64;
@@ -209,6 +212,7 @@ impl SqlProvider for CockroachDbProvider {
         query: &str,
         _params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
+        let query = super::sanitize::sanitize_query(query, &self.name)?;
         let start = std::time::Instant::now();
         let pool = self.ensure_pool().await?;
 
@@ -216,12 +220,12 @@ impl SqlProvider for CockroachDbProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(query)
+            let rows = sqlx::query(&query)
                 .fetch_all(pool)
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
@@ -256,12 +260,12 @@ impl SqlProvider for CockroachDbProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(query)
+            let result = sqlx::query(&query)
                 .execute(pool)
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
@@ -296,7 +300,7 @@ impl SqlProvider for CockroachDbProvider {
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
         Ok(rows.into_iter().map(|(s,)| s).collect())
@@ -328,7 +332,7 @@ impl SqlProvider for CockroachDbProvider {
         .await
         .map_err(|e| ProviderError::QueryFailed {
             connection: self.name.clone(),
-            reason: e.to_string(),
+            reason: super::sanitize::sanitize_error(&e.to_string()),
         })?;
 
         let pk_rows: Vec<(String,)> = sqlx::query_as(

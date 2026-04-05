@@ -133,6 +133,8 @@ pub struct ApiKey {
     pub name: String,
     /// SHA-256 hash of the key (hex-encoded).
     pub key_hash: String,
+    /// Random salt used when hashing this key.
+    pub salt: String,
     /// First 8 characters of the key for identification.
     pub key_prefix: String,
     /// Role assigned to this key.
@@ -255,9 +257,10 @@ pub fn generate_api_key() -> String {
     format!("cdt_{}", &raw[..32])
 }
 
-/// Hash an API key for storage.
-pub fn hash_key(key: &str) -> String {
+/// Hash an API key for storage, using a salt to prevent rainbow-table attacks.
+pub fn hash_key(salt: &str, key: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
     hasher.update(key.as_bytes());
     format!("{:x}", hasher.finalize())
 }
@@ -292,13 +295,15 @@ impl AuthStore {
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<(String, ApiKey), AuthError> {
         let plaintext = generate_api_key();
-        let key_hash = hash_key(&plaintext);
+        let salt = uuid::Uuid::new_v4().to_string();
+        let key_hash = hash_key(&salt, &plaintext);
         let key_prefix = plaintext[..12].to_string(); // "cdt_" + first 8 hex
 
         let key = ApiKey {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             key_hash: key_hash.clone(),
+            salt,
             key_prefix,
             role,
             created_at: Utc::now(),
@@ -309,25 +314,35 @@ impl AuthStore {
             last_used_at: None,
         };
 
-        if let (Ok(mut keys), Ok(mut ids)) = (
-            self.keys_by_hash.write(),
-            self.id_to_hash.write(),
-        ) {
-            ids.insert(key.id.clone(), key_hash.clone());
-            keys.insert(key_hash, key.clone());
-            Ok((plaintext, key))
-        } else {
-            Err(AuthError::InvalidKey) // lock poisoned — shouldn't happen
-        }
+        // Acquire BOTH write locks before making any mutations to prevent
+        // inconsistent state if a panic occurs between insertions.
+        let mut keys = self.keys_by_hash.write().map_err(|_| AuthError::InvalidKey)?;
+        let mut ids = self.id_to_hash.write().map_err(|_| AuthError::InvalidKey)?;
+
+        ids.insert(key.id.clone(), key_hash.clone());
+        keys.insert(key_hash, key.clone());
+        Ok((plaintext, key))
     }
 
     /// Authenticate a request using a plaintext API key.
+    ///
+    /// Because each key has its own unique salt, we must iterate over all stored
+    /// keys, re-hash the plaintext with each key's salt, and compare.
     pub fn authenticate(&self, plaintext_key: &str) -> Result<AuthContext, AuthError> {
-        let key_hash = hash_key(plaintext_key);
-
         let mut keys = self.keys_by_hash.write().map_err(|_| AuthError::InvalidKey)?;
 
-        let key = keys.get_mut(&key_hash).ok_or(AuthError::InvalidKey)?;
+        // Find the matching key by recomputing the salted hash for each stored key.
+        let matched_hash = keys.iter().find_map(|(hash, stored_key)| {
+            let candidate = hash_key(&stored_key.salt, plaintext_key);
+            if candidate == *hash {
+                Some(hash.clone())
+            } else {
+                None
+            }
+        });
+
+        let hash = matched_hash.ok_or(AuthError::InvalidKey)?;
+        let key = keys.get_mut(&hash).ok_or(AuthError::InvalidKey)?;
 
         if key.revoked {
             return Err(AuthError::KeyRevoked);
@@ -469,11 +484,15 @@ mod tests {
 
     #[test]
     fn test_key_hashing() {
+        let salt = "test-salt";
         let key = "cdt_abc123def456abc123def456abc123";
-        let hash1 = hash_key(key);
-        let hash2 = hash_key(key);
+        let hash1 = hash_key(salt, key);
+        let hash2 = hash_key(salt, key);
         assert_eq!(hash1, hash2);
-        assert_ne!(hash1, hash_key("cdt_different_key_0000000000000000"));
+        // Different key produces different hash
+        assert_ne!(hash1, hash_key(salt, "cdt_different_key_0000000000000000"));
+        // Different salt produces different hash
+        assert_ne!(hash1, hash_key("other-salt", key));
     }
 
     #[test]
@@ -594,6 +613,7 @@ mod tests {
             id: "test".to_string(),
             name: "test".to_string(),
             key_hash: "hash".to_string(),
+            salt: "test-salt".to_string(),
             key_prefix: "cdt_test".to_string(),
             role: Role::Viewer,
             created_at: Utc::now(),

@@ -8,17 +8,51 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use tracing::{info, warn};
 
+use crate::auth::AuthStore;
 use crate::AppState;
 
+/// Max WebSocket message size: 1 MB.
+const WS_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+/// Max WebSocket frame size: 1 MB.
+const WS_MAX_FRAME_SIZE: usize = 1024 * 1024;
+
 /// Upgrade an HTTP connection to a WebSocket.
+///
+/// When authentication is enabled, the client must provide a valid
+/// `Authorization: Bearer <token>` header. Unauthenticated requests
+/// receive a 401 response instead of a WebSocket upgrade.
 pub async fn ws_handler(
-    ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Authenticate when auth is enabled
+    if state.auth_store.auth_enabled {
+        let token = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| AuthStore::extract_bearer(v).ok());
+
+        match token {
+            Some(t) => {
+                if state.auth_store.authenticate(t).is_err() {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+            }
+            None => {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+        }
+    }
+
+    ws.max_message_size(WS_MAX_MESSAGE_SIZE)
+        .max_frame_size(WS_MAX_FRAME_SIZE)
+        .on_upgrade(move |socket| handle_socket(socket, state))
+        .into_response()
 }
 
 /// Handle a single WebSocket connection.

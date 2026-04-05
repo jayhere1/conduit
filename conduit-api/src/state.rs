@@ -18,6 +18,9 @@ use tokio::sync::mpsc;
 
 use crate::auth::{AuthStore, ApiKey};
 
+/// Maximum number of DAG runs to keep in the in-memory cache.
+const MAX_CACHED_RUNS: usize = 10_000;
+
 /// Run status tracking for the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,12 +127,19 @@ impl AppState {
             .expect("scheduler channel already configured");
     }
 
-    /// Persist API keys to disk.
+    /// Persist API keys to disk with restricted file permissions (0600).
     pub fn save_auth_keys(&self) {
         let keys_file = self.state_dir.join("auth_keys.json");
         let keys = self.auth_store.export_keys();
         if let Ok(data) = serde_json::to_string_pretty(&keys) {
-            let _ = std::fs::write(&keys_file, data);
+            if std::fs::write(&keys_file, data).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o600);
+                    let _ = std::fs::set_permissions(&keys_file, perms);
+                }
+            }
         }
     }
 
@@ -167,10 +177,15 @@ impl AppState {
         let _ = self.event_tx.send(event_json.to_string());
     }
 
-    /// Record a new DAG run.
+    /// Record a new DAG run, evicting the oldest entries if the cache exceeds
+    /// [`MAX_CACHED_RUNS`].
     pub fn record_run(&self, run: DagRunInfo) {
         if let Ok(mut runs) = self.runs.write() {
             runs.push(run);
+            if runs.len() > MAX_CACHED_RUNS {
+                let excess = runs.len() - MAX_CACHED_RUNS;
+                runs.drain(..excess);
+            }
         }
     }
 

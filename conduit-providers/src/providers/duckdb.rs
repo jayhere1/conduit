@@ -52,7 +52,33 @@ impl Provider for DuckDbProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "duckdb".into(), operation: "test_connection".into() })
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        if self.database_path == ":memory:" {
+            return Ok(ConnectionTestResult {
+                success: true,
+                message: "DuckDB in-memory mode ready".to_string(),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            });
+        }
+
+        match tokio::fs::metadata(&self.database_path).await {
+            Ok(_) => Ok(ConnectionTestResult {
+                success: true,
+                message: format!("DuckDB database file exists: {}", self.database_path),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+            Err(e) => Ok(ConnectionTestResult {
+                success: false,
+                message: format!("Database file not accessible: {}", e),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+        }
     }
 
     async fn close(&self) -> Result<(), ProviderError> { Ok(()) }
