@@ -54,35 +54,44 @@ impl IntoResponse for ApiError {
 /// If the path contains "dags/", truncate everything before it.
 /// Otherwise, keep only the final path component (filename).
 fn sanitize_paths(msg: &str) -> String {
-    // Match sequences that look like absolute paths: /foo/bar/baz.py
     let mut result = msg.to_string();
-    // Process each potential absolute path in the message
-    while let Some(start) = result.find('/') {
-        // Find the end of this path-like segment (space, colon, or end of string)
+    let mut cursor = 0;
+
+    while cursor < result.len() {
+        // Find the next '/' starting from cursor
+        let Some(start) = result[cursor..].find('/') else {
+            break;
+        };
+        let start = cursor + start;
+
+        // Only process absolute paths (preceded by start-of-string or whitespace)
+        if start > 0 && !result.as_bytes()[start - 1].is_ascii_whitespace() {
+            cursor = start + 1;
+            continue;
+        }
+
+        // Find the end of this path-like segment
         let rest = &result[start..];
         let end_offset = rest
             .find(|c: char| c == ' ' || c == ':' || c == '\n')
             .unwrap_or(rest.len());
-        let path_str = result[start..start + end_offset].to_string();
+        let path_str = &result[start..start + end_offset];
 
-        // Only sanitize if it looks like an absolute path (starts with /)
-        if !path_str.starts_with('/') || path_str.len() < 2 {
-            break;
+        if path_str.len() < 2 {
+            cursor = start + 1;
+            continue;
         }
 
         let replacement = if let Some(dags_pos) = path_str.find("dags/") {
             path_str[dags_pos..].to_string()
         } else {
-            // Take the last path component
-            path_str.rsplit('/').next().unwrap_or(&path_str).to_string()
+            path_str.rsplit('/').next().unwrap_or(path_str).to_string()
         };
 
+        let new_end = start + replacement.len();
         result = format!("{}{}{}", &result[..start], replacement, &result[start + end_offset..]);
-
-        // If we didn't change anything, stop to avoid infinite loop
-        if result.contains(&path_str) && replacement == path_str {
-            break;
-        }
+        // Advance cursor past the replacement so we don't re-process it
+        cursor = new_end;
     }
     result
 }
