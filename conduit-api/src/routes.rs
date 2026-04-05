@@ -22,6 +22,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::handlers;
+use crate::rate_limit;
 use crate::websocket;
 use crate::AppState;
 
@@ -102,10 +103,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/cluster/status", get(handlers::cluster::cluster_status))
         .route("/cluster/workers/:id/drain", post(handlers::cluster::drain_worker));
 
-    let ws_routes = Router::new()
-        .route("/events", get(websocket::ws_handler));
+    // Apply per-IP rate limiting to API and WebSocket routes.
+    // The Extension layer must be outermost so the limiter is available
+    // when the rate_limit_middleware reads request extensions.
+    let limiter = rate_limit::create_rate_limiter();
+    let api_routes = api_routes
+        .layer(axum::middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(axum::Extension(limiter.clone()));
 
-    // Prometheus scrape endpoint at top-level /metrics
+    let ws_routes = Router::new()
+        .route("/events", get(websocket::ws_handler))
+        .layer(axum::middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(axum::Extension(limiter));
+
+    // Prometheus scrape endpoint at top-level /metrics (no rate limit)
     let metrics_route = Router::new()
         .route("/metrics", get(handlers::prometheus::prometheus_metrics));
 

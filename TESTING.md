@@ -129,7 +129,117 @@ cargo test --package conduit-compiler --test compiler_fixture_tests
 - Format equivalence between Python and YAML outputs
 - Compilation performance assertion (< 5 seconds for all fixtures)
 
-### 7. Benchmarks
+### 7. Executor Integration Tests
+
+Test real process spawning, exit code mapping, timeouts, XCom capture, and concurrency limits.
+
+```bash
+cargo test --package conduit-executor --test executor_integration_test
+```
+
+**What they cover:**
+- Bash task exit codes: 0 → Success, 1 → Failed, 2 → Retry, 3 → Skipped
+- Python task execution
+- Timeout enforcement (child process killed after deadline)
+- CONDUIT::XCOM protocol message capture
+- Concurrent task limit with deferred queue draining
+
+### 8. Scheduler Integration Tests
+
+Test trigger rule evaluation, cron parsing, and retry logic.
+
+```bash
+cargo test --package conduit-scheduler --test scheduler_integration_test
+```
+
+**What they cover:**
+- Trigger rules: AllSuccess, AllDone, OneSuccess, NoDeps
+- Retry scheduling on task failure
+- Cron expression parsing and `is_due()` evaluation
+- Invalid cron expression rejection
+
+### 9. Failure Injection Tests
+
+Systematically exercise error paths to verify clean error handling.
+
+```bash
+cargo test --package conduit-compiler --test failure_injection_test
+```
+
+**What they cover:**
+- Corrupt YAML DAG parsing (no panic)
+- Cyclic dependency detection
+- Unknown dependency detection
+- Duplicate task ID detection
+
+### 10. Property-Based Tests (Fuzz)
+
+Use `proptest` to ensure parsers and deserializers never panic on arbitrary input.
+
+```bash
+cargo test --package conduit-scheduler --test proptest_cron
+cargo test --package conduit-compiler --test proptest_dag
+cargo test --package conduit-distributed --test proptest_proto
+```
+
+**What they cover:**
+- Cron parser: never panics on random strings, valid step expressions round-trip
+- YAML DAG parser: never panics on random input
+- Proto deserialization: never panics on random bytes
+
+### 11. Distributed E2E Tests
+
+Multi-worker scenarios with real gRPC communication.
+
+```bash
+cargo test --package conduit-distributed --test distributed_e2e_test
+```
+
+**What they cover:**
+- Two-worker task distribution
+- Worker failure and task reassignment
+- Inflight tracking accuracy
+- Task result reporting through gRPC
+
+### 12. Event Store Backup/Recovery Tests
+
+Validate export/import of events as JSON lines.
+
+```bash
+cargo test --package conduit-state --test backup_recovery_test
+```
+
+**What they cover:**
+- Export events to JSON lines file
+- Import into fresh store with round-trip fidelity
+- Sequence ordering preservation
+- Range queries after import
+- Incremental export from a given sequence number
+
+### 13. SQL Provider Integration Tests
+
+Tests that require live database connections. Gated behind `#[ignore]`.
+
+```bash
+# Run only the ignored (integration) tests
+cargo test --package conduit-providers --test sql_providers_test -- --ignored
+```
+
+### 14. UI Smoke Tests
+
+React component tests using Vitest + Testing Library.
+
+```bash
+cd conduit-ui && npm test
+```
+
+### 15. Python SDK Tests
+
+```bash
+cd sdk/python && python3 -m pytest tests/ -v
+```
+
+### 16. Benchmarks
 
 Performance benchmarks using Criterion:
 

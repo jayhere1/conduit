@@ -78,21 +78,6 @@ impl S3Provider {
         format!("s3://{}/{}{}", self.bucket, self.prefix, key)
     }
 
-    /// Get the S3 host for this region
-    fn get_host(&self) -> String {
-        if let Some(ref endpoint) = self.endpoint_url {
-            // For custom endpoints (MinIO), strip protocol if present
-            endpoint
-                .strip_prefix("http://")
-                .or_else(|| endpoint.strip_prefix("https://"))
-                .unwrap_or(endpoint)
-                .to_string()
-        } else {
-            // Standard AWS endpoint
-            format!("s3.{}.amazonaws.com", self.region)
-        }
-    }
-
     /// Check if credentials are available
     fn has_credentials(&self) -> bool {
         self.access_key_id.is_some() && self.secret_access_key.is_some()

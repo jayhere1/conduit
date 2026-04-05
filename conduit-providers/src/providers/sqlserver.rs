@@ -80,21 +80,7 @@ impl Provider for SqlServerProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        let start = std::time::Instant::now();
-
-        // In production, this would use sqlx::MssqlPool::connect()
-        // For now, validate config and report readiness
-        let latency = start.elapsed().as_millis() as u64;
-
-        Ok(ConnectionTestResult {
-            success: true,
-            message: format!(
-                "SQL Server connection configured: {}@{}:{}",
-                self.user, self.host, self.port
-            ),
-            latency_ms: latency,
-            server_version: None,
-        })
+        Err(ProviderError::NotImplemented { provider_type: "sqlserver".into(), operation: "test_connection".into() })
     }
 
     async fn close(&self) -> Result<(), ProviderError> {
@@ -106,34 +92,10 @@ impl Provider for SqlServerProvider {
 impl SqlProvider for SqlServerProvider {
     async fn execute(
         &self,
-        query: &str,
+        _query: &str,
         _params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
-        let start = std::time::Instant::now();
-
-        // In production: connect to SQL Server, execute query, collect results
-        // For now: return structured metadata about what would happen
-        let execution_time = start.elapsed().as_millis() as u64;
-
-        let mut result = SqlResult::empty();
-        result.execution_time_ms = execution_time;
-
-        // Detect query type for accurate metrics
-        let query_upper = query.trim().to_uppercase();
-        if query_upper.starts_with("SELECT") || query_upper.starts_with("WITH") {
-            result.rows_returned = Some(0);
-            result.metrics.insert("query_type".to_string(), 0.0); // 0 = SELECT
-        } else if query_upper.starts_with("INSERT") {
-            result.metrics.insert("query_type".to_string(), 1.0); // 1 = INSERT
-        } else if query_upper.starts_with("UPDATE") {
-            result.metrics.insert("query_type".to_string(), 2.0); // 2 = UPDATE
-        } else if query_upper.starts_with("DELETE") {
-            result.metrics.insert("query_type".to_string(), 3.0); // 3 = DELETE
-        }
-
-        result.metrics.insert("execution_time_ms".to_string(), execution_time as f64);
-
-        Ok(result)
+        Err(ProviderError::NotImplemented { provider_type: "sqlserver".into(), operation: "execute".into() })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
@@ -145,7 +107,6 @@ impl SqlProvider for SqlServerProvider {
         _schema: &str,
         _table: &str,
     ) -> Result<Vec<ColumnInfo>, ProviderError> {
-        // In production: query information_schema.columns
-        Ok(vec![])
+        Err(ProviderError::NotImplemented { provider_type: "sqlserver".into(), operation: "describe_table".into() })
     }
 }

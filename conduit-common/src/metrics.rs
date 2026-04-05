@@ -48,9 +48,9 @@ pub fn init() -> &'static ConduitMetrics {
     METRICS.get_or_init(ConduitMetrics::new)
 }
 
-/// Get the global metrics registry. Panics if `init()` has not been called.
+/// Get the global metrics registry. Initializes lazily if needed.
 pub fn global() -> &'static ConduitMetrics {
-    METRICS.get().expect("conduit metrics not initialized — call metrics::init() first")
+    init()
 }
 
 /// Try to get the global metrics, returning None if not initialized.

@@ -172,19 +172,32 @@ impl proto::coordinator_server::Coordinator for CoordinatorGrpcService {
 }
 
 /// Start the gRPC server for the coordinator.
+///
+/// When `tls_cert_path` and `tls_key_path` are both `Some`, the server
+/// will require TLS. Otherwise it listens in plaintext.
 pub async fn serve_grpc(
     coordinator: Arc<Coordinator>,
     addr: std::net::SocketAddr,
+    tls_cert_path: Option<&str>,
+    tls_key_path: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let service = CoordinatorGrpcService::new(coordinator);
     let server = service.into_server();
 
-    info!(%addr, "Coordinator gRPC server starting");
+    let mut builder = tonic::transport::Server::builder();
 
-    tonic::transport::Server::builder()
-        .add_service(server)
-        .serve(addr)
-        .await?;
+    if let (Some(cert_path), Some(key_path)) = (tls_cert_path, tls_key_path) {
+        let cert = std::fs::read_to_string(cert_path)?;
+        let key = std::fs::read_to_string(key_path)?;
+        let identity = tonic::transport::Identity::from_pem(cert, key);
+        let tls = tonic::transport::ServerTlsConfig::new().identity(identity);
+        builder = builder.tls_config(tls)?;
+        info!(%addr, "Coordinator gRPC server starting with TLS");
+    } else {
+        info!(%addr, "Coordinator gRPC server starting (plaintext)");
+    }
+
+    builder.add_service(server).serve(addr).await?;
 
     Ok(())
 }

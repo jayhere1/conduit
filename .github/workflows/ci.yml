@@ -55,3 +55,31 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y clang librocksdb-dev
       - run: cargo test --workspace
+
+  test-python:
+    name: Python SDK Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and test Python SDK
+        run: |
+          cd sdk/python
+          pip install -e ".[dev]" 2>/dev/null || pip install pytest>=7
+          python -m pytest tests/ -v
+
+  test-ui:
+    name: UI Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install and test UI
+        run: |
+          cd conduit-ui
+          npm install
+          npm test

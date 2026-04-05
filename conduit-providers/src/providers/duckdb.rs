@@ -52,11 +52,7 @@ impl Provider for DuckDbProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Ok(ConnectionTestResult {
-            success: true,
-            message: format!("DuckDB configured: {}", self.database_path),
-            latency_ms: 0, server_version: None,
-        })
+        Err(ProviderError::NotImplemented { provider_type: "duckdb".into(), operation: "test_connection".into() })
     }
 
     async fn close(&self) -> Result<(), ProviderError> { Ok(()) }
@@ -64,13 +60,8 @@ impl Provider for DuckDbProvider {
 
 #[async_trait]
 impl SqlProvider for DuckDbProvider {
-    async fn execute(&self, query: &str, _params: &HashMap<String, String>) -> Result<SqlResult, ProviderError> {
-        let mut result = SqlResult::empty();
-        let query_upper = query.trim().to_uppercase();
-        if query_upper.starts_with("SELECT") || query_upper.starts_with("WITH") {
-            result.rows_returned = Some(0);
-        }
-        Ok(result)
+    async fn execute(&self, _query: &str, _params: &HashMap<String, String>) -> Result<SqlResult, ProviderError> {
+        Err(ProviderError::NotImplemented { provider_type: "duckdb".into(), operation: "execute".into() })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
@@ -78,6 +69,6 @@ impl SqlProvider for DuckDbProvider {
     }
 
     async fn describe_table(&self, _schema: &str, _table: &str) -> Result<Vec<ColumnInfo>, ProviderError> {
-        Ok(vec![])
+        Err(ProviderError::NotImplemented { provider_type: "duckdb".into(), operation: "describe_table".into() })
     }
 }
