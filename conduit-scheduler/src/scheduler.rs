@@ -807,8 +807,11 @@ impl Scheduler {
             self.send_command(cmd);
         }
 
-        // Re-borrow immutably to check if the run is now complete.
+        // Re-borrow immutably to evaluate tasks that may now be ready
+        // (e.g., AllDone, OneSuccess, OneFailed downstream of the failure)
+        // and check if the run is now complete.
         if let Some(updated_state) = self.dag_runs.get(run_key) {
+            self.evaluate_ready_tasks(dag, updated_state);
             self.check_dag_run_complete(dag, updated_state);
         }
     }

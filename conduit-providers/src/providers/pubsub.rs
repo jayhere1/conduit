@@ -62,13 +62,7 @@ impl Provider for PubSubProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        // Stub: In real implementation, attempt to list topics
-        Ok(ConnectionTestResult {
-            success: true,
-            message: "Connection test passed".into(),
-            latency_ms: 0,
-            server_version: None,
-        })
+        Err(ProviderError::NotImplemented { provider_type: "pubsub".into(), operation: "test_connection".into() })
     }
 
     async fn close(&self) -> Result<(), ProviderError> {
@@ -78,19 +72,12 @@ impl Provider for PubSubProvider {
 
 #[async_trait]
 impl StreamProvider for PubSubProvider {
-    async fn produce(&self, _topic: &str, messages: &[StreamMessage]) -> Result<StreamResult, ProviderError> {
-        // Stub: In real implementation, publish to topic
-        let total_bytes: u64 = messages.iter().map(|m| m.value.len() as u64).sum();
-        Ok(StreamResult {
-            message_count: messages.len() as u64,
-            bytes_transferred: total_bytes,
-            execution_time_ms: 0,
-        })
+    async fn produce(&self, _topic: &str, _messages: &[StreamMessage]) -> Result<StreamResult, ProviderError> {
+        Err(ProviderError::NotImplemented { provider_type: "pubsub".into(), operation: "produce".into() })
     }
 
     async fn consume(&self, _topic: &str, _group_id: &str, _max_messages: usize) -> Result<Vec<StreamMessage>, ProviderError> {
-        // Stub: In real implementation, pull from subscription
-        Ok(vec![])
+        Err(ProviderError::NotImplemented { provider_type: "pubsub".into(), operation: "consume".into() })
     }
 
     async fn list_topics(&self) -> Result<Vec<String>, ProviderError> {

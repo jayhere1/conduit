@@ -45,6 +45,10 @@ pub enum ProviderError {
     #[error("invalid configuration for '{connection}': {reason}")]
     InvalidConfig { connection: String, reason: String },
 
+    /// The provider operation is not yet implemented.
+    #[error("{provider_type} provider: {operation} is not yet implemented")]
+    NotImplemented { provider_type: String, operation: String },
+
     /// Timeout exceeded.
     #[error("operation timed out on '{connection}' after {timeout_secs}s")]
     Timeout { connection: String, timeout_secs: u64 },

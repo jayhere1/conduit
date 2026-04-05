@@ -46,6 +46,13 @@ pub struct CoordinatorConfig {
     /// How long a task can be assigned before the coordinator considers it
     /// stuck and potentially reassigns it (seconds).
     pub task_timeout_secs: u64,
+
+    /// Path to the TLS certificate PEM file for the gRPC server.
+    /// When set (along with `tls_key_path`), the server uses TLS.
+    pub tls_cert_path: Option<String>,
+
+    /// Path to the TLS private key PEM file for the gRPC server.
+    pub tls_key_path: Option<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -56,6 +63,8 @@ impl Default for CoordinatorConfig {
             routing_strategy: RoutingStrategy::LeastLoaded,
             max_queue_size: 10_000,
             task_timeout_secs: 3600,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
@@ -70,11 +79,12 @@ struct PendingTask {
 
 /// A task that's been dispatched to a worker.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct InflightTask {
     assignment: TaskAssignment,
     worker_id: String,
+    #[allow(dead_code)]
     dispatched_at: Instant,
+    pool: String,
 }
 
 /// The coordinator manages task distribution across workers.
@@ -150,7 +160,7 @@ impl Coordinator {
 
         // Try to immediately dispatch.
         if let Some(worker_id) = self.pool.select_worker(pool_name).await {
-            self.dispatch_to_worker(&worker_id, assignment);
+            self.dispatch_to_worker(&worker_id, assignment, pool_name);
         } else {
             // Queue it.
             let mut queue = self.pending_queue.lock().await;
@@ -316,7 +326,7 @@ impl Coordinator {
     // ─── Internal helpers ────────────────────────────────────────────────
 
     /// Send a task assignment directly to a specific worker.
-    fn dispatch_to_worker(&self, worker_id: &str, assignment: TaskAssignment) {
+    fn dispatch_to_worker(&self, worker_id: &str, assignment: TaskAssignment, pool: &str) {
         info!(
             assignment = %assignment.assignment_id,
             worker = %worker_id,
@@ -332,6 +342,7 @@ impl Coordinator {
                 assignment: assignment.clone(),
                 worker_id: worker_id.to_string(),
                 dispatched_at: Instant::now(),
+                pool: pool.to_string(),
             },
         );
 
@@ -381,6 +392,7 @@ impl Coordinator {
                         assignment: pending_task.assignment.clone(),
                         worker_id: worker_id.clone(),
                         dispatched_at: Instant::now(),
+                        pool: pending_task.pool.clone(),
                     },
                 );
 
@@ -412,7 +424,7 @@ impl Coordinator {
             );
 
             // Re-queue it.
-            let pool_name = "default".to_string(); // TODO: extract from task config
+            let pool_name = inflight.pool.clone();
             let mut queue = self.pending_queue.lock().await;
             queue.push_front(PendingTask {
                 assignment: inflight.assignment,

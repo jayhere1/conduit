@@ -52,6 +52,9 @@ pub enum GrpcClientError {
         source: tonic::transport::Error,
     },
 
+    #[error("TLS configuration error: {0}")]
+    TlsConfig(String),
+
     #[error("Registration failed: {0}")]
     RegistrationFailed(tonic::Status),
 
@@ -97,18 +100,34 @@ impl WorkerGrpcClient {
     /// Returns when the connection is lost or the worker is drained.
     pub async fn run(self) -> Result<(), GrpcClientError> {
         let addr = &self.config.coordinator_addr;
-        let endpoint = format!("http://{}", addr);
+        let use_tls = self.config.tls_ca_cert_path.is_some();
+        let scheme = if use_tls { "https" } else { "http" };
+        let endpoint_uri = format!("{}://{}", scheme, addr);
 
-        info!(addr = %addr, worker_id = %self.config.worker_id, "Connecting to coordinator");
+        info!(addr = %addr, tls = use_tls, worker_id = %self.config.worker_id, "Connecting to coordinator");
 
-        let channel = tonic::transport::Endpoint::from_shared(endpoint.clone())
+        let mut endpoint = tonic::transport::Endpoint::from_shared(endpoint_uri.clone())
             .map_err(|e| GrpcClientError::ConnectionFailed {
                 addr: addr.clone(),
                 source: e.into(),
             })?
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
-            .connect()
+            .timeout(Duration::from_secs(300));
+
+        if let Some(ca_path) = &self.config.tls_ca_cert_path {
+            let ca_cert = std::fs::read_to_string(ca_path).map_err(|e| {
+                GrpcClientError::TlsConfig(format!(
+                    "Failed to read CA certificate at {}: {}", ca_path, e
+                ))
+            })?;
+            let ca = tonic::transport::Certificate::from_pem(ca_cert);
+            let tls = tonic::transport::ClientTlsConfig::new().ca_certificate(ca);
+            endpoint = endpoint.tls_config(tls).map_err(|e| {
+                GrpcClientError::TlsConfig(format!("Failed to configure TLS: {}", e))
+            })?;
+        }
+
+        let channel = endpoint.connect()
             .await
             .map_err(|e| GrpcClientError::ConnectionFailed {
                 addr: addr.clone(),
@@ -395,6 +414,7 @@ mod tests {
             labels: HashMap::new(),
             heartbeat_interval_secs: 5,
             graceful_shutdown: true,
+            tls_ca_cert_path: None,
         };
 
         let (worker, result_rx, log_rx) = Worker::new(config.clone());

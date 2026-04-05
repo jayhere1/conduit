@@ -131,8 +131,7 @@ fn parse_field(field: &str, min: u32, max: u32) -> Result<BTreeSet<u32>, String>
     let mut result = BTreeSet::new();
 
     // Handle step expressions like "*/15"
-    if field.starts_with("*/") {
-        let step_str = field.strip_prefix("*/").unwrap();
+    if let Some(step_str) = field.strip_prefix("*/") {
         let step: u32 = step_str.parse().map_err(|_| {
             format!("Invalid step value: {}", step_str)
         })?;

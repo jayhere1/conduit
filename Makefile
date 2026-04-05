@@ -1,5 +1,5 @@
-.PHONY: build build-release test test-rust test-python lint fmt clean \
-       serve dev run compile ui docker docker-dev docker-test \
+.PHONY: build build-release test test-rust test-python test-ui test-integration test-e2e \
+       lint fmt clean serve dev run compile ui docker docker-dev docker-test \
        backfill extension install-extension
 
 # ── Build ────────────────────────────────────────────────────────────────────
@@ -17,13 +17,22 @@ all: build-release ui           ## Build everything (Rust + UI)
 
 # ── Test ─────────────────────────────────────────────────────────────────────
 
-test: test-rust test-python     ## Run all tests
+test: test-rust test-python test-ui ## Run all tests
 
 test-rust:                      ## Run Rust workspace tests
 	./scripts/test.sh
 
 test-python:                    ## Run Python SDK tests
 	cd sdk/python && python3 -m pytest tests/ -v
+
+test-ui:                        ## Run React UI tests
+	cd conduit-ui && npm install --silent && npm test
+
+test-integration:               ## Run SQL provider tests (requires live databases)
+	cargo test --package conduit-providers --test sql_providers_test -- --ignored
+
+test-e2e:                       ## Run Docker Compose E2E tests
+	docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e-test
 
 lint:                           ## Type-check and lint
 	cargo clippy --workspace -- -W warnings

@@ -60,11 +60,7 @@ impl Provider for BigQueryProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Ok(ConnectionTestResult {
-            success: true,
-            message: format!("BigQuery configured: project={} dataset={}", self.project, self.dataset),
-            latency_ms: 0, server_version: None,
-        })
+        Err(ProviderError::NotImplemented { provider_type: "bigquery".into(), operation: "test_connection".into() })
     }
 
     async fn close(&self) -> Result<(), ProviderError> { Ok(()) }
@@ -72,13 +68,8 @@ impl Provider for BigQueryProvider {
 
 #[async_trait]
 impl SqlProvider for BigQueryProvider {
-    async fn execute(&self, query: &str, _params: &HashMap<String, String>) -> Result<SqlResult, ProviderError> {
-        let mut result = SqlResult::empty();
-        let query_upper = query.trim().to_uppercase();
-        if query_upper.starts_with("SELECT") || query_upper.starts_with("WITH") {
-            result.rows_returned = Some(0);
-        }
-        Ok(result)
+    async fn execute(&self, _query: &str, _params: &HashMap<String, String>) -> Result<SqlResult, ProviderError> {
+        Err(ProviderError::NotImplemented { provider_type: "bigquery".into(), operation: "execute".into() })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
@@ -86,6 +77,6 @@ impl SqlProvider for BigQueryProvider {
     }
 
     async fn describe_table(&self, _schema: &str, _table: &str) -> Result<Vec<ColumnInfo>, ProviderError> {
-        Ok(vec![])
+        Err(ProviderError::NotImplemented { provider_type: "bigquery".into(), operation: "describe_table".into() })
     }
 }

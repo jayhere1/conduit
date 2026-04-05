@@ -57,7 +57,7 @@ pub mod grpc_client;
 /// Canonical location for generated protobuf types.
 /// All modules should reference `crate::generated_proto` instead of
 /// including the file independently.
-pub(crate) mod generated_proto {
+pub mod generated_proto {
     include!("generated/conduit.distributed.rs");
 }
 

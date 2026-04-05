@@ -178,9 +178,7 @@ async fn test_kafka_produce() {
     ];
 
     let result = provider.produce("test_topic", &messages).await;
-    assert!(result.is_ok());
-    let stream_result = result.unwrap();
-    assert_eq!(stream_result.message_count, 2);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -190,9 +188,7 @@ async fn test_kafka_consume() {
         .expect("Failed to create Kafka provider");
 
     let result = provider.consume("test_topic", "test_group", 10).await;
-    assert!(result.is_ok());
-    let messages = result.unwrap();
-    assert!(messages.is_empty(), "Stub should return empty vec");
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -253,9 +249,7 @@ async fn test_rabbitmq_produce() {
     }];
 
     let result = provider.produce("test_queue", &messages).await;
-    assert!(result.is_ok());
-    let stream_result = result.unwrap();
-    assert_eq!(stream_result.message_count, 1);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -265,7 +259,7 @@ async fn test_rabbitmq_consume() {
         .expect("Failed to create RabbitMQ provider");
 
     let result = provider.consume("test_queue", "test_group", 5).await;
-    assert!(result.is_ok());
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -315,9 +309,7 @@ async fn test_kinesis_produce() {
     ];
 
     let result = provider.produce("test_stream", &messages).await;
-    assert!(result.is_ok());
-    let stream_result = result.unwrap();
-    assert_eq!(stream_result.message_count, 1);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -327,7 +319,7 @@ async fn test_kinesis_consume() {
         .expect("Failed to create Kinesis provider");
 
     let result = provider.consume("test_stream", "test_group", 100).await;
-    assert!(result.is_ok());
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -375,9 +367,7 @@ async fn test_pubsub_produce() {
     }];
 
     let result = provider.produce("test_topic", &messages).await;
-    assert!(result.is_ok());
-    let stream_result = result.unwrap();
-    assert_eq!(stream_result.message_count, 1);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -387,7 +377,7 @@ async fn test_pubsub_consume() {
         .expect("Failed to create Pub/Sub provider");
 
     let result = provider.consume("test_topic", "test_sub", 50).await;
-    assert!(result.is_ok());
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -435,9 +425,7 @@ async fn test_redis_stream_produce() {
     }];
 
     let result = provider.produce("mystream", &messages).await;
-    assert!(result.is_ok());
-    let stream_result = result.unwrap();
-    assert_eq!(stream_result.message_count, 1);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -447,7 +435,7 @@ async fn test_redis_stream_consume() {
         .expect("Failed to create Redis Stream provider");
 
     let result = provider.consume("mystream", "mygroup", 25).await;
-    assert!(result.is_ok());
+    assert!(result.is_err());
 }
 
 #[tokio::test]

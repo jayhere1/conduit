@@ -16,15 +16,51 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use dashmap::DashMap;
+use sysinfo::System;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tracing::{info, warn, error};
 
 use crate::proto_types::*;
+
+// ── System Metrics ──────────────────────────────────────────────────────
+
+struct SystemMetrics {
+    sys: System,
+}
+
+impl SystemMetrics {
+    fn new() -> Self {
+        let mut sys = System::new();
+        sys.refresh_cpu_all();
+        sys.refresh_memory();
+        Self { sys }
+    }
+
+    fn refresh(&mut self) -> (f64, f64, f64) {
+        self.sys.refresh_cpu_all();
+        self.sys.refresh_memory();
+        let cpu = self.sys.global_cpu_usage() as f64;
+        let total_mem = self.sys.total_memory() as f64;
+        let used_mem = self.sys.used_memory() as f64;
+        let mem = if total_mem > 0.0 { (used_mem / total_mem) * 100.0 } else { 0.0 };
+        // Disk metrics via sysinfo::Disks
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let (total_disk, avail_disk) = disks.iter().fold((0u64, 0u64), |(t, a), d| {
+            (t + d.total_space(), a + d.available_space())
+        });
+        let disk = if total_disk > 0 {
+            ((total_disk - avail_disk) as f64 / total_disk as f64) * 100.0
+        } else {
+            0.0
+        };
+        (cpu, mem, disk)
+    }
+}
 
 /// Configuration for a worker node.
 #[derive(Debug, Clone)]
@@ -49,6 +85,10 @@ pub struct WorkerConfig {
 
     /// Whether to gracefully drain on SIGTERM.
     pub graceful_shutdown: bool,
+
+    /// Path to the CA certificate PEM file for TLS connections to the coordinator.
+    /// When set, the worker connects using TLS (https).
+    pub tls_ca_cert_path: Option<String>,
 }
 
 impl Default for WorkerConfig {
@@ -65,6 +105,7 @@ impl Default for WorkerConfig {
             labels: HashMap::new(),
             heartbeat_interval_secs: 5,
             graceful_shutdown: true,
+            tls_ca_cert_path: None,
         }
     }
 }
@@ -97,6 +138,9 @@ pub struct Worker {
 
     /// Worker state.
     state: Arc<RwLock<WorkerState>>,
+
+    /// System metrics collector.
+    system_metrics: Mutex<SystemMetrics>,
 }
 
 impl Worker {
@@ -121,6 +165,7 @@ impl Worker {
             log_tx,
             state: Arc::new(RwLock::new(WorkerState::Active)),
             config,
+            system_metrics: Mutex::new(SystemMetrics::new()),
         };
 
         (worker, result_rx, log_rx)
@@ -549,12 +594,13 @@ impl Worker {
 
     /// Generate a heartbeat message.
     pub fn heartbeat(&self) -> WorkerHeartbeat {
+        let (cpu, mem, disk) = self.system_metrics.lock().unwrap().refresh();
         WorkerHeartbeat {
             worker_id: self.config.worker_id.clone(),
             active_tasks: self.running.len() as u32,
-            cpu_percent: 0.0, // TODO: read from /proc/stat or sysinfo
-            memory_percent: 0.0,
-            disk_percent: 0.0,
+            cpu_percent: cpu,
+            memory_percent: mem,
+            disk_percent: disk,
             running_assignments: self
                 .running
                 .iter()
@@ -612,6 +658,7 @@ mod tests {
             labels: HashMap::new(),
             heartbeat_interval_secs: 5,
             graceful_shutdown: true,
+            tls_ca_cert_path: None,
         })
     }
 

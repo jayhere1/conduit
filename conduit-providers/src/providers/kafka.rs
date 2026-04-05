@@ -58,11 +58,7 @@ impl Provider for KafkaProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Ok(ConnectionTestResult {
-            success: true,
-            message: format!("Kafka configured: brokers={} protocol={}", self.bootstrap_servers, self.security_protocol),
-            latency_ms: 0, server_version: None,
-        })
+        Err(ProviderError::NotImplemented { provider_type: "kafka".into(), operation: "test_connection".into() })
     }
 
     async fn close(&self) -> Result<(), ProviderError> { Ok(()) }
@@ -73,15 +69,9 @@ impl StreamProvider for KafkaProvider {
     async fn produce(
         &self,
         _topic: &str,
-        messages: &[StreamMessage],
+        _messages: &[StreamMessage],
     ) -> Result<StreamResult, ProviderError> {
-        let total_bytes: u64 = messages.iter().map(|m| m.value.len() as u64).sum();
-
-        Ok(StreamResult {
-            message_count: messages.len() as u64,
-            bytes_transferred: total_bytes,
-            execution_time_ms: 0,
-        })
+        Err(ProviderError::NotImplemented { provider_type: "kafka".into(), operation: "produce".into() })
     }
 
     async fn consume(
@@ -90,7 +80,7 @@ impl StreamProvider for KafkaProvider {
         _group_id: &str,
         _max_messages: usize,
     ) -> Result<Vec<StreamMessage>, ProviderError> {
-        Ok(vec![])
+        Err(ProviderError::NotImplemented { provider_type: "kafka".into(), operation: "consume".into() })
     }
 
     async fn list_topics(&self) -> Result<Vec<String>, ProviderError> {

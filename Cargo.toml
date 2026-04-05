@@ -55,6 +55,7 @@ prost = "0.13"
 axum = "0.7"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+governor = "0.7"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
