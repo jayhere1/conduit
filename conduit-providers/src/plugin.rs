@@ -201,8 +201,17 @@ impl std::fmt::Debug for PluginManager {
         f.debug_struct("PluginManager")
             .field("search_paths", &self.search_paths)
             .field("plugins", &self.plugins.keys().collect::<Vec<_>>())
-            .field("provider_types", &self.provider_index.keys().collect::<Vec<_>>())
+            .field(
+                "provider_types",
+                &self.provider_index.keys().collect::<Vec<_>>(),
+            )
             .finish()
+    }
+}
+
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -297,23 +306,24 @@ impl PluginManager {
                                 conduit_api = %self.api_version,
                                 "Plugin API version mismatch"
                             );
-                            self.plugins.insert(name.clone(), LoadedPlugin {
-                                manifest,
-                                path: plugin_dir,
-                                status: PluginStatus::Error(format!(
-                                    "API version mismatch: plugin={}, conduit={}",
-                                    name, self.api_version
-                                )),
-                            });
+                            self.plugins.insert(
+                                name.clone(),
+                                LoadedPlugin {
+                                    manifest,
+                                    path: plugin_dir,
+                                    status: PluginStatus::Error(format!(
+                                        "API version mismatch: plugin={}, conduit={}",
+                                        name, self.api_version
+                                    )),
+                                },
+                            );
                             continue;
                         }
 
                         // Index provider types
                         for provider_def in &manifest.providers {
-                            self.provider_index.insert(
-                                provider_def.id.clone(),
-                                name.clone(),
-                            );
+                            self.provider_index
+                                .insert(provider_def.id.clone(), name.clone());
                             for alias in &provider_def.aliases {
                                 self.provider_index.insert(alias.clone(), name.clone());
                             }
@@ -326,11 +336,14 @@ impl PluginManager {
                             "Discovered plugin"
                         );
 
-                        self.plugins.insert(name, LoadedPlugin {
-                            manifest,
-                            path: plugin_dir,
-                            status: PluginStatus::Discovered,
-                        });
+                        self.plugins.insert(
+                            name,
+                            LoadedPlugin {
+                                manifest,
+                                path: plugin_dir,
+                                status: PluginStatus::Discovered,
+                            },
+                        );
 
                         discovered += 1;
                     }
@@ -364,12 +377,11 @@ impl PluginManager {
             plugin_dir.join("manifest.yml")
         };
 
-        let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
-            ProviderError::InvalidConfig {
+        let content =
+            std::fs::read_to_string(&manifest_path).map_err(|e| ProviderError::InvalidConfig {
                 connection: plugin_dir.display().to_string(),
                 reason: format!("Failed to read manifest: {}", e),
-            }
-        })?;
+            })?;
 
         serde_yaml::from_str(&content).map_err(|e| ProviderError::InvalidConfig {
             connection: plugin_dir.display().to_string(),
@@ -435,23 +447,34 @@ impl PluginManager {
 
     /// Generate a summary for the API.
     pub fn summary(&self) -> PluginManagerSummary {
-        let plugins: Vec<PluginSummary> = self.plugins.values().map(|p| {
-            PluginSummary {
+        let plugins: Vec<PluginSummary> = self
+            .plugins
+            .values()
+            .map(|p| PluginSummary {
                 name: p.manifest.name.clone(),
                 version: p.manifest.version.clone(),
                 description: p.manifest.description.clone(),
-                providers: p.manifest.providers.iter().map(|pd| PluginProviderSummary {
-                    id: pd.id.clone(),
-                    display_name: pd.display_name.clone(),
-                    category: pd.category.to_string(),
-                    aliases: pd.aliases.clone(),
-                }).collect(),
+                providers: p
+                    .manifest
+                    .providers
+                    .iter()
+                    .map(|pd| PluginProviderSummary {
+                        id: pd.id.clone(),
+                        display_name: pd.display_name.clone(),
+                        category: pd.category.to_string(),
+                        aliases: pd.aliases.clone(),
+                    })
+                    .collect(),
                 status: p.status.clone(),
-            }
-        }).collect();
+            })
+            .collect();
 
         PluginManagerSummary {
-            search_paths: self.search_paths.iter().map(|p| p.display().to_string()).collect(),
+            search_paths: self
+                .search_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
             api_version: self.api_version.clone(),
             plugins,
             total_provider_types: self.provider_index.len(),
@@ -711,7 +734,8 @@ entry_point: libconduit_plugin_future
         for (name, id) in [("plugin-a", "provider_a"), ("plugin-b", "provider_b")] {
             let plugin_dir = dir.path().join(name);
             std::fs::create_dir_all(&plugin_dir).unwrap();
-            let manifest = format!(r#"
+            let manifest = format!(
+                r#"
 name: {name}
 version: "1.0.0"
 conduit_api_version: "0.1"
@@ -720,7 +744,8 @@ providers:
     display_name: "Provider"
     category: sql
 entry_point: lib{name}
-"#);
+"#
+            );
             std::fs::write(plugin_dir.join("manifest.yaml"), manifest).unwrap();
         }
 

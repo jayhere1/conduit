@@ -15,9 +15,7 @@ use serde_json::{json, Value};
 use crate::AppState;
 
 /// GET /api/v1/connections — list all configured connections.
-pub async fn list_connections(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+pub async fn list_connections(State(state): State<Arc<AppState>>) -> Json<Value> {
     let connections = state.list_connections();
 
     Json(json!({

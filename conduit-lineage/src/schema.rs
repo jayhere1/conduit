@@ -17,7 +17,10 @@ pub enum ColumnType {
     Boolean,
     Date,
     Timestamp,
-    Decimal { precision: u8, scale: u8 },
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
     Array(Box<ColumnType>),
     Struct(Vec<Column>),
     Json,
@@ -35,7 +38,9 @@ impl std::fmt::Display for ColumnType {
             ColumnType::Boolean => write!(f, "BOOLEAN"),
             ColumnType::Date => write!(f, "DATE"),
             ColumnType::Timestamp => write!(f, "TIMESTAMP"),
-            ColumnType::Decimal { precision, scale } => write!(f, "DECIMAL({},{})", precision, scale),
+            ColumnType::Decimal { precision, scale } => {
+                write!(f, "DECIMAL({},{})", precision, scale)
+            }
             ColumnType::Array(inner) => write!(f, "ARRAY<{}>", inner),
             ColumnType::Struct(fields) => {
                 let names: Vec<_> = fields.iter().map(|c| c.name.as_str()).collect();
@@ -152,7 +157,11 @@ impl std::fmt::Display for Schema {
             } else {
                 format!(" [{}]", col.tags.join(", "))
             };
-            writeln!(f, "  {} {} {}{}", col.name, col.column_type, null_marker, tags)?;
+            writeln!(
+                f,
+                "  {} {} {}{}",
+                col.name, col.column_type, null_marker, tags
+            )?;
         }
         Ok(())
     }
@@ -225,11 +234,20 @@ mod tests {
 
     #[test]
     fn schema_column_lookup() {
-        let schema = Schema::new("extract_orders", vec![
-            Column::new("id", ColumnType::Integer).not_null(),
-            Column::new("customer_name", ColumnType::String).with_tag("pii"),
-            Column::new("total", ColumnType::Decimal { precision: 10, scale: 2 }),
-        ]);
+        let schema = Schema::new(
+            "extract_orders",
+            vec![
+                Column::new("id", ColumnType::Integer).not_null(),
+                Column::new("customer_name", ColumnType::String).with_tag("pii"),
+                Column::new(
+                    "total",
+                    ColumnType::Decimal {
+                        precision: 10,
+                        scale: 2,
+                    },
+                ),
+            ],
+        );
 
         assert!(schema.has_column("id"));
         assert!(!schema.has_column("nonexistent"));
@@ -244,10 +262,13 @@ mod tests {
     fn schema_registry_crud() {
         let mut registry = SchemaRegistry::new();
 
-        let schema = Schema::new("extract", vec![
-            Column::new("id", ColumnType::Integer),
-            Column::new("name", ColumnType::String),
-        ]);
+        let schema = Schema::new(
+            "extract",
+            vec![
+                Column::new("id", ColumnType::Integer),
+                Column::new("name", ColumnType::String),
+            ],
+        );
 
         registry.register("etl", schema);
         assert_eq!(registry.len(), 1);
@@ -262,7 +283,16 @@ mod tests {
     #[test]
     fn column_type_display() {
         assert_eq!(format!("{}", ColumnType::String), "STRING");
-        assert_eq!(format!("{}", ColumnType::Decimal { precision: 10, scale: 2 }), "DECIMAL(10,2)");
+        assert_eq!(
+            format!(
+                "{}",
+                ColumnType::Decimal {
+                    precision: 10,
+                    scale: 2
+                }
+            ),
+            "DECIMAL(10,2)"
+        );
         assert_eq!(
             format!("{}", ColumnType::Array(Box::new(ColumnType::Integer))),
             "ARRAY<INTEGER>"

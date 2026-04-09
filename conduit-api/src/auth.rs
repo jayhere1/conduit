@@ -26,7 +26,7 @@ use std::sync::RwLock;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 // ── Roles ────────────────────────────────────────────────────────────────────
 
@@ -101,14 +101,13 @@ impl Permission {
         use Permission::*;
         match self {
             // Anyone can view
-            ViewDags | ViewRuns | ViewEnvironments | ViewEvents
-            | ViewLineage | ViewContracts | ViewMetrics | ViewConnections
-            | ViewCluster | ViewHealth => Role::Viewer,
+            ViewDags | ViewRuns | ViewEnvironments | ViewEvents | ViewLineage | ViewContracts
+            | ViewMetrics | ViewConnections | ViewCluster | ViewHealth => Role::Viewer,
 
             // Operators can write
             TriggerRun | CompileDags | CreateEnvironment | DeleteEnvironment
-            | PromoteEnvironment | GeneratePlan | ApplyPlan | CreateBackfill
-            | DrainWorker | ExtractLineage | ValidateContract => Role::Operator,
+            | PromoteEnvironment | GeneratePlan | ApplyPlan | CreateBackfill | DrainWorker
+            | ExtractLineage | ValidateContract => Role::Operator,
 
             // Admin-only
             ManageApiKeys => Role::Admin,
@@ -222,12 +221,21 @@ impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthError::MissingToken => write!(f, "Missing authorization token"),
-            AuthError::InvalidFormat => write!(f, "Invalid authorization format. Use: Bearer <api-key>"),
+            AuthError::InvalidFormat => {
+                write!(f, "Invalid authorization format. Use: Bearer <api-key>")
+            }
             AuthError::InvalidKey => write!(f, "Invalid API key"),
             AuthError::KeyRevoked => write!(f, "API key has been revoked"),
             AuthError::KeyExpired => write!(f, "API key has expired"),
-            AuthError::Forbidden { required_role, actual_role } => {
-                write!(f, "Insufficient permissions: requires {} role, you have {}", required_role, actual_role)
+            AuthError::Forbidden {
+                required_role,
+                actual_role,
+            } => {
+                write!(
+                    f,
+                    "Insufficient permissions: requires {} role, you have {}",
+                    required_role, actual_role
+                )
             }
         }
     }
@@ -237,8 +245,10 @@ impl AuthError {
     /// HTTP status code for this error.
     pub fn status_code(&self) -> u16 {
         match self {
-            AuthError::MissingToken | AuthError::InvalidFormat
-            | AuthError::InvalidKey | AuthError::KeyRevoked
+            AuthError::MissingToken
+            | AuthError::InvalidFormat
+            | AuthError::InvalidKey
+            | AuthError::KeyRevoked
             | AuthError::KeyExpired => 401,
             AuthError::Forbidden { .. } => 403,
         }
@@ -309,10 +319,7 @@ impl AuthStore {
             last_used_at: None,
         };
 
-        if let (Ok(mut keys), Ok(mut ids)) = (
-            self.keys_by_hash.write(),
-            self.id_to_hash.write(),
-        ) {
+        if let (Ok(mut keys), Ok(mut ids)) = (self.keys_by_hash.write(), self.id_to_hash.write()) {
             ids.insert(key.id.clone(), key_hash.clone());
             keys.insert(key_hash, key.clone());
             Ok((plaintext, key))
@@ -325,7 +332,10 @@ impl AuthStore {
     pub fn authenticate(&self, plaintext_key: &str) -> Result<AuthContext, AuthError> {
         let key_hash = hash_key(plaintext_key);
 
-        let mut keys = self.keys_by_hash.write().map_err(|_| AuthError::InvalidKey)?;
+        let mut keys = self
+            .keys_by_hash
+            .write()
+            .map_err(|_| AuthError::InvalidKey)?;
 
         let key = keys.get_mut(&key_hash).ok_or(AuthError::InvalidKey)?;
 
@@ -388,7 +398,10 @@ impl AuthStore {
         let hash = ids.get(key_id).ok_or(AuthError::InvalidKey)?.clone();
         drop(ids);
 
-        let mut keys = self.keys_by_hash.write().map_err(|_| AuthError::InvalidKey)?;
+        let mut keys = self
+            .keys_by_hash
+            .write()
+            .map_err(|_| AuthError::InvalidKey)?;
         let key = keys.get_mut(&hash).ok_or(AuthError::InvalidKey)?;
         key.revoked = true;
         Ok(key.clone())
@@ -398,7 +411,13 @@ impl AuthStore {
     /// Returns the plaintext key.
     pub fn create_bootstrap_key(&self) -> String {
         let (plaintext, _key) = self
-            .create_key("bootstrap-admin", Role::Admin, "system", Some("Initial admin key created at startup".to_string()), None)
+            .create_key(
+                "bootstrap-admin",
+                Role::Admin,
+                "system",
+                Some("Initial admin key created at startup".to_string()),
+                None,
+            )
             .expect("Failed to create bootstrap key");
         plaintext
     }
@@ -411,10 +430,9 @@ impl AuthStore {
 
     /// Import keys from JSON (for loading from disk).
     pub fn import_keys(&self, keys: &[ApiKey]) {
-        if let (Ok(mut key_map), Ok(mut id_map)) = (
-            self.keys_by_hash.write(),
-            self.id_to_hash.write(),
-        ) {
+        if let (Ok(mut key_map), Ok(mut id_map)) =
+            (self.keys_by_hash.write(), self.id_to_hash.write())
+        {
             for key in keys {
                 id_map.insert(key.id.clone(), key.key_hash.clone());
                 key_map.insert(key.key_hash.clone(), key.clone());
@@ -530,8 +548,12 @@ mod tests {
     #[test]
     fn test_list_keys() {
         let store = AuthStore::new(true);
-        store.create_key("key-1", Role::Viewer, "test", None, None).unwrap();
-        store.create_key("key-2", Role::Admin, "test", None, None).unwrap();
+        store
+            .create_key("key-1", Role::Viewer, "test", None, None)
+            .unwrap();
+        store
+            .create_key("key-2", Role::Admin, "test", None, None)
+            .unwrap();
 
         let keys = store.list_keys();
         assert_eq!(keys.len(), 2);
@@ -539,8 +561,14 @@ mod tests {
 
     #[test]
     fn test_extract_bearer() {
-        assert_eq!(AuthStore::extract_bearer("Bearer abc123").unwrap(), "abc123");
-        assert_eq!(AuthStore::extract_bearer("Bearer  abc123 ").unwrap(), "abc123");
+        assert_eq!(
+            AuthStore::extract_bearer("Bearer abc123").unwrap(),
+            "abc123"
+        );
+        assert_eq!(
+            AuthStore::extract_bearer("Bearer  abc123 ").unwrap(),
+            "abc123"
+        );
         assert!(AuthStore::extract_bearer("Basic abc123").is_err());
         assert!(AuthStore::extract_bearer("Bearer ").is_err());
         assert!(AuthStore::extract_bearer("Bearer").is_err());
@@ -575,8 +603,18 @@ mod tests {
     #[test]
     fn test_export_import_roundtrip() {
         let store1 = AuthStore::new(true);
-        store1.create_key("key-a", Role::Viewer, "test", Some("first key".to_string()), None).unwrap();
-        store1.create_key("key-b", Role::Admin, "test", None, None).unwrap();
+        store1
+            .create_key(
+                "key-a",
+                Role::Viewer,
+                "test",
+                Some("first key".to_string()),
+                None,
+            )
+            .unwrap();
+        store1
+            .create_key("key-b", Role::Admin, "test", None, None)
+            .unwrap();
 
         let exported = store1.export_keys();
         let keys: Vec<ApiKey> = serde_json::from_value(exported).unwrap();

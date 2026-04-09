@@ -39,12 +39,9 @@ impl CronSchedule {
     /// # Errors
     /// Returns an error if the expression is malformed or contains invalid values.
     pub fn parse(expr: &str) -> Result<Self, String> {
-        let parts: Vec<&str> = expr.trim().split_whitespace().collect();
+        let parts: Vec<&str> = expr.split_whitespace().collect();
         if parts.len() != 5 {
-            return Err(format!(
-                "Expected 5 fields, got {}",
-                parts.len()
-            ));
+            return Err(format!("Expected 5 fields, got {}", parts.len()));
         }
 
         Ok(CronSchedule {
@@ -60,15 +57,15 @@ impl CronSchedule {
 
     /// Check if this cron schedule is due at the given timestamp.
     pub fn is_due(&self, dt: DateTime<Utc>) -> bool {
-        let minute = dt.minute() as u32;
-        let hour = dt.hour() as u32;
-        let day = dt.day() as u32;
-        let month = dt.month() as u32;
-        let weekday = dt.weekday().number_from_sunday() as u32 - 1; // 0=Sunday
+        let minute = dt.minute();
+        let hour = dt.hour();
+        let day = dt.day();
+        let month = dt.month();
+        let weekday = dt.weekday().number_from_sunday() - 1; // 0=Sunday
 
         let day_match = match (self.days_is_wildcard, self.weekdays_is_wildcard) {
-            (true, true) => true,                          // both wildcard: any day
-            (false, true) => self.days.contains(&day),     // only day-of-month specified
+            (true, true) => true,                              // both wildcard: any day
+            (false, true) => self.days.contains(&day),         // only day-of-month specified
             (true, false) => self.weekdays.contains(&weekday), // only weekday specified
             (false, false) => self.days.contains(&day) || self.weekdays.contains(&weekday), // both: OR
         };
@@ -91,7 +88,7 @@ impl CronSchedule {
             if self.is_due(current) {
                 return Some(current);
             }
-            current = current + chrono::Duration::minutes(1);
+            current += chrono::Duration::minutes(1);
         }
         None
     }
@@ -132,9 +129,9 @@ fn parse_field(field: &str, min: u32, max: u32) -> Result<BTreeSet<u32>, String>
 
     // Handle step expressions like "*/15"
     if let Some(step_str) = field.strip_prefix("*/") {
-        let step: u32 = step_str.parse().map_err(|_| {
-            format!("Invalid step value: {}", step_str)
-        })?;
+        let step: u32 = step_str
+            .parse()
+            .map_err(|_| format!("Invalid step value: {}", step_str))?;
 
         if step == 0 {
             return Err("Step must be > 0".to_string());
@@ -155,40 +152,31 @@ fn parse_field(field: &str, min: u32, max: u32) -> Result<BTreeSet<u32>, String>
             let start_str = &part[..dash_pos];
             let end_str = &part[dash_pos + 1..];
 
-            let start: u32 = start_str.parse().map_err(|_| {
-                format!("Invalid range start: {}", start_str)
-            })?;
-            let end: u32 = end_str.parse().map_err(|_| {
-                format!("Invalid range end: {}", end_str)
-            })?;
+            let start: u32 = start_str
+                .parse()
+                .map_err(|_| format!("Invalid range start: {}", start_str))?;
+            let end: u32 = end_str
+                .parse()
+                .map_err(|_| format!("Invalid range end: {}", end_str))?;
 
             if start > end {
-                return Err(format!(
-                    "Invalid range: {}-{} (start > end)",
-                    start, end
-                ));
+                return Err(format!("Invalid range: {}-{} (start > end)", start, end));
             }
 
             for val in start..=end {
                 if val < min || val > max {
-                    return Err(format!(
-                        "Value {} out of range [{}, {}]",
-                        val, min, max
-                    ));
+                    return Err(format!("Value {} out of range [{}, {}]", val, min, max));
                 }
                 result.insert(val);
             }
         } else {
             // Single value
-            let val: u32 = part.parse().map_err(|_| {
-                format!("Invalid value: {}", part)
-            })?;
+            let val: u32 = part
+                .parse()
+                .map_err(|_| format!("Invalid value: {}", part))?;
 
             if val < min || val > max {
-                return Err(format!(
-                    "Value {} out of range [{}, {}]",
-                    val, min, max
-                ));
+                return Err(format!("Value {} out of range [{}, {}]", val, min, max));
             }
             result.insert(val);
         }

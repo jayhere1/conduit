@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
 use axum::response::IntoResponse;
 use tracing::{info, warn};
 
@@ -38,7 +38,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     });
 
     if socket
-        .send(Message::Text(welcome.to_string().into()))
+        .send(Message::Text(welcome.to_string()))
         .await
         .is_err()
     {
@@ -53,7 +53,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 match result {
                     Ok(event_json) => {
                         if socket
-                            .send(Message::Text(event_json.into()))
+                            .send(Message::Text(event_json))
                             .await
                             .is_err()
                         {
@@ -67,7 +67,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             "type": "warning",
                             "message": format!("Dropped {} events (client too slow)", n),
                         });
-                        let _ = socket.send(Message::Text(lag_msg.to_string().into())).await;
+                        let _ = socket.send(Message::Text(lag_msg.to_string())).await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         break;

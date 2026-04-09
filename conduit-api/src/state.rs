@@ -8,15 +8,15 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
 use conduit_lineage::TableCatalog;
-use conduit_providers::ProviderRegistry;
 use conduit_providers::registry::ConnectionSummary;
 use conduit_providers::traits::ConnectionTestResult;
+use conduit_providers::ProviderRegistry;
 use conduit_scheduler::SchedulerEvent;
 use conduit_state::{EnvironmentManager, SnapshotStore};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::auth::{AuthStore, ApiKey};
+use crate::auth::{ApiKey, AuthStore};
 
 /// Run status tracking for the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +71,11 @@ impl AppState {
     }
 
     /// Create with UI directory (auth disabled).
-    pub fn with_ui_dir(dags_path: PathBuf, state_dir: PathBuf, ui_dir: Option<PathBuf>) -> Arc<Self> {
+    pub fn with_ui_dir(
+        dags_path: PathBuf,
+        state_dir: PathBuf,
+        ui_dir: Option<PathBuf>,
+    ) -> Arc<Self> {
         Self::with_options(dags_path, state_dir, ui_dir, false)
     }
 
@@ -154,11 +158,21 @@ impl AppState {
     }
 
     /// Test a specific connection.
-    pub async fn test_connection(&self, name: &str) -> Result<ConnectionTestResult, conduit_providers::ProviderError> {
-        let registry_guard = self.provider_registry.read()
-            .map_err(|_| conduit_providers::ProviderError::ConnectionNotFound { name: name.to_string() })?;
-        let registry = registry_guard.as_ref()
-            .ok_or_else(|| conduit_providers::ProviderError::ConnectionNotFound { name: name.to_string() })?;
+    #[allow(clippy::await_holding_lock)]
+    pub async fn test_connection(
+        &self,
+        name: &str,
+    ) -> Result<ConnectionTestResult, conduit_providers::ProviderError> {
+        let registry_guard = self.provider_registry.read().map_err(|_| {
+            conduit_providers::ProviderError::ConnectionNotFound {
+                name: name.to_string(),
+            }
+        })?;
+        let registry = registry_guard.as_ref().ok_or_else(|| {
+            conduit_providers::ProviderError::ConnectionNotFound {
+                name: name.to_string(),
+            }
+        })?;
         registry.test_connection(name).await
     }
 
@@ -180,7 +194,7 @@ impl AppState {
             .read()
             .map(|runs| {
                 runs.iter()
-                    .filter(|r| dag_id.map_or(true, |id| r.dag_id == id))
+                    .filter(|r| dag_id.is_none_or(|id| r.dag_id == id))
                     .cloned()
                     .collect()
             })
@@ -193,10 +207,17 @@ impl AppState {
         let now = Utc::now();
 
         let ecommerce_tasks = vec![
-            "extract_orders", "extract_products", "extract_customers",
-            "extract_inventory", "extract_clickstream", "validate_sources",
-            "enrich_orders", "sessionize_clicks", "build_customer_360",
-            "build_product_performance", "build_revenue_dashboard",
+            "extract_orders",
+            "extract_products",
+            "extract_customers",
+            "extract_inventory",
+            "extract_clickstream",
+            "validate_sources",
+            "enrich_orders",
+            "sessionize_clicks",
+            "build_customer_360",
+            "build_product_performance",
+            "build_revenue_dashboard",
             "notify_stakeholders",
         ];
 
@@ -214,7 +235,11 @@ impl AppState {
                 .enumerate()
                 .map(|(i, t)| {
                     let s = if status == "failed" && i >= 6 {
-                        if i == 6 { "failed" } else { "skipped" }
+                        if i == 6 {
+                            "failed"
+                        } else {
+                            "skipped"
+                        }
                     } else {
                         "success"
                     };
@@ -223,7 +248,10 @@ impl AppState {
                 .collect();
 
             self.record_run(DagRunInfo {
-                run_id: format!("run_wh_{}", (now - Duration::days(day)).format("%Y%m%d_050000")),
+                run_id: format!(
+                    "run_wh_{}",
+                    (now - Duration::days(day)).format("%Y%m%d_050000")
+                ),
                 dag_id: "daily_warehouse_refresh".to_string(),
                 status: status.to_string(),
                 started_at: started,
@@ -234,11 +262,17 @@ impl AppState {
         }
 
         let saas_tasks = vec![
-            "wait_for_billing_close", "extract_subscriptions",
-            "extract_billing_events", "extract_usage_data",
-            "validate_billing", "compute_mrr", "compute_churn",
-            "compute_cohort_retention", "compute_expansion_contraction",
-            "aggregate_saas_dashboard", "update_investor_metrics",
+            "wait_for_billing_close",
+            "extract_subscriptions",
+            "extract_billing_events",
+            "extract_usage_data",
+            "validate_billing",
+            "compute_mrr",
+            "compute_churn",
+            "compute_cohort_retention",
+            "compute_expansion_contraction",
+            "aggregate_saas_dashboard",
+            "update_investor_metrics",
             "alert_on_anomalies",
         ];
 
@@ -250,7 +284,10 @@ impl AppState {
                 .collect();
 
             self.record_run(DagRunInfo {
-                run_id: format!("run_mkt_{}", (now - Duration::days(month * 30 + 1)).format("%Y%m%d_040000")),
+                run_id: format!(
+                    "run_mkt_{}",
+                    (now - Duration::days(month * 30 + 1)).format("%Y%m%d_040000")
+                ),
                 dag_id: "weekly_marketing_report".to_string(),
                 status: "success".to_string(),
                 started_at: started,
@@ -261,12 +298,20 @@ impl AppState {
         }
 
         let ml_tasks = vec![
-            "extract_training_data", "validate_raw_data",
-            "compute_user_features", "compute_product_features",
-            "compute_behavioral_features", "compute_temporal_features",
-            "assemble_feature_matrix", "train_model",
-            "evaluate_holdout", "detect_drift", "check_fairness",
-            "promotion_gate", "deploy_to_serving", "notify_ml_team",
+            "extract_training_data",
+            "validate_raw_data",
+            "compute_user_features",
+            "compute_product_features",
+            "compute_behavioral_features",
+            "compute_temporal_features",
+            "assemble_feature_matrix",
+            "train_model",
+            "evaluate_holdout",
+            "detect_drift",
+            "check_fairness",
+            "promotion_gate",
+            "deploy_to_serving",
+            "notify_ml_team",
         ];
 
         for day in 0..7 {
@@ -274,7 +319,7 @@ impl AppState {
             let (status, duration_min) = match day {
                 1 => ("failed", 95),
                 4 => ("running", 0),
-                _ => ("success", 110 + (day as i64 * 7)),
+                _ => ("success", 110 + (day * 7)),
             };
 
             let task_states: HashMap<String, String> = ml_tasks
@@ -301,19 +346,30 @@ impl AppState {
             };
 
             self.record_run(DagRunInfo {
-                run_id: format!("run_ml_{}", (now - Duration::days(day)).format("%Y%m%d_020000")),
+                run_id: format!(
+                    "run_ml_{}",
+                    (now - Duration::days(day)).format("%Y%m%d_020000")
+                ),
                 dag_id: "daily_model_training".to_string(),
                 status: status.to_string(),
                 started_at: started,
                 finished_at: ended,
                 task_states,
-                triggered_by: if day == 3 { "api".to_string() } else { "scheduler".to_string() },
+                triggered_by: if day == 3 {
+                    "api".to_string()
+                } else {
+                    "scheduler".to_string()
+                },
             });
         }
 
-        let etl_tasks = vec![
-            "extract_orders", "extract_customers", "validate_extracts",
-            "transform_orders", "build_customer_360", "notify_completion",
+        let etl_tasks = [
+            "extract_orders",
+            "extract_customers",
+            "validate_extracts",
+            "transform_orders",
+            "build_customer_360",
+            "notify_completion",
         ];
 
         for day in 0..5 {
@@ -324,7 +380,10 @@ impl AppState {
                 .collect();
 
             self.record_run(DagRunInfo {
-                run_id: format!("run_demo_{}", (now - Duration::days(day)).format("%Y%m%d_060000")),
+                run_id: format!(
+                    "run_demo_{}",
+                    (now - Duration::days(day)).format("%Y%m%d_060000")
+                ),
                 dag_id: "demo_pipeline".to_string(),
                 status: "success".to_string(),
                 started_at: started,
@@ -347,24 +406,71 @@ impl AppState {
         let mut connections = HashMap::new();
 
         let sql_connections = vec![
-            ("shopify_replica", "postgres", "shopify-replica.internal", 5432, "shopify"),
-            ("warehouse_mgmt", "postgres", "warehouse-db.internal", 5432, "warehouse"),
-            ("stripe_replica", "postgres", "stripe-replica.internal", 5432, "stripe"),
-            ("product_db", "postgres", "product-db.internal", 5432, "product"),
-            ("feature_store", "postgres", "feature-store.internal", 5432, "features"),
-            ("source_db", "postgres", "source-primary.internal", 5432, "production"),
-            ("clickhouse_events", "clickhouse", "clickhouse-cluster.internal", 8123, "events"),
+            (
+                "shopify_replica",
+                "postgres",
+                "shopify-replica.internal",
+                5432,
+                "shopify",
+            ),
+            (
+                "warehouse_mgmt",
+                "postgres",
+                "warehouse-db.internal",
+                5432,
+                "warehouse",
+            ),
+            (
+                "stripe_replica",
+                "postgres",
+                "stripe-replica.internal",
+                5432,
+                "stripe",
+            ),
+            (
+                "product_db",
+                "postgres",
+                "product-db.internal",
+                5432,
+                "product",
+            ),
+            (
+                "feature_store",
+                "postgres",
+                "feature-store.internal",
+                5432,
+                "features",
+            ),
+            (
+                "source_db",
+                "postgres",
+                "source-primary.internal",
+                5432,
+                "production",
+            ),
+            (
+                "clickhouse_events",
+                "clickhouse",
+                "clickhouse-cluster.internal",
+                8123,
+                "events",
+            ),
         ];
 
         for (name, conn_type, host, port, db) in &sql_connections {
-            connections.insert(name.to_string(), ConnectionConfig {
-                conn_type: conn_type.to_string(),
-                host: Some(host.to_string()),
-                port: Some(*port),
-                database: Some(db.to_string()),
-                credentials: Some("${DB_PASSWORD}".to_string()),
-                extra: [("user".to_string(), json!("conduit_reader"))].into_iter().collect(),
-            });
+            connections.insert(
+                name.to_string(),
+                ConnectionConfig {
+                    conn_type: conn_type.to_string(),
+                    host: Some(host.to_string()),
+                    port: Some(*port),
+                    database: Some(db.to_string()),
+                    credentials: Some("${DB_PASSWORD}".to_string()),
+                    extra: [("user".to_string(), json!("conduit_reader"))]
+                        .into_iter()
+                        .collect(),
+                },
+            );
         }
 
         for (name, wh, schema) in [
@@ -372,66 +478,96 @@ impl AppState {
             ("warehouse", "transform_wh_large", "staging"),
             ("data_lake", "ingest_wh_small", "raw"),
         ] {
-            connections.insert(name.to_string(), ConnectionConfig {
-                conn_type: "snowflake".to_string(),
-                host: Some("acme.us-east-1.snowflakecomputing.com".to_string()),
-                port: None,
-                database: Some("analytics".to_string()),
-                credentials: Some("${SNOWFLAKE_PASSWORD}".to_string()),
-                extra: [
-                    ("user".to_string(), json!("conduit_etl")),
-                    ("warehouse".to_string(), json!(wh)),
-                    ("role".to_string(), json!("etl_role")),
-                    ("schema".to_string(), json!(schema)),
-                ].into_iter().collect(),
-            });
+            connections.insert(
+                name.to_string(),
+                ConnectionConfig {
+                    conn_type: "snowflake".to_string(),
+                    host: Some("acme.us-east-1.snowflakecomputing.com".to_string()),
+                    port: None,
+                    database: Some("analytics".to_string()),
+                    credentials: Some("${SNOWFLAKE_PASSWORD}".to_string()),
+                    extra: [
+                        ("user".to_string(), json!("conduit_etl")),
+                        ("warehouse".to_string(), json!(wh)),
+                        ("role".to_string(), json!("etl_role")),
+                        ("schema".to_string(), json!(schema)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            );
         }
 
-        connections.insert("data_lake_s3".to_string(), ConnectionConfig {
-            conn_type: "s3".to_string(),
-            host: None,
-            port: None,
-            database: Some("acme-data-lake".to_string()),
-            credentials: Some("${AWS_SECRET_ACCESS_KEY}".to_string()),
-            extra: [
-                ("region".to_string(), json!("us-east-1")),
-                ("prefix".to_string(), json!("raw/")),
-            ].into_iter().collect(),
-        });
+        connections.insert(
+            "data_lake_s3".to_string(),
+            ConnectionConfig {
+                conn_type: "s3".to_string(),
+                host: None,
+                port: None,
+                database: Some("acme-data-lake".to_string()),
+                credentials: Some("${AWS_SECRET_ACCESS_KEY}".to_string()),
+                extra: [
+                    ("region".to_string(), json!("us-east-1")),
+                    ("prefix".to_string(), json!("raw/")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
 
-        connections.insert("model_artifacts".to_string(), ConnectionConfig {
-            conn_type: "s3".to_string(),
-            host: None,
-            port: None,
-            database: Some("acme-ml-artifacts".to_string()),
-            credentials: Some("${AWS_SECRET_ACCESS_KEY}".to_string()),
-            extra: [
-                ("region".to_string(), json!("us-east-1")),
-                ("prefix".to_string(), json!("models/")),
-            ].into_iter().collect(),
-        });
+        connections.insert(
+            "model_artifacts".to_string(),
+            ConnectionConfig {
+                conn_type: "s3".to_string(),
+                host: None,
+                port: None,
+                database: Some("acme-ml-artifacts".to_string()),
+                credentials: Some("${AWS_SECRET_ACCESS_KEY}".to_string()),
+                extra: [
+                    ("region".to_string(), json!("us-east-1")),
+                    ("prefix".to_string(), json!("models/")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
 
-        connections.insert("slack_notifications".to_string(), ConnectionConfig {
-            conn_type: "webhook".to_string(),
-            host: Some("https://hooks.slack.com".to_string()),
-            port: None,
-            database: None,
-            credentials: None,
-            extra: [("base_path".to_string(), json!("/services/T00/B00/pipeline-alerts"))].into_iter().collect(),
-        });
+        connections.insert(
+            "slack_notifications".to_string(),
+            ConnectionConfig {
+                conn_type: "webhook".to_string(),
+                host: Some("https://hooks.slack.com".to_string()),
+                port: None,
+                database: None,
+                credentials: None,
+                extra: [(
+                    "base_path".to_string(),
+                    json!("/services/T00/B00/pipeline-alerts"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
 
-        connections.insert("event_bus".to_string(), ConnectionConfig {
-            conn_type: "kafka".to_string(),
-            host: Some("kafka-1.internal:9092,kafka-2.internal:9092,kafka-3.internal:9092".to_string()),
-            port: None,
-            database: None,
-            credentials: Some("${KAFKA_PASSWORD}".to_string()),
-            extra: [
-                ("security_protocol".to_string(), json!("SASL_SSL")),
-                ("sasl_mechanism".to_string(), json!("SCRAM-SHA-256")),
-                ("group_id".to_string(), json!("conduit-pipeline")),
-            ].into_iter().collect(),
-        });
+        connections.insert(
+            "event_bus".to_string(),
+            ConnectionConfig {
+                conn_type: "kafka".to_string(),
+                host: Some(
+                    "kafka-1.internal:9092,kafka-2.internal:9092,kafka-3.internal:9092".to_string(),
+                ),
+                port: None,
+                database: None,
+                credentials: Some("${KAFKA_PASSWORD}".to_string()),
+                extra: [
+                    ("security_protocol".to_string(), json!("SASL_SSL")),
+                    ("sasl_mechanism".to_string(), json!("SCRAM-SHA-256")),
+                    ("group_id".to_string(), json!("conduit-pipeline")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
 
         let registry = tokio::runtime::Handle::try_current()
             .ok()

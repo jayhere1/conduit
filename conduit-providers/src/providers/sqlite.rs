@@ -20,9 +20,9 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Column, Row, SqlitePool};
 use tokio::sync::OnceCell;
 
+use super::{extra_str, extra_u64};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, extra_u64};
 
 /// SQLite provider
 pub struct SqliteProvider {
@@ -186,18 +186,21 @@ impl SqlProvider for SqliteProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(query)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
+            let rows = sqlx::query(query).fetch_all(pool).await.map_err(|e| {
+                ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
             let columns: Vec<String> = if let Some(first) = rows.first() {
-                first.columns().iter().map(|c| c.name().to_string()).collect()
+                first
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -226,13 +229,14 @@ impl SqlProvider for SqliteProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(query)
-                .execute(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
-                    connection: self.name.clone(),
-                    reason: e.to_string(),
-                })?;
+            let result =
+                sqlx::query(query)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| ProviderError::QueryFailed {
+                        connection: self.name.clone(),
+                        reason: e.to_string(),
+                    })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
@@ -282,32 +286,36 @@ impl SqlProvider for SqliteProvider {
         // PRAGMA doesn't support parameterized queries, so sanitize the
         // table name to prevent SQL injection. Only allow alphanumeric,
         // underscores, and dots (for schema.table).
-        if !table.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+        if !table
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        {
             return Err(ProviderError::InvalidConfig {
                 connection: self.name.clone(),
                 reason: format!("Invalid table name: {}", table),
             });
         }
 
-        let rows: Vec<(i32, String, String, bool, Option<String>, i32)> = sqlx::query_as(
-            &format!("PRAGMA table_info(\"{}\")", table),
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| ProviderError::QueryFailed {
-            connection: self.name.clone(),
-            reason: e.to_string(),
-        })?;
+        let rows: Vec<(i32, String, String, bool, Option<String>, i32)> =
+            sqlx::query_as(&format!("PRAGMA table_info(\"{}\")", table))
+                .fetch_all(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
+                    connection: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
 
         Ok(rows
             .into_iter()
-            .map(|(_cid, name, data_type, notnull, dflt_value, pk)| ColumnInfo {
-                name,
-                data_type,
-                is_nullable: !notnull,
-                is_primary_key: pk > 0,
-                default_value: dflt_value,
-            })
+            .map(
+                |(_cid, name, data_type, notnull, dflt_value, pk)| ColumnInfo {
+                    name,
+                    data_type,
+                    is_nullable: !notnull,
+                    is_primary_key: pk > 0,
+                    default_value: dflt_value,
+                },
+            )
             .collect())
     }
 }

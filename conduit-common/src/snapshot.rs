@@ -168,12 +168,15 @@ mod tests {
 
         // Production unchanged
         assert_eq!(
-            prod.snapshot_map.get(&("dag1".to_string(), "task1".to_string())),
+            prod.snapshot_map
+                .get(&("dag1".to_string(), "task1".to_string())),
             Some(&"snap_abc".to_string())
         );
         // Staging has new snapshot
         assert_eq!(
-            staging.snapshot_map.get(&("dag1".to_string(), "task1".to_string())),
+            staging
+                .snapshot_map
+                .get(&("dag1".to_string(), "task1".to_string())),
             Some(&"snap_xyz".to_string())
         );
     }
@@ -181,11 +184,14 @@ mod tests {
     #[test]
     fn diff_count_detects_changes() {
         let mut env1 = Environment::new("env1");
-        env1.snapshot_map.insert(("d".into(), "t1".into()), "s1".into());
-        env1.snapshot_map.insert(("d".into(), "t2".into()), "s2".into());
+        env1.snapshot_map
+            .insert(("d".into(), "t1".into()), "s1".into());
+        env1.snapshot_map
+            .insert(("d".into(), "t2".into()), "s2".into());
 
         let mut env2 = env1.fork("env2");
-        env2.snapshot_map.insert(("d".into(), "t2".into()), "s3".into());
+        env2.snapshot_map
+            .insert(("d".into(), "t2".into()), "s3".into());
 
         assert_eq!(env1.diff_count(&env2), 1);
     }

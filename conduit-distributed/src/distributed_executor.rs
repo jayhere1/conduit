@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
-use tracing::{info, error};
+use tracing::{error, info};
 
 use crate::coordinator::{Coordinator, CoordinatorConfig};
 use crate::proto_types::*;

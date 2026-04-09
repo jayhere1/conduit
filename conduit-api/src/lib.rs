@@ -10,13 +10,13 @@
 //! - Health checks and metrics
 
 pub mod auth;
+pub mod error;
+pub mod handlers;
 pub mod middleware;
 pub mod rate_limit;
 pub mod routes;
 pub mod state;
-pub mod handlers;
 pub mod websocket;
-pub mod error;
 
 pub use state::AppState;
 
@@ -25,10 +25,7 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Start the Conduit API server.
-pub async fn serve(
-    state: Arc<AppState>,
-    addr: SocketAddr,
-) -> anyhow::Result<()> {
+pub async fn serve(state: Arc<AppState>, addr: SocketAddr) -> anyhow::Result<()> {
     let app = routes::build_router(state);
 
     info!(%addr, "Conduit API server starting");

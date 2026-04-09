@@ -13,11 +13,11 @@
 //!   endpoint_url: optional_localstack_url
 //! ```
 
-use async_trait::async_trait;
-use conduit_common::config::ConnectionConfig;
+use super::extra_str;
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::extra_str;
+use async_trait::async_trait;
+use conduit_common::config::ConnectionConfig;
 
 /// AWS Kinesis provider
 #[allow(dead_code)]
@@ -54,15 +54,15 @@ impl Provider for KinesisProvider {
             provider_type: "kinesis".to_string(),
             display_name: format!("Kinesis ({}, {})", self.stream_name, self.region),
             version: None,
-            capabilities: vec![
-                Capability::StreamProduce,
-                Capability::StreamConsume,
-            ],
+            capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
         }
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "kinesis".into(), operation: "test_connection".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "kinesis".into(),
+            operation: "test_connection".into(),
+        })
     }
 
     async fn close(&self) -> Result<(), ProviderError> {
@@ -72,12 +72,27 @@ impl Provider for KinesisProvider {
 
 #[async_trait]
 impl StreamProvider for KinesisProvider {
-    async fn produce(&self, _topic: &str, _messages: &[StreamMessage]) -> Result<StreamResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "kinesis".into(), operation: "produce".into() })
+    async fn produce(
+        &self,
+        _topic: &str,
+        _messages: &[StreamMessage],
+    ) -> Result<StreamResult, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "kinesis".into(),
+            operation: "produce".into(),
+        })
     }
 
-    async fn consume(&self, _topic: &str, _group_id: &str, _max_messages: usize) -> Result<Vec<StreamMessage>, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "kinesis".into(), operation: "consume".into() })
+    async fn consume(
+        &self,
+        _topic: &str,
+        _group_id: &str,
+        _max_messages: usize,
+    ) -> Result<Vec<StreamMessage>, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "kinesis".into(),
+            operation: "consume".into(),
+        })
     }
 
     async fn list_topics(&self) -> Result<Vec<String>, ProviderError> {

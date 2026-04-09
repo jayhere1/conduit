@@ -12,14 +12,16 @@ use tokio_stream::{wrappers::UnboundedReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
 
-use crate::coordinator::Coordinator;
 use crate::convert;
+use crate::coordinator::Coordinator;
 
 // Use the canonical generated types from the crate root.
 use crate::generated_proto as proto;
 
-type TaskAssignmentStream = Pin<Box<dyn Stream<Item = Result<proto::TaskAssignment, Status>> + Send>>;
-type DirectiveStream = Pin<Box<dyn Stream<Item = Result<proto::CoordinatorDirective, Status>> + Send>>;
+type TaskAssignmentStream =
+    Pin<Box<dyn Stream<Item = Result<proto::TaskAssignment, Status>> + Send>>;
+type DirectiveStream =
+    Pin<Box<dyn Stream<Item = Result<proto::CoordinatorDirective, Status>> + Send>>;
 
 /// gRPC service implementation that wraps the Coordinator.
 pub struct CoordinatorGrpcService {
@@ -62,9 +64,8 @@ impl proto::coordinator_server::Coordinator for CoordinatorGrpcService {
 
         // Convert the unbounded receiver into a gRPC stream,
         // translating local TaskAssignment → proto TaskAssignment.
-        let stream = UnboundedReceiverStream::new(task_rx).map(|local_assignment| {
-            Ok(convert::task_assignment_to_proto(&local_assignment))
-        });
+        let stream = UnboundedReceiverStream::new(task_rx)
+            .map(|local_assignment| Ok(convert::task_assignment_to_proto(&local_assignment)));
 
         Ok(Response::new(Box::pin(stream)))
     }

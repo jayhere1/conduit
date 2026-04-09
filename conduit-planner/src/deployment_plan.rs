@@ -141,15 +141,15 @@ impl DeploymentPlan {
     }
 
     /// Collect all data quality contracts from tasks that are part of this deployment.
-    fn collect_contracts(
-        actions: &[DeploymentAction],
-        plan: &ConduitPlan,
-    ) -> Vec<TaskContracts> {
+    fn collect_contracts(actions: &[DeploymentAction], plan: &ConduitPlan) -> Vec<TaskContracts> {
         let mut contracts = Vec::new();
 
         for action in actions {
             // Collect contracts for tasks being executed or reused
-            if matches!(action.action, ActionKind::Execute | ActionKind::ReuseSnapshot { .. }) {
+            if matches!(
+                action.action,
+                ActionKind::Execute | ActionKind::ReuseSnapshot { .. }
+            ) {
                 if let Some(dag) = plan.dags.get(&action.dag_id) {
                     if let Some(task) = dag.tasks.get(&action.task_id) {
                         if let Some(tc) = &task.contracts {
@@ -187,10 +187,14 @@ impl DeploymentPlan {
                                 ActionKind::ReuseSnapshot {
                                     snapshot_id: snap_id.clone(),
                                 },
-                                "New task, but matching snapshot found from previous run".to_string(),
+                                "New task, but matching snapshot found from previous run"
+                                    .to_string(),
                             )
                         } else {
-                            (ActionKind::Execute, "New task — no prior execution".to_string())
+                            (
+                                ActionKind::Execute,
+                                "New task — no prior execution".to_string(),
+                            )
                         }
                     }
                     ChangeKind::Modified => {
@@ -199,10 +203,14 @@ impl DeploymentPlan {
                                 ActionKind::ReuseSnapshot {
                                     snapshot_id: snap_id.clone(),
                                 },
-                                "Modified, but identical fingerprint found in snapshot store".to_string(),
+                                "Modified, but identical fingerprint found in snapshot store"
+                                    .to_string(),
                             )
                         } else {
-                            (ActionKind::Execute, "Task code or config changed".to_string())
+                            (
+                                ActionKind::Execute,
+                                "Task code or config changed".to_string(),
+                            )
                         }
                     }
                     ChangeKind::UpstreamInvalidated => {
@@ -296,7 +304,8 @@ impl DeploymentPlan {
             if let Some(dag) = plan.dags.get(dag_id) {
                 let affected: std::collections::HashSet<_> =
                     dag_impact.affected_order.iter().cloned().collect();
-                let cp = crate::impact_analyzer::ImpactAnalyzer::critical_path_length(dag, &affected);
+                let cp =
+                    crate::impact_analyzer::ImpactAnalyzer::critical_path_length(dag, &affected);
                 max_critical_path = max_critical_path.max(cp);
             }
         }
@@ -325,9 +334,9 @@ impl DeploymentPlan {
 
     /// Save to a file.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let json = self.to_json().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let json = self
+            .to_json()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(path, json)
     }
 
@@ -379,9 +388,7 @@ impl DeploymentPlan {
                     }
                 }
                 ActionKind::ReuseSnapshot { snapshot_id } => {
-                    environment
-                        .snapshot_map
-                        .insert(key, snapshot_id.clone());
+                    environment.snapshot_map.insert(key, snapshot_id.clone());
                 }
                 ActionKind::Skip => {
                     // No change needed — snapshot pointer stays the same
@@ -400,7 +407,11 @@ impl std::fmt::Display for DeploymentPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Deployment Plan: {}", self.id)?;
         writeln!(f, "Target: {}", self.target_environment)?;
-        writeln!(f, "Created: {}", self.created_at.format("%Y-%m-%d %H:%M:%S UTC"))?;
+        writeln!(
+            f,
+            "Created: {}",
+            self.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        )?;
         writeln!(f)?;
 
         if let Some(ref cs) = self.change_set_display {
@@ -430,7 +441,11 @@ impl std::fmt::Display for DeploymentPlan {
         writeln!(f, "  To reuse:        {}", self.stats.tasks_to_reuse)?;
         writeln!(f, "  To skip:         {}", self.stats.tasks_to_skip)?;
         writeln!(f, "  To remove:       {}", self.stats.tasks_to_remove)?;
-        writeln!(f, "  Critical path:   {} levels deep", self.stats.critical_path_depth)?;
+        writeln!(
+            f,
+            "  Critical path:   {} levels deep",
+            self.stats.critical_path_depth
+        )?;
         writeln!(f, "  Blast radius:    {} tasks", self.stats.blast_radius)?;
 
         if let Some(est) = self.stats.estimated_total_ms {
@@ -469,9 +484,9 @@ impl std::fmt::Display for DeploymentPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use conduit_common::dag::*;
     use conduit_common::snapshot::{Environment, Snapshot};
-    use chrono::Utc;
 
     fn make_task(id: &str, deps: Vec<&str>) -> Task {
         Task {
@@ -552,11 +567,7 @@ mod tests {
 
     #[test]
     fn unchanged_tasks_are_skipped() {
-        let plan = make_plan(
-            "etl",
-            vec![make_task("extract", vec![])],
-            vec!["extract"],
-        );
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
 
         // Compute fingerprint and set up matching environment
         let fps = crate::fingerprinter::PlanFingerprinter::fingerprint_plan(&plan);
@@ -617,22 +628,20 @@ mod tests {
         deploy.apply_to_environment(&mut env, &new_snaps);
 
         assert_eq!(
-            env.snapshot_map.get(&("etl".to_string(), "extract".to_string())),
+            env.snapshot_map
+                .get(&("etl".to_string(), "extract".to_string())),
             Some(&"snap_new_1".to_string())
         );
         assert_eq!(
-            env.snapshot_map.get(&("etl".to_string(), "load".to_string())),
+            env.snapshot_map
+                .get(&("etl".to_string(), "load".to_string())),
             Some(&"snap_new_2".to_string())
         );
     }
 
     #[test]
     fn plan_serialization_roundtrip() {
-        let plan = make_plan(
-            "etl",
-            vec![make_task("extract", vec![])],
-            vec!["extract"],
-        );
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
         let env = Environment::new("staging");
         let store = SnapshotStore::new();
 

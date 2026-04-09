@@ -23,8 +23,12 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg),
-            ApiError::CompilationFailed(msg) => (StatusCode::UNPROCESSABLE_ENTITY, "compilation_failed", msg),
-            ApiError::EnvironmentNotFound(msg) => (StatusCode::NOT_FOUND, "environment_not_found", msg),
+            ApiError::CompilationFailed(msg) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "compilation_failed", msg)
+            }
+            ApiError::EnvironmentNotFound(msg) => {
+                (StatusCode::NOT_FOUND, "environment_not_found", msg)
+            }
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg),
         };
@@ -45,8 +49,12 @@ impl From<conduit_common::error::ConduitError> for ApiError {
         use conduit_common::error::ConduitError;
         match err {
             ConduitError::EnvironmentNotFound(name) => ApiError::EnvironmentNotFound(name),
-            ConduitError::SnapshotNotFound(id) => ApiError::NotFound(format!("Snapshot not found: {}", id)),
-            ConduitError::FileNotFound(path) => ApiError::NotFound(format!("File not found: {}", path)),
+            ConduitError::SnapshotNotFound(id) => {
+                ApiError::NotFound(format!("Snapshot not found: {}", id))
+            }
+            ConduitError::FileNotFound(path) => {
+                ApiError::NotFound(format!("File not found: {}", path))
+            }
             ConduitError::ConfigError(msg) => ApiError::BadRequest(msg),
             ConduitError::ParseError { file, message } => {
                 ApiError::CompilationFailed(format!("{}: {}", file, message))

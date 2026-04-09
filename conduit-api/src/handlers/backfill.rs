@@ -143,7 +143,11 @@ pub async fn create_backfill(
     } else if estimated_seconds < 3600 {
         format!("~{}m", estimated_seconds / 60)
     } else {
-        format!("~{}h {}m", estimated_seconds / 3600, (estimated_seconds % 3600) / 60)
+        format!(
+            "~{}h {}m",
+            estimated_seconds / 3600,
+            (estimated_seconds % 3600) / 60
+        )
     };
 
     Ok(Json(json!({

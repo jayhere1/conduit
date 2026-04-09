@@ -285,7 +285,7 @@ impl DagParser {
             .map(|n| self.node_text(&n, source))
             .unwrap_or_else(|| "unknown".to_string());
 
-        let task_type = if task_args.get("_is_sensor").is_some() {
+        let task_type = if task_args.contains_key("_is_sensor") {
             TaskType::Sensor {
                 sensor_type: "python".to_string(),
                 poke_interval: task_args.get("poke_interval").cloned(),
@@ -355,10 +355,11 @@ impl DagParser {
                 // Check if this line calls this task and passes variables
                 if text.contains(&format!("{}(", task.id)) {
                     for (var, source_task) in &var_to_task {
-                        if text.contains(var) && source_task != &task.id {
-                            if !task.raw_dependencies.contains(source_task) {
-                                task.raw_dependencies.push(source_task.clone());
-                            }
+                        if text.contains(var)
+                            && source_task != &task.id
+                            && !task.raw_dependencies.contains(source_task)
+                        {
+                            task.raw_dependencies.push(source_task.clone());
                         }
                     }
                 }
@@ -467,12 +468,7 @@ impl DagParser {
             let expr = first_stmt.child(0)?;
             if expr.kind() == "string" {
                 let text = self.node_text(&expr, source);
-                return Some(
-                    text.trim_matches('"')
-                        .trim_matches('\'')
-                        .trim()
-                        .to_string(),
-                );
+                return Some(text.trim_matches('"').trim_matches('\'').trim().to_string());
             }
         }
         None
@@ -516,7 +512,7 @@ impl DagParser {
             let path = entry.path();
             if path.is_dir() {
                 files.extend(Self::find_python_files(&path)?);
-            } else if path.extension().map_or(false, |ext| ext == "py") {
+            } else if path.extension().is_some_and(|ext| ext == "py") {
                 files.push(path);
             }
         }
@@ -591,7 +587,11 @@ def daily_warehouse_refresh(date: Param[str] = "{{ ds }}"):
         assert_eq!(extract.retry_delay, Some("5m".to_string()));
         assert_eq!(extract.pool, Some("snowflake".to_string()));
 
-        let transform = dag.tasks.iter().find(|t| t.id == "transform_orders").unwrap();
+        let transform = dag
+            .tasks
+            .iter()
+            .find(|t| t.id == "transform_orders")
+            .unwrap();
         assert_eq!(transform.timeout, Some("30m".to_string()));
     }
 
@@ -601,16 +601,29 @@ def daily_warehouse_refresh(date: Param[str] = "{{ ds }}"):
         let dags = parser.parse_source(SAMPLE_DAG, "test.py").unwrap();
         let dag = &dags[0];
 
-        let transform = dag.tasks.iter().find(|t| t.id == "transform_orders").unwrap();
-        assert!(transform.raw_dependencies.contains(&"extract_orders".to_string()));
+        let transform = dag
+            .tasks
+            .iter()
+            .find(|t| t.id == "transform_orders")
+            .unwrap();
+        assert!(transform
+            .raw_dependencies
+            .contains(&"extract_orders".to_string()));
 
-        let load = dag.tasks.iter().find(|t| t.id == "load_to_warehouse").unwrap();
-        assert!(load.raw_dependencies.contains(&"transform_orders".to_string()));
+        let load = dag
+            .tasks
+            .iter()
+            .find(|t| t.id == "load_to_warehouse")
+            .unwrap();
+        assert!(load
+            .raw_dependencies
+            .contains(&"transform_orders".to_string()));
     }
 
     #[test]
     fn split_args_respects_brackets() {
-        let args = DagParser::split_args(r#"schedule="0 6 * * *", tags=["etl", "warehouse"], max=3"#);
+        let args =
+            DagParser::split_args(r#"schedule="0 6 * * *", tags=["etl", "warehouse"], max=3"#);
         assert_eq!(args.len(), 3);
         assert!(args[1].contains("["));
     }

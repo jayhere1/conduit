@@ -85,7 +85,10 @@ impl PlanFingerprinter {
             TaskType::Sql { connection, query } => {
                 format!("sql:{}:{}", connection, query)
             }
-            TaskType::Sensor { sensor_type, poke_interval } => {
+            TaskType::Sensor {
+                sensor_type,
+                poke_interval,
+            } => {
                 format!(
                     "sensor:{}:{}",
                     sensor_type,
@@ -117,8 +120,8 @@ impl PlanFingerprinter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conduit_common::dag::*;
     use chrono::Utc;
+    use conduit_common::dag::*;
     use std::collections::HashMap;
 
     fn make_task(id: &str, deps: Vec<&str>) -> Task {

@@ -1,7 +1,7 @@
 //! API documentation handlers (OpenAPI spec and Swagger UI).
 
-use axum::response::{Html, IntoResponse};
 use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse};
 
 /// GET /api/docs/openapi.json — OpenAPI specification in JSON format.
 pub async fn openapi_spec() -> impl IntoResponse {
@@ -11,7 +11,8 @@ pub async fn openapi_spec() -> impl IntoResponse {
 
 /// GET /api/docs — Interactive Swagger UI powered by Swagger UI.
 pub async fn swagger_ui() -> Html<&'static str> {
-    Html(r#"<!DOCTYPE html>
+    Html(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -61,12 +62,14 @@ pub async fn swagger_ui() -> Html<&'static str> {
         };
     </script>
 </body>
-</html>"#)
+</html>"#,
+    )
 }
 
 /// GET /api/docs/redoc — Alternative ReDoc UI for OpenAPI documentation.
 pub async fn redoc_ui() -> Html<&'static str> {
-    Html(r#"<!DOCTYPE html>
+    Html(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8" />
@@ -84,5 +87,6 @@ pub async fn redoc_ui() -> Html<&'static str> {
     <redoc spec-url='/api/docs/openapi.json'></redoc>
     <script src="https://cdn.jsdelivr.net/npm/redoc@latest/bundles/redoc.standalone.js"></script>
 </body>
-</html>"#)
+</html>"#,
+    )
 }

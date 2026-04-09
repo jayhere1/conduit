@@ -89,7 +89,9 @@ async fn post_with_auth(
         req = req.header("Authorization", format!("Bearer {}", t));
     }
 
-    let req = req.body(Body::from(serde_json::to_string(body).unwrap())).unwrap();
+    let req = req
+        .body(Body::from(serde_json::to_string(body).unwrap()))
+        .unwrap();
     let response = router.clone().oneshot(req).await.unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -318,7 +320,10 @@ async fn runs_list_respects_limit_param() {
 async fn runs_list_filters_by_status() {
     let (router, state) = app(false);
 
-    for (i, status) in ["success", "failed", "success", "running"].iter().enumerate() {
+    for (i, status) in ["success", "failed", "success", "running"]
+        .iter()
+        .enumerate()
+    {
         state.record_run(DagRunInfo {
             run_id: format!("run-{}", i),
             dag_id: "dag1".to_string(),
@@ -380,13 +385,16 @@ async fn run_get_nonexistent_returns_404() {
 async fn auth_whoami_returns_role_and_permissions() {
     let (router, state) = app(true);
 
-    let (key, _) = state.auth_store.create_key(
-        "admin-key",
-        conduit_api::auth::Role::Admin,
-        "test",
-        None,
-        None,
-    ).unwrap();
+    let (key, _) = state
+        .auth_store
+        .create_key(
+            "admin-key",
+            conduit_api::auth::Role::Admin,
+            "test",
+            None,
+            None,
+        )
+        .unwrap();
 
     let (status, body) = get_auth(&router, "/api/v1/auth/me", &key).await;
     assert_eq!(status, StatusCode::OK);
@@ -401,13 +409,16 @@ async fn auth_whoami_returns_role_and_permissions() {
 async fn auth_viewer_cannot_trigger_runs() {
     let (router, state) = app(true);
 
-    let (viewer_key, _) = state.auth_store.create_key(
-        "viewer-key",
-        conduit_api::auth::Role::Viewer,
-        "test",
-        None,
-        None,
-    ).unwrap();
+    let (viewer_key, _) = state
+        .auth_store
+        .create_key(
+            "viewer-key",
+            conduit_api::auth::Role::Viewer,
+            "test",
+            None,
+            None,
+        )
+        .unwrap();
 
     // Viewers can read.
     let (status, _) = get_auth(&router, "/api/v1/environments", &viewer_key).await;
@@ -428,13 +439,16 @@ async fn auth_viewer_cannot_trigger_runs() {
 async fn auth_key_create_returns_one_time_plaintext() {
     let (router, state) = app(true);
 
-    let (admin_key, _) = state.auth_store.create_key(
-        "bootstrap",
-        conduit_api::auth::Role::Admin,
-        "test",
-        None,
-        None,
-    ).unwrap();
+    let (admin_key, _) = state
+        .auth_store
+        .create_key(
+            "bootstrap",
+            conduit_api::auth::Role::Admin,
+            "test",
+            None,
+            None,
+        )
+        .unwrap();
 
     let (status, body) = post_with_auth(
         &router,
@@ -457,13 +471,16 @@ async fn auth_key_create_returns_one_time_plaintext() {
 async fn auth_key_create_with_empty_name_fails() {
     let (router, state) = app(true);
 
-    let (admin_key, _) = state.auth_store.create_key(
-        "bootstrap",
-        conduit_api::auth::Role::Admin,
-        "test",
-        None,
-        None,
-    ).unwrap();
+    let (admin_key, _) = state
+        .auth_store
+        .create_key(
+            "bootstrap",
+            conduit_api::auth::Role::Admin,
+            "test",
+            None,
+            None,
+        )
+        .unwrap();
 
     let (status, body) = post_with_auth(
         &router,
@@ -473,23 +490,23 @@ async fn auth_key_create_with_empty_name_fails() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("empty"));
+    assert!(body["error"]["message"].as_str().unwrap().contains("empty"));
 }
 
 #[tokio::test]
 async fn auth_key_create_with_invalid_role_fails() {
     let (router, state) = app(true);
 
-    let (admin_key, _) = state.auth_store.create_key(
-        "bootstrap",
-        conduit_api::auth::Role::Admin,
-        "test",
-        None,
-        None,
-    ).unwrap();
+    let (admin_key, _) = state
+        .auth_store
+        .create_key(
+            "bootstrap",
+            conduit_api::auth::Role::Admin,
+            "test",
+            None,
+            None,
+        )
+        .unwrap();
 
     let (status, body) = post_with_auth(
         &router,
@@ -509,13 +526,10 @@ async fn auth_key_create_with_invalid_role_fails() {
 async fn auth_revoked_key_cannot_authenticate() {
     let (router, state) = app(true);
 
-    let (admin_key, _) = state.auth_store.create_key(
-        "admin",
-        conduit_api::auth::Role::Admin,
-        "test",
-        None,
-        None,
-    ).unwrap();
+    let (admin_key, _) = state
+        .auth_store
+        .create_key("admin", conduit_api::auth::Role::Admin, "test", None, None)
+        .unwrap();
 
     // Create then revoke a key.
     let (_, body) = post_with_auth(
@@ -567,7 +581,10 @@ async fn connections_providers_returns_known_types() {
     assert_eq!(status, StatusCode::OK);
     let providers = body["providers"].as_array().unwrap();
     // Should have at least postgres, snowflake, s3 etc.
-    assert!(!providers.is_empty(), "Should list available provider types");
+    assert!(
+        !providers.is_empty(),
+        "Should list available provider types"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -620,7 +637,10 @@ async fn error_response_has_consistent_shape() {
     let (status, body) = get(&router, "/api/v1/runs/nonexistent").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body["error"].is_object(), "Error should be an object");
-    assert!(body["error"]["type"].is_string(), "Error should have a type");
+    assert!(
+        body["error"]["type"].is_string(),
+        "Error should have a type"
+    );
     assert!(
         body["error"]["message"].is_string(),
         "Error should have a message"

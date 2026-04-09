@@ -20,11 +20,12 @@ use std::collections::HashMap;
 // ─── Incremental strategy ───────────────────────────────────────────────────
 
 /// How a task processes data incrementally.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "strategy")]
 pub enum IncrementalStrategy {
     /// Full refresh — reprocess all data every run. This is the default
     /// and serves as a baseline (no incremental logic needed).
+    #[default]
     FullRefresh,
 
     /// Append only — process rows where `time_column > last_watermark`.
@@ -78,12 +79,6 @@ pub enum IncrementalStrategy {
         /// Column name for valid_to (default: "valid_to").
         valid_to_column: Option<String>,
     },
-}
-
-impl Default for IncrementalStrategy {
-    fn default() -> Self {
-        Self::FullRefresh
-    }
 }
 
 /// Partition granularity for delete+insert strategy.
@@ -236,7 +231,10 @@ impl IncrementalContext {
 
         match &self.watermark {
             WatermarkValue::Timestamp(ts) => {
-                vars.push(("CONDUIT_WATERMARK_TYPE".to_string(), "timestamp".to_string()));
+                vars.push((
+                    "CONDUIT_WATERMARK_TYPE".to_string(),
+                    "timestamp".to_string(),
+                ));
                 vars.push(("CONDUIT_WATERMARK_VALUE".to_string(), ts.to_rfc3339()));
             }
             WatermarkValue::Sequence(seq) => {
@@ -244,7 +242,10 @@ impl IncrementalContext {
                 vars.push(("CONDUIT_WATERMARK_VALUE".to_string(), seq.to_string()));
             }
             WatermarkValue::Partition(p) => {
-                vars.push(("CONDUIT_WATERMARK_TYPE".to_string(), "partition".to_string()));
+                vars.push((
+                    "CONDUIT_WATERMARK_TYPE".to_string(),
+                    "partition".to_string(),
+                ));
                 vars.push(("CONDUIT_WATERMARK_VALUE".to_string(), p.clone()));
             }
             WatermarkValue::Initial => {
@@ -281,10 +282,7 @@ mod tests {
         let mut wm = Watermark::new("etl", "extract_orders");
         assert!(wm.is_initial());
 
-        wm.advance_timestamp(
-            "2026-03-22T00:00:00Z".parse().unwrap(),
-            "run_001",
-        );
+        wm.advance_timestamp("2026-03-22T00:00:00Z".parse().unwrap(), "run_001");
         assert!(!wm.is_initial());
         assert_eq!(wm.last_run_id, Some("run_001".to_string()));
 
@@ -300,9 +298,7 @@ mod tests {
     fn incremental_context_env_vars() {
         let ctx = IncrementalContext {
             is_full_refresh: false,
-            watermark: WatermarkValue::Timestamp(
-                "2026-03-21T06:00:00Z".parse().unwrap(),
-            ),
+            watermark: WatermarkValue::Timestamp("2026-03-21T06:00:00Z".parse().unwrap()),
             effective_start: Some("2026-03-21T04:00:00Z".to_string()),
             target_partitions: vec![],
             batch_size: Some(10000),
@@ -324,10 +320,7 @@ mod tests {
             is_full_refresh: false,
             watermark: WatermarkValue::Partition("2026-03-20".to_string()),
             effective_start: None,
-            target_partitions: vec![
-                "2026-03-21".to_string(),
-                "2026-03-22".to_string(),
-            ],
+            target_partitions: vec!["2026-03-21".to_string(), "2026-03-22".to_string()],
             batch_size: None,
         };
 

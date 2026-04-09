@@ -16,7 +16,9 @@ mod tests {
     #[test]
     fn create_key_returns_plaintext_and_metadata() {
         let store = AuthStore::new(true);
-        let (plaintext, key) = store.create_key("test", Role::Viewer, "admin", None, None).unwrap();
+        let (plaintext, key) = store
+            .create_key("test", Role::Viewer, "admin", None, None)
+            .unwrap();
 
         assert!(plaintext.starts_with("cdt_"));
         assert_eq!(plaintext.len(), 36);
@@ -30,9 +32,15 @@ mod tests {
     #[test]
     fn list_keys_returns_all_keys() {
         let store = AuthStore::new(true);
-        store.create_key("key1", Role::Viewer, "admin", None, None).unwrap();
-        store.create_key("key2", Role::Operator, "admin", None, None).unwrap();
-        store.create_key("key3", Role::Admin, "admin", None, None).unwrap();
+        store
+            .create_key("key1", Role::Viewer, "admin", None, None)
+            .unwrap();
+        store
+            .create_key("key2", Role::Operator, "admin", None, None)
+            .unwrap();
+        store
+            .create_key("key3", Role::Admin, "admin", None, None)
+            .unwrap();
 
         let keys = store.list_keys();
         assert_eq!(keys.len(), 3);
@@ -41,7 +49,9 @@ mod tests {
     #[test]
     fn get_key_by_id() {
         let store = AuthStore::new(true);
-        let (_, key) = store.create_key("findme", Role::Operator, "admin", None, None).unwrap();
+        let (_, key) = store
+            .create_key("findme", Role::Operator, "admin", None, None)
+            .unwrap();
 
         let found = store.get_key(&key.id).unwrap();
         assert_eq!(found.name, "findme");
@@ -57,7 +67,9 @@ mod tests {
     #[test]
     fn revoke_key_marks_as_revoked() {
         let store = AuthStore::new(true);
-        let (_, key) = store.create_key("revokeable", Role::Admin, "admin", None, None).unwrap();
+        let (_, key) = store
+            .create_key("revokeable", Role::Admin, "admin", None, None)
+            .unwrap();
 
         let revoked = store.revoke_key(&key.id).unwrap();
         assert!(revoked.revoked);
@@ -77,7 +89,9 @@ mod tests {
     #[test]
     fn authenticate_valid_key() {
         let store = AuthStore::new(true);
-        let (plaintext, _) = store.create_key("valid", Role::Operator, "admin", None, None).unwrap();
+        let (plaintext, _) = store
+            .create_key("valid", Role::Operator, "admin", None, None)
+            .unwrap();
 
         let ctx = store.authenticate(&plaintext).unwrap();
         assert_eq!(ctx.role, Role::Operator);
@@ -87,7 +101,9 @@ mod tests {
     #[test]
     fn authenticate_invalid_key_fails() {
         let store = AuthStore::new(true);
-        store.create_key("real", Role::Admin, "admin", None, None).unwrap();
+        store
+            .create_key("real", Role::Admin, "admin", None, None)
+            .unwrap();
 
         let result = store.authenticate("cdt_completely_wrong_key_00000000");
         assert!(matches!(result, Err(AuthError::InvalidKey)));
@@ -96,7 +112,9 @@ mod tests {
     #[test]
     fn authenticate_revoked_key_fails() {
         let store = AuthStore::new(true);
-        let (plaintext, key) = store.create_key("temp", Role::Admin, "admin", None, None).unwrap();
+        let (plaintext, key) = store
+            .create_key("temp", Role::Admin, "admin", None, None)
+            .unwrap();
 
         store.revoke_key(&key.id).unwrap();
         let result = store.authenticate(&plaintext);
@@ -107,7 +125,9 @@ mod tests {
     fn authenticate_expired_key_fails() {
         let store = AuthStore::new(true);
         let expired = chrono::Utc::now() - chrono::Duration::hours(1);
-        let (plaintext, _) = store.create_key("expired", Role::Admin, "admin", None, Some(expired)).unwrap();
+        let (plaintext, _) = store
+            .create_key("expired", Role::Admin, "admin", None, Some(expired))
+            .unwrap();
 
         let result = store.authenticate(&plaintext);
         assert!(matches!(result, Err(AuthError::KeyExpired)));
@@ -116,7 +136,9 @@ mod tests {
     #[test]
     fn authenticate_updates_last_used() {
         let store = AuthStore::new(true);
-        let (plaintext, key) = store.create_key("track-usage", Role::Viewer, "admin", None, None).unwrap();
+        let (plaintext, key) = store
+            .create_key("track-usage", Role::Viewer, "admin", None, None)
+            .unwrap();
 
         // Initially no last_used
         let before = store.get_key(&key.id).unwrap();
@@ -132,12 +154,18 @@ mod tests {
 
     #[test]
     fn extract_bearer_valid() {
-        assert_eq!(AuthStore::extract_bearer("Bearer mytoken123").unwrap(), "mytoken123");
+        assert_eq!(
+            AuthStore::extract_bearer("Bearer mytoken123").unwrap(),
+            "mytoken123"
+        );
     }
 
     #[test]
     fn extract_bearer_with_spaces() {
-        assert_eq!(AuthStore::extract_bearer("  Bearer  mytoken123  ").unwrap(), "mytoken123");
+        assert_eq!(
+            AuthStore::extract_bearer("  Bearer  mytoken123  ").unwrap(),
+            "mytoken123"
+        );
     }
 
     #[test]
@@ -217,7 +245,11 @@ mod tests {
 
         let result = ctx.require(Permission::TriggerRun);
         assert!(result.is_err());
-        if let Err(AuthError::Forbidden { required_role, actual_role }) = result {
+        if let Err(AuthError::Forbidden {
+            required_role,
+            actual_role,
+        }) = result
+        {
             assert_eq!(required_role, Role::Operator);
             assert_eq!(actual_role, Role::Viewer);
         } else {
@@ -260,7 +292,11 @@ mod tests {
         assert_eq!(AuthError::KeyRevoked.status_code(), 401);
         assert_eq!(AuthError::KeyExpired.status_code(), 401);
         assert_eq!(
-            AuthError::Forbidden { required_role: Role::Admin, actual_role: Role::Viewer }.status_code(),
+            AuthError::Forbidden {
+                required_role: Role::Admin,
+                actual_role: Role::Viewer
+            }
+            .status_code(),
             403
         );
     }
@@ -381,8 +417,12 @@ mod tests {
     #[test]
     fn export_import_preserves_keys() {
         let store1 = AuthStore::new(true);
-        let (pt1, _) = store1.create_key("k1", Role::Viewer, "admin", Some("first".to_string()), None).unwrap();
-        let (pt2, _) = store1.create_key("k2", Role::Admin, "admin", None, None).unwrap();
+        let (pt1, _) = store1
+            .create_key("k1", Role::Viewer, "admin", Some("first".to_string()), None)
+            .unwrap();
+        let (pt2, _) = store1
+            .create_key("k2", Role::Admin, "admin", None, None)
+            .unwrap();
 
         let exported = store1.export_keys();
         let keys: Vec<ApiKey> = serde_json::from_value(exported).unwrap();
@@ -402,7 +442,9 @@ mod tests {
     #[test]
     fn import_preserves_revoked_state() {
         let store1 = AuthStore::new(true);
-        let (plaintext, key) = store1.create_key("revoked", Role::Admin, "admin", None, None).unwrap();
+        let (plaintext, key) = store1
+            .create_key("revoked", Role::Admin, "admin", None, None)
+            .unwrap();
         store1.revoke_key(&key.id).unwrap();
 
         let exported = store1.export_keys();
@@ -420,9 +462,15 @@ mod tests {
     #[test]
     fn multiple_keys_independent() {
         let store = AuthStore::new(true);
-        let (pt_viewer, _) = store.create_key("viewer-key", Role::Viewer, "admin", None, None).unwrap();
-        let (pt_operator, _) = store.create_key("op-key", Role::Operator, "admin", None, None).unwrap();
-        let (pt_admin, _) = store.create_key("admin-key", Role::Admin, "admin", None, None).unwrap();
+        let (pt_viewer, _) = store
+            .create_key("viewer-key", Role::Viewer, "admin", None, None)
+            .unwrap();
+        let (pt_operator, _) = store
+            .create_key("op-key", Role::Operator, "admin", None, None)
+            .unwrap();
+        let (pt_admin, _) = store
+            .create_key("admin-key", Role::Admin, "admin", None, None)
+            .unwrap();
 
         let ctx_v = store.authenticate(&pt_viewer).unwrap();
         assert_eq!(ctx_v.role, Role::Viewer);
@@ -439,26 +487,49 @@ mod tests {
     #[test]
     fn all_view_permissions_require_viewer() {
         let view_perms = vec![
-            Permission::ViewDags, Permission::ViewRuns, Permission::ViewEnvironments,
-            Permission::ViewEvents, Permission::ViewLineage, Permission::ViewContracts,
-            Permission::ViewMetrics, Permission::ViewConnections, Permission::ViewCluster,
+            Permission::ViewDags,
+            Permission::ViewRuns,
+            Permission::ViewEnvironments,
+            Permission::ViewEvents,
+            Permission::ViewLineage,
+            Permission::ViewContracts,
+            Permission::ViewMetrics,
+            Permission::ViewConnections,
+            Permission::ViewCluster,
             Permission::ViewHealth,
         ];
         for perm in view_perms {
-            assert_eq!(perm.required_role(), Role::Viewer, "Expected {:?} to require Viewer", perm);
+            assert_eq!(
+                perm.required_role(),
+                Role::Viewer,
+                "Expected {:?} to require Viewer",
+                perm
+            );
         }
     }
 
     #[test]
     fn all_write_permissions_require_operator() {
         let write_perms = vec![
-            Permission::TriggerRun, Permission::CompileDags, Permission::CreateEnvironment,
-            Permission::DeleteEnvironment, Permission::PromoteEnvironment,
-            Permission::GeneratePlan, Permission::ApplyPlan, Permission::CreateBackfill,
-            Permission::DrainWorker, Permission::ExtractLineage, Permission::ValidateContract,
+            Permission::TriggerRun,
+            Permission::CompileDags,
+            Permission::CreateEnvironment,
+            Permission::DeleteEnvironment,
+            Permission::PromoteEnvironment,
+            Permission::GeneratePlan,
+            Permission::ApplyPlan,
+            Permission::CreateBackfill,
+            Permission::DrainWorker,
+            Permission::ExtractLineage,
+            Permission::ValidateContract,
         ];
         for perm in write_perms {
-            assert_eq!(perm.required_role(), Role::Operator, "Expected {:?} to require Operator", perm);
+            assert_eq!(
+                perm.required_role(),
+                Role::Operator,
+                "Expected {:?} to require Operator",
+                perm
+            );
         }
     }
 
@@ -472,13 +543,15 @@ mod tests {
     #[test]
     fn key_with_description() {
         let store = AuthStore::new(true);
-        let (_, key) = store.create_key(
-            "ci-key",
-            Role::Operator,
-            "admin",
-            Some("Used by CI/CD pipeline".to_string()),
-            None,
-        ).unwrap();
+        let (_, key) = store
+            .create_key(
+                "ci-key",
+                Role::Operator,
+                "admin",
+                Some("Used by CI/CD pipeline".to_string()),
+                None,
+            )
+            .unwrap();
 
         assert_eq!(key.description.as_deref(), Some("Used by CI/CD pipeline"));
     }
@@ -487,13 +560,9 @@ mod tests {
     fn key_with_expiry() {
         let store = AuthStore::new(true);
         let expiry = chrono::Utc::now() + chrono::Duration::days(30);
-        let (plaintext, key) = store.create_key(
-            "temp-key",
-            Role::Viewer,
-            "admin",
-            None,
-            Some(expiry),
-        ).unwrap();
+        let (plaintext, key) = store
+            .create_key("temp-key", Role::Viewer, "admin", None, Some(expiry))
+            .unwrap();
 
         assert!(key.expires_at.is_some());
         // Should still be valid (30 days in the future)
@@ -504,7 +573,9 @@ mod tests {
     #[test]
     fn key_prefix_is_first_12_chars() {
         let store = AuthStore::new(true);
-        let (plaintext, key) = store.create_key("prefix-test", Role::Viewer, "admin", None, None).unwrap();
+        let (plaintext, key) = store
+            .create_key("prefix-test", Role::Viewer, "admin", None, None)
+            .unwrap();
 
         assert_eq!(key.key_prefix, &plaintext[..12]);
     }

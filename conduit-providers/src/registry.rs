@@ -15,7 +15,7 @@ use crate::errors::ProviderError;
 use crate::providers;
 use crate::secrets::{SecretsChain, SecretsConfig};
 use crate::traits::*;
-use crate::traits_saas::{SaasProvider, DocumentProvider};
+use crate::traits_saas::{DocumentProvider, SaasProvider};
 
 /// Thread-safe handle to a provider instance.
 pub type AnyProvider = Arc<dyn Provider>;
@@ -132,6 +132,12 @@ pub struct ProviderRegistry {
     secrets: Option<Arc<SecretsChain>>,
 }
 
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProviderRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
@@ -146,9 +152,7 @@ impl ProviderRegistry {
     ///
     /// For each connection, resolves the provider type and creates an instance.
     /// Connections that fail to initialize are logged as warnings but don't block startup.
-    pub async fn from_configs(
-        connections: &HashMap<String, ConnectionConfig>,
-    ) -> Self {
+    pub async fn from_configs(connections: &HashMap<String, ConnectionConfig>) -> Self {
         let mut registry = Self::new();
 
         for (name, config) in connections {
@@ -246,7 +250,9 @@ impl ProviderRegistry {
         connection_name: &str,
     ) -> Result<String, ProviderError> {
         if let Some(chain) = &self.secrets {
-            chain.resolve_for_connection(reference, connection_name).await
+            chain
+                .resolve_for_connection(reference, connection_name)
+                .await
         } else {
             providers::resolve_credential(reference).map_err(|mut e| {
                 // Patch the connection name into the error
@@ -464,16 +470,21 @@ impl ProviderRegistry {
         self.configs
             .iter()
             .map(|(name, config)| {
-                let (display_name, capabilities, status) = if let Some(instance) = self.providers.get(name) {
-                    let info = instance.as_provider().info();
-                    (info.display_name, info.capabilities, ConnectionStatus::Connected)
-                } else {
-                    (
-                        format_display_name(&config.conn_type),
-                        vec![],
-                        ConnectionStatus::Unknown,
-                    )
-                };
+                let (display_name, capabilities, status) =
+                    if let Some(instance) = self.providers.get(name) {
+                        let info = instance.as_provider().info();
+                        (
+                            info.display_name,
+                            info.capabilities,
+                            ConnectionStatus::Connected,
+                        )
+                    } else {
+                        (
+                            format_display_name(&config.conn_type),
+                            vec![],
+                            ConnectionStatus::Unknown,
+                        )
+                    };
 
                 ConnectionSummary {
                     name: name.clone(),
@@ -489,16 +500,13 @@ impl ProviderRegistry {
     }
 
     /// Test a specific connection and return the result.
-    pub async fn test_connection(
-        &self,
-        name: &str,
-    ) -> Result<ConnectionTestResult, ProviderError> {
-        let instance = self
-            .providers
-            .get(name)
-            .ok_or_else(|| ProviderError::ConnectionNotFound {
-                name: name.to_string(),
-            })?;
+    pub async fn test_connection(&self, name: &str) -> Result<ConnectionTestResult, ProviderError> {
+        let instance =
+            self.providers
+                .get(name)
+                .ok_or_else(|| ProviderError::ConnectionNotFound {
+                    name: name.to_string(),
+                })?;
 
         instance.as_provider().test_connection().await
     }
@@ -632,7 +640,10 @@ mod tests {
         let mut configs = HashMap::new();
         configs.insert("main_db".to_string(), pg_config("db.local", "analytics"));
         configs.insert("data_lake".to_string(), s3_config("my-bucket"));
-        configs.insert("alerts".to_string(), webhook_config("https://hooks.slack.com"));
+        configs.insert(
+            "alerts".to_string(),
+            webhook_config("https://hooks.slack.com"),
+        );
         configs.insert("events".to_string(), kafka_config("kafka-1:9092"));
 
         let registry = ProviderRegistry::from_configs(&configs).await;
@@ -726,14 +737,17 @@ mod tests {
     async fn provider_type_aliases_resolve() {
         // "pg" should resolve the same as "postgres"
         let mut configs = HashMap::new();
-        configs.insert("short".to_string(), ConnectionConfig {
-            conn_type: "pg".to_string(),
-            host: Some("localhost".to_string()),
-            port: Some(5432),
-            database: Some("test".to_string()),
-            credentials: None,
-            extra: HashMap::new(),
-        });
+        configs.insert(
+            "short".to_string(),
+            ConnectionConfig {
+                conn_type: "pg".to_string(),
+                host: Some("localhost".to_string()),
+                port: Some(5432),
+                database: Some("test".to_string()),
+                credentials: None,
+                extra: HashMap::new(),
+            },
+        );
 
         let registry = ProviderRegistry::from_configs(&configs).await;
         assert!(registry.get("short").is_some());
@@ -743,14 +757,17 @@ mod tests {
     #[tokio::test]
     async fn unsupported_provider_type_skipped() {
         let mut configs = HashMap::new();
-        configs.insert("unknown".to_string(), ConnectionConfig {
-            conn_type: "foobar_db".to_string(),
-            host: Some("localhost".to_string()),
-            port: None,
-            database: None,
-            credentials: None,
-            extra: HashMap::new(),
-        });
+        configs.insert(
+            "unknown".to_string(),
+            ConnectionConfig {
+                conn_type: "foobar_db".to_string(),
+                host: Some("localhost".to_string()),
+                port: None,
+                database: None,
+                credentials: None,
+                extra: HashMap::new(),
+            },
+        );
 
         let registry = ProviderRegistry::from_configs(&configs).await;
 
@@ -764,14 +781,17 @@ mod tests {
     #[tokio::test]
     async fn connection_summary_shows_unknown_for_failed_init() {
         let mut configs = HashMap::new();
-        configs.insert("broken".to_string(), ConnectionConfig {
-            conn_type: "foobar".to_string(),
-            host: None,
-            port: None,
-            database: None,
-            credentials: None,
-            extra: HashMap::new(),
-        });
+        configs.insert(
+            "broken".to_string(),
+            ConnectionConfig {
+                conn_type: "foobar".to_string(),
+                host: None,
+                port: None,
+                database: None,
+                credentials: None,
+                extra: HashMap::new(),
+            },
+        );
 
         let registry = ProviderRegistry::from_configs(&configs).await;
         let connections = registry.list_connections();
@@ -802,7 +822,7 @@ mod tests {
 
         // Should be accessible as HTTP but not as SQL or storage
         match registry.get("api").unwrap() {
-            ProviderInstance::Http(_) => {},
+            ProviderInstance::Http(_) => {}
             _ => panic!("Expected Http variant"),
         }
     }
@@ -816,7 +836,7 @@ mod tests {
         assert!(registry.get("events").is_some());
 
         match registry.get("events").unwrap() {
-            ProviderInstance::Stream(_) => {},
+            ProviderInstance::Stream(_) => {}
             _ => panic!("Expected Stream variant"),
         }
     }
@@ -863,14 +883,17 @@ mod tests {
     async fn mixed_valid_and_invalid_configs() {
         let mut configs = HashMap::new();
         configs.insert("good".to_string(), pg_config("localhost", "test"));
-        configs.insert("bad".to_string(), ConnectionConfig {
-            conn_type: "totally_unknown".to_string(),
-            host: None,
-            port: None,
-            database: None,
-            credentials: None,
-            extra: HashMap::new(),
-        });
+        configs.insert(
+            "bad".to_string(),
+            ConnectionConfig {
+                conn_type: "totally_unknown".to_string(),
+                host: None,
+                port: None,
+                database: None,
+                credentials: None,
+                extra: HashMap::new(),
+            },
+        );
 
         let registry = ProviderRegistry::from_configs(&configs).await;
 
@@ -901,10 +924,19 @@ mod tests {
     #[tokio::test]
     async fn multiple_connections_in_list() {
         let mut configs = HashMap::new();
-        configs.insert("pg_main".to_string(), pg_config("db-main.local", "analytics"));
-        configs.insert("pg_replica".to_string(), pg_config("db-replica.local", "analytics"));
+        configs.insert(
+            "pg_main".to_string(),
+            pg_config("db-main.local", "analytics"),
+        );
+        configs.insert(
+            "pg_replica".to_string(),
+            pg_config("db-replica.local", "analytics"),
+        );
         configs.insert("lake".to_string(), s3_config("data-lake"));
-        configs.insert("notifier".to_string(), webhook_config("https://hooks.slack.com/xxx"));
+        configs.insert(
+            "notifier".to_string(),
+            webhook_config("https://hooks.slack.com/xxx"),
+        );
 
         let registry = ProviderRegistry::from_configs(&configs).await;
         let connections = registry.list_connections();
@@ -945,14 +977,17 @@ mod tests {
     async fn case_insensitive_provider_type() {
         // create_provider lowercases the type, so "POSTGRES" should work
         let mut configs = HashMap::new();
-        configs.insert("upper".to_string(), ConnectionConfig {
-            conn_type: "POSTGRES".to_string(),
-            host: Some("localhost".to_string()),
-            port: Some(5432),
-            database: Some("test".to_string()),
-            credentials: None,
-            extra: HashMap::new(),
-        });
+        configs.insert(
+            "upper".to_string(),
+            ConnectionConfig {
+                conn_type: "POSTGRES".to_string(),
+                host: Some("localhost".to_string()),
+                port: Some(5432),
+                database: Some("test".to_string()),
+                credentials: None,
+                extra: HashMap::new(),
+            },
+        );
 
         let registry = ProviderRegistry::from_configs(&configs).await;
         assert_eq!(registry.connected_count(), 1);
@@ -962,22 +997,31 @@ mod tests {
     #[tokio::test]
     async fn all_sql_aliases_create_sql_providers() {
         let sql_aliases = vec![
-            ("pg", "pg"), ("postgresql", "postgresql"), ("sf", "sf"),
-            ("ch", "ch"), ("bq", "bq"), ("duck", "duck"),
-            ("mariadb", "mariadb"), ("mssql", "mssql"),
-            ("crdb", "crdb"), ("tsdb", "tsdb"),
+            ("pg", "pg"),
+            ("postgresql", "postgresql"),
+            ("sf", "sf"),
+            ("ch", "ch"),
+            ("bq", "bq"),
+            ("duck", "duck"),
+            ("mariadb", "mariadb"),
+            ("mssql", "mssql"),
+            ("crdb", "crdb"),
+            ("tsdb", "tsdb"),
         ];
 
         for (alias, name) in sql_aliases {
             let mut configs = HashMap::new();
-            configs.insert(name.to_string(), ConnectionConfig {
-                conn_type: alias.to_string(),
-                host: Some("localhost".to_string()),
-                port: Some(5432),
-                database: Some("test".to_string()),
-                credentials: None,
-                extra: HashMap::new(),
-            });
+            configs.insert(
+                name.to_string(),
+                ConnectionConfig {
+                    conn_type: alias.to_string(),
+                    host: Some("localhost".to_string()),
+                    port: Some(5432),
+                    database: Some("test".to_string()),
+                    credentials: None,
+                    extra: HashMap::new(),
+                },
+            );
 
             let registry = ProviderRegistry::from_configs(&configs).await;
             assert!(
@@ -995,7 +1039,11 @@ mod tests {
         };
         let conduit_err = err.into_conduit_error();
         let msg = conduit_err.to_string();
-        assert!(msg.contains("missing"), "Error message should contain connection name: {}", msg);
+        assert!(
+            msg.contains("missing"),
+            "Error message should contain connection name: {}",
+            msg
+        );
     }
 
     #[test]
@@ -1011,7 +1059,10 @@ mod tests {
         assert_eq!(format_display_name("crdb"), "CockroachDB");
         assert_eq!(format_display_name("tsdb"), "TimescaleDB");
         assert_eq!(format_display_name("aws_s3"), "Amazon S3");
-        assert_eq!(format_display_name("google_cloud_storage"), "Google Cloud Storage");
+        assert_eq!(
+            format_display_name("google_cloud_storage"),
+            "Google Cloud Storage"
+        );
         assert_eq!(format_display_name("https"), "HTTP/REST API");
         assert_eq!(format_display_name("rest"), "HTTP/REST API");
         assert_eq!(format_display_name("amqp"), "RabbitMQ");
@@ -1043,7 +1094,10 @@ mod tests {
         let doc_count = types.iter().filter(|t| t.3 == "document").count();
 
         assert!(sql_count >= 10, "Should have at least 10 SQL providers");
-        assert!(storage_count >= 2, "Should have at least 2 storage providers");
+        assert!(
+            storage_count >= 2,
+            "Should have at least 2 storage providers"
+        );
         assert!(stream_count >= 4, "Should have at least 4 stream providers");
         assert!(saas_count >= 5, "Should have at least 5 SaaS providers");
         assert!(doc_count >= 5, "Should have at least 5 document providers");
@@ -1051,7 +1105,12 @@ mod tests {
 }
 
 /// Supported provider type identifiers and their aliases.
-pub fn supported_provider_types() -> Vec<(&'static str, &'static str, &'static [&'static str], &'static str)> {
+pub fn supported_provider_types() -> Vec<(
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+)> {
     vec![
         // SQL
         ("postgres", "PostgreSQL", &["postgresql", "pg"], "sql"),
@@ -1068,9 +1127,19 @@ pub fn supported_provider_types() -> Vec<(&'static str, &'static str, &'static [
         ("timescaledb", "TimescaleDB", &["tsdb"], "sql"),
         // Storage
         ("s3", "Amazon S3", &["aws_s3"], "storage"),
-        ("gcs", "Google Cloud Storage", &["google_cloud_storage"], "storage"),
+        (
+            "gcs",
+            "Google Cloud Storage",
+            &["google_cloud_storage"],
+            "storage",
+        ),
         // HTTP
-        ("http", "HTTP/REST API", &["https", "rest", "webhook"], "http"),
+        (
+            "http",
+            "HTTP/REST API",
+            &["https", "rest", "webhook"],
+            "http",
+        ),
         // Streaming
         ("kafka", "Apache Kafka", &[], "stream"),
         ("rabbitmq", "RabbitMQ", &["amqp"], "stream"),
@@ -1088,7 +1157,12 @@ pub fn supported_provider_types() -> Vec<(&'static str, &'static str, &'static [
         ("mongodb", "MongoDB", &["mongo"], "document"),
         ("dynamodb", "DynamoDB", &[], "document"),
         ("cassandra", "Cassandra", &["scylladb"], "document"),
-        ("elasticsearch", "Elasticsearch", &["opensearch", "es"], "document"),
+        (
+            "elasticsearch",
+            "Elasticsearch",
+            &["opensearch", "es"],
+            "document",
+        ),
         ("redis_kv", "Redis KV", &[], "document"),
         ("neo4j", "Neo4j", &[], "document"),
     ]

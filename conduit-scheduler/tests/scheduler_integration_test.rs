@@ -11,9 +11,7 @@ use tokio::sync::mpsc;
 use conduit_common::dag::{
     Dag, DependencyType, Pool, ResourceLimits, Task, TaskDependency, TaskType, TriggerRule,
 };
-use conduit_scheduler::{
-    CronSchedule, PoolManager, Scheduler, SchedulerCommand, SchedulerEvent,
-};
+use conduit_scheduler::{CronSchedule, PoolManager, Scheduler, SchedulerCommand, SchedulerEvent};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -92,8 +90,8 @@ fn create_test_scheduler(
         description: None,
     }]);
 
-    let scheduler = Scheduler::new(event_rx, command_tx, pools, plans)
-        .expect("Scheduler::new should succeed");
+    let scheduler =
+        Scheduler::new(event_rx, command_tx, pools, plans).expect("Scheduler::new should succeed");
 
     let handle = async move {
         let _ = scheduler.run().await;
@@ -156,14 +154,16 @@ async fn test_all_success_trigger_rule() {
 
     // First command: DispatchTask for A (root task, dispatched immediately)
     assert!(
-        cmds.iter().any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "A")),
+        cmds.iter()
+            .any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "A")),
         "Expected task A to be dispatched, got: {:?}",
         cmds
     );
 
     // Second: DispatchTask for B (after A completes)
     assert!(
-        cmds.iter().any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "B")),
+        cmds.iter()
+            .any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "B")),
         "Expected task B to be dispatched after A completed, got: {:?}",
         cmds
     );
@@ -208,7 +208,8 @@ async fn test_all_done_trigger_rule() {
 
     // B should be dispatched even though A failed (AllDone)
     assert!(
-        cmds.iter().any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "B")),
+        cmds.iter()
+            .any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "B")),
         "Expected task B to be dispatched (AllDone) even after A failed, got: {:?}",
         cmds
     );
@@ -263,7 +264,8 @@ async fn test_one_success_trigger_rule() {
 
     // C should be dispatched because A succeeded (OneSuccess)
     assert!(
-        cmds.iter().any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "C")),
+        cmds.iter()
+            .any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "C")),
         "Expected task C to be dispatched (OneSuccess) since A succeeded, got: {:?}",
         cmds
     );
@@ -304,7 +306,8 @@ async fn test_retry_on_failure() {
     let cmds = drain_commands(&mut rx);
 
     assert!(
-        cmds.iter().any(|c| matches!(c, SchedulerCommand::RetryTask { task_id, .. } if task_id == "A")),
+        cmds.iter()
+            .any(|c| matches!(c, SchedulerCommand::RetryTask { task_id, .. } if task_id == "A")),
         "Expected a RetryTask command for task A, got: {:?}",
         cmds
     );
@@ -375,7 +378,8 @@ async fn test_trigger_evaluation_no_deps() {
     let cmds = drain_commands(&mut rx);
 
     assert!(
-        cmds.iter().any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "A")),
+        cmds.iter()
+            .any(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "A")),
         "Expected task A (NoDeps) to be dispatched immediately, got: {:?}",
         cmds
     );

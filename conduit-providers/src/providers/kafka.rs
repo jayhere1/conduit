@@ -17,9 +17,9 @@
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 
+use super::extra_str;
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::extra_str;
 
 #[allow(dead_code)]
 pub struct KafkaProvider {
@@ -33,13 +33,26 @@ pub struct KafkaProvider {
 
 impl KafkaProvider {
     pub fn from_config(name: &str, config: &ConnectionConfig) -> Result<Self, ProviderError> {
-        let bootstrap_servers = config.host.clone().unwrap_or_else(|| "localhost:9092".to_string());
-        let security_protocol = extra_str(config, "security_protocol").unwrap_or_else(|| "PLAINTEXT".to_string());
-        let sasl_mechanism = extra_str(config, "sasl_mechanism").unwrap_or_else(|| "PLAIN".to_string());
-        let group_id = extra_str(config, "group_id").unwrap_or_else(|| "conduit-consumer".to_string());
+        let bootstrap_servers = config
+            .host
+            .clone()
+            .unwrap_or_else(|| "localhost:9092".to_string());
+        let security_protocol =
+            extra_str(config, "security_protocol").unwrap_or_else(|| "PLAINTEXT".to_string());
+        let sasl_mechanism =
+            extra_str(config, "sasl_mechanism").unwrap_or_else(|| "PLAIN".to_string());
+        let group_id =
+            extra_str(config, "group_id").unwrap_or_else(|| "conduit-consumer".to_string());
         let schema_registry = extra_str(config, "schema_registry");
 
-        Ok(Self { name: name.to_string(), bootstrap_servers, security_protocol, sasl_mechanism, group_id, schema_registry })
+        Ok(Self {
+            name: name.to_string(),
+            bootstrap_servers,
+            security_protocol,
+            sasl_mechanism,
+            group_id,
+            schema_registry,
+        })
     }
 }
 
@@ -49,19 +62,25 @@ impl Provider for KafkaProvider {
         let broker_count = self.bootstrap_servers.split(',').count();
         ProviderInfo {
             provider_type: "kafka".to_string(),
-            display_name: format!("Kafka ({} brokers, {})", broker_count, self.security_protocol),
+            display_name: format!(
+                "Kafka ({} brokers, {})",
+                broker_count, self.security_protocol
+            ),
             version: None,
-            capabilities: vec![
-                Capability::StreamProduce, Capability::StreamConsume,
-            ],
+            capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
         }
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "kafka".into(), operation: "test_connection".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "kafka".into(),
+            operation: "test_connection".into(),
+        })
     }
 
-    async fn close(&self) -> Result<(), ProviderError> { Ok(()) }
+    async fn close(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -71,7 +90,10 @@ impl StreamProvider for KafkaProvider {
         _topic: &str,
         _messages: &[StreamMessage],
     ) -> Result<StreamResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "kafka".into(), operation: "produce".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "kafka".into(),
+            operation: "produce".into(),
+        })
     }
 
     async fn consume(
@@ -80,7 +102,10 @@ impl StreamProvider for KafkaProvider {
         _group_id: &str,
         _max_messages: usize,
     ) -> Result<Vec<StreamMessage>, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "kafka".into(), operation: "consume".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "kafka".into(),
+            operation: "consume".into(),
+        })
     }
 
     async fn list_topics(&self) -> Result<Vec<String>, ProviderError> {

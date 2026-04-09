@@ -28,9 +28,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 
+use super::extra_str;
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::extra_str;
 
 #[allow(dead_code)]
 pub struct HttpApiProvider {
@@ -47,11 +47,14 @@ pub struct HttpApiProvider {
 
 impl HttpApiProvider {
     pub fn from_config(name: &str, config: &ConnectionConfig) -> Result<Self, ProviderError> {
-        let base_url = config.host.clone().unwrap_or_else(|| "http://localhost".to_string());
+        let base_url = config
+            .host
+            .clone()
+            .unwrap_or_else(|| "http://localhost".to_string());
         let base_path = extra_str(config, "base_path").unwrap_or_default();
         let auth_type = extra_str(config, "auth_type").unwrap_or_else(|| "none".to_string());
-        let auth_header = extra_str(config, "auth_header")
-            .unwrap_or_else(|| "Authorization".to_string());
+        let auth_header =
+            extra_str(config, "auth_header").unwrap_or_else(|| "Authorization".to_string());
         let timeout_secs = super::extra_u64(config, "timeout").unwrap_or(30);
 
         let auth_value = config
@@ -109,7 +112,7 @@ impl HttpApiProvider {
                     // credentials format: "user:password"
                     let parts: Vec<&str> = cred.splitn(2, ':').collect();
                     let user = parts.first().unwrap_or(&"");
-                    let pass = parts.get(1).map(|s| *s);
+                    let pass = parts.get(1).copied();
                     builder = builder.basic_auth(user, pass);
                 }
                 "api_key" => {
@@ -185,12 +188,13 @@ impl HttpProvider for HttpApiProvider {
         let start = std::time::Instant::now();
         let client = self.client();
 
-        let reqwest_method = method.parse::<reqwest::Method>().map_err(|_| {
-            ProviderError::InvalidConfig {
-                connection: self.name.clone(),
-                reason: format!("Invalid HTTP method: {}", method),
-            }
-        })?;
+        let reqwest_method =
+            method
+                .parse::<reqwest::Method>()
+                .map_err(|_| ProviderError::InvalidConfig {
+                    connection: self.name.clone(),
+                    reason: format!("Invalid HTTP method: {}", method),
+                })?;
 
         let mut builder = client.request(reqwest_method, &url);
 
@@ -209,28 +213,28 @@ impl HttpProvider for HttpApiProvider {
             builder = builder.body(body_str.to_string());
         }
 
-        let response = builder.send().await.map_err(|e| {
-            ProviderError::QueryFailed {
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| ProviderError::QueryFailed {
                 connection: self.name.clone(),
                 reason: format!("HTTP request failed: {}", e),
-            }
-        })?;
+            })?;
 
         let status_code = response.status().as_u16();
         let resp_headers: HashMap<String, String> = response
             .headers()
             .iter()
-            .filter_map(|(k, v)| {
-                v.to_str().ok().map(|s| (k.to_string(), s.to_string()))
-            })
+            .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.to_string(), s.to_string())))
             .collect();
 
-        let body_text = response.text().await.map_err(|e| {
-            ProviderError::QueryFailed {
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| ProviderError::QueryFailed {
                 connection: self.name.clone(),
                 reason: format!("Failed to read response body: {}", e),
-            }
-        })?;
+            })?;
 
         let execution_time = start.elapsed().as_millis() as u64;
 

@@ -12,15 +12,15 @@
 //! transforms, and schema declarations to build a column-level dependency graph.
 
 pub mod catalog;
+pub mod contracts;
+pub mod impact;
+pub mod lineage_graph;
 pub mod schema;
 pub mod sql_parser;
-pub mod lineage_graph;
-pub mod impact;
-pub mod contracts;
 
-pub use catalog::{CatalogColumn, TableCatalog, parse_sql_type};
-pub use schema::{Schema, Column, ColumnType, SchemaRegistry};
+pub use catalog::{parse_sql_type, CatalogColumn, TableCatalog};
+pub use contracts::{ContractValidator, ContractViolation, SchemaContract};
+pub use impact::{ChangeKind as SchemaChangeKind, SchemaChange, SchemaChangeDetector};
+pub use lineage_graph::{ColumnRef, LineageEdge, LineageGraph};
+pub use schema::{Column, ColumnType, Schema, SchemaRegistry};
 pub use sql_parser::SqlLineageExtractor;
-pub use lineage_graph::{LineageGraph, LineageEdge, ColumnRef};
-pub use impact::{SchemaChangeDetector, SchemaChange, ChangeKind as SchemaChangeKind};
-pub use contracts::{SchemaContract, ContractViolation, ContractValidator};

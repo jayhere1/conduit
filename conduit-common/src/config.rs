@@ -92,9 +92,15 @@ pub struct VaultSecretsConfig {
     pub timeout_secs: u64,
 }
 
-fn default_vault_auth() -> String { "token".to_string() }
-fn default_vault_mount() -> String { "secret".to_string() }
-fn default_timeout_secs() -> u64 { 5 }
+fn default_vault_auth() -> String {
+    "token".to_string()
+}
+fn default_vault_mount() -> String {
+    "secret".to_string()
+}
+fn default_timeout_secs() -> u64 {
+    5
+}
 
 /// AWS secrets backend config.
 #[derive(Debug, Clone, Serialize, Deserialize)]

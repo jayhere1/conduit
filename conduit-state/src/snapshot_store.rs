@@ -40,8 +40,7 @@ impl SnapshotStore {
     pub fn new() -> Self {
         let dir = std::env::temp_dir().join(format!("conduit-snapshots-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("failed to create temp dir for SnapshotStore");
-        let db = Self::open_db(&dir)
-            .expect("failed to open RocksDB in temp dir for SnapshotStore");
+        let db = Self::open_db(&dir).expect("failed to open RocksDB in temp dir for SnapshotStore");
         Self {
             db,
             temp_dir: Some(dir),
@@ -51,10 +50,7 @@ impl SnapshotStore {
     /// Open or create a snapshot store at the given directory path.
     pub fn open(path: &Path) -> ConduitResult<Self> {
         let db = Self::open_db(path)?;
-        let store = Self {
-            db,
-            temp_dir: None,
-        };
+        let store = Self { db, temp_dir: None };
 
         info!(
             path = %path.display(),
@@ -112,7 +108,10 @@ impl SnapshotStore {
     /// Look up a snapshot by fingerprint.
     /// This is the key operation for snapshot reuse: if a matching fingerprint exists,
     /// the task can be skipped entirely.
-    pub fn find_by_fingerprint(&self, fingerprint: &Fingerprint) -> ConduitResult<Option<Snapshot>> {
+    pub fn find_by_fingerprint(
+        &self,
+        fingerprint: &Fingerprint,
+    ) -> ConduitResult<Option<Snapshot>> {
         let cf = self.cf_fingerprint_idx();
         match self.db.get_cf(cf, fingerprint.0.as_bytes()) {
             Ok(Some(id_bytes)) => {
@@ -162,9 +161,8 @@ impl SnapshotStore {
         let mut snapshots = Vec::new();
 
         for item in iter {
-            let (_key, value) = item.map_err(|e| {
-                ConduitError::EventStoreError(format!("Iterator error: {}", e))
-            })?;
+            let (_key, value) =
+                item.map_err(|e| ConduitError::EventStoreError(format!("Iterator error: {}", e)))?;
             let snapshot: Snapshot = serde_json::from_slice(&value)?;
             snapshots.push(snapshot);
         }

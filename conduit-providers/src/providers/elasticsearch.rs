@@ -15,12 +15,12 @@
 //!   scheme: https
 //! ```
 
-use async_trait::async_trait;
+use super::extra_str;
+use crate::errors::ProviderError;
 use crate::traits::*;
 use crate::traits_saas::*;
-use crate::errors::ProviderError;
+use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
-use super::extra_str;
 
 /// Elasticsearch / OpenSearch provider
 #[allow(dead_code)]
@@ -37,7 +37,10 @@ pub struct ElasticsearchProvider {
 impl ElasticsearchProvider {
     /// Create a new Elasticsearch provider from configuration
     pub fn from_config(name: &str, config: &ConnectionConfig) -> Result<Self, ProviderError> {
-        let host = config.host.clone().unwrap_or_else(|| "localhost".to_string());
+        let host = config
+            .host
+            .clone()
+            .unwrap_or_else(|| "localhost".to_string());
         let port = config.port.unwrap_or(9200);
         let index_prefix = extra_str(config, "index_prefix");
         let user = extra_str(config, "user").unwrap_or_else(|| "elastic".to_string());
@@ -83,7 +86,12 @@ impl Provider for ElasticsearchProvider {
 
 #[async_trait]
 impl DocumentProvider for ElasticsearchProvider {
-    async fn find(&self, collection: &str, _filter: &serde_json::Value, _limit: Option<u64>) -> Result<DocumentResult, ProviderError> {
+    async fn find(
+        &self,
+        collection: &str,
+        _filter: &serde_json::Value,
+        _limit: Option<u64>,
+    ) -> Result<DocumentResult, ProviderError> {
         Ok(DocumentResult {
             operation: "find".to_string(),
             documents_affected: 0,
@@ -92,7 +100,11 @@ impl DocumentProvider for ElasticsearchProvider {
         })
     }
 
-    async fn insert(&self, collection: &str, documents: &[serde_json::Value]) -> Result<DocumentResult, ProviderError> {
+    async fn insert(
+        &self,
+        collection: &str,
+        documents: &[serde_json::Value],
+    ) -> Result<DocumentResult, ProviderError> {
         Ok(DocumentResult {
             operation: "insert".to_string(),
             documents_affected: documents.len() as u64,
@@ -101,7 +113,12 @@ impl DocumentProvider for ElasticsearchProvider {
         })
     }
 
-    async fn update(&self, collection: &str, _filter: &serde_json::Value, _update: &serde_json::Value) -> Result<DocumentResult, ProviderError> {
+    async fn update(
+        &self,
+        collection: &str,
+        _filter: &serde_json::Value,
+        _update: &serde_json::Value,
+    ) -> Result<DocumentResult, ProviderError> {
         Ok(DocumentResult {
             operation: "update".to_string(),
             documents_affected: 0,
@@ -110,7 +127,11 @@ impl DocumentProvider for ElasticsearchProvider {
         })
     }
 
-    async fn delete(&self, collection: &str, _filter: &serde_json::Value) -> Result<DocumentResult, ProviderError> {
+    async fn delete(
+        &self,
+        collection: &str,
+        _filter: &serde_json::Value,
+    ) -> Result<DocumentResult, ProviderError> {
         Ok(DocumentResult {
             operation: "delete".to_string(),
             documents_affected: 0,

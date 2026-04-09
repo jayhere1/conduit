@@ -22,9 +22,9 @@ use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 use std::time::Instant;
 
+use super::{extra_str, resolve_credential};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, resolve_credential};
 
 #[allow(dead_code)]
 pub struct S3Provider {
@@ -249,10 +249,7 @@ impl StorageProvider for S3Provider {
             objects_affected: 1,
             bytes_transferred: 0,
             execution_time_ms: start.elapsed().as_millis() as u64,
-            uris: vec![
-                self.build_uri(source),
-                self.build_uri(dest),
-            ],
+            uris: vec![self.build_uri(source), self.build_uri(dest)],
         })
     }
 }

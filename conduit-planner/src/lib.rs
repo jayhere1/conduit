@@ -16,8 +16,8 @@ pub mod impact_analyzer;
 pub mod incremental;
 
 pub use backfill_engine::BackfillEngine;
-pub use change_detector::{ChangeDetector, ChangeSet, TaskChange, ChangeKind};
-pub use deployment_plan::{DeploymentPlan, DeploymentAction, ActionKind};
+pub use change_detector::{ChangeDetector, ChangeKind, ChangeSet, TaskChange};
+pub use deployment_plan::{ActionKind, DeploymentAction, DeploymentPlan};
 pub use fingerprinter::PlanFingerprinter;
 pub use impact_analyzer::ImpactAnalyzer;
 pub use incremental::{IncrementalEngine, WatermarkStore};

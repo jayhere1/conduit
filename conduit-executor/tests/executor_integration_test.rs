@@ -1,13 +1,15 @@
-use conduit_executor::{TaskExecutor, ExecutorCommand, ExecutorEvent, TaskOutcome};
-use conduit_common::dag::{Task, TaskType, ResourceLimits, TriggerRule};
-use tokio::sync::mpsc;
-use std::collections::HashMap;
 use chrono::Utc;
+use conduit_common::dag::{ResourceLimits, Task, TaskType, TriggerRule};
+use conduit_executor::{ExecutorCommand, ExecutorEvent, TaskExecutor, TaskOutcome};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 fn make_bash_task(id: &str, command: &str) -> Task {
     Task {
         id: id.to_string(),
-        task_type: TaskType::Bash { command: command.to_string() },
+        task_type: TaskType::Bash {
+            command: command.to_string(),
+        },
         dependencies: vec![],
         retries: 0,
         retry_delay: None,

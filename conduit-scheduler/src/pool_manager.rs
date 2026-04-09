@@ -60,9 +60,7 @@ impl PoolManager {
             );
         }
 
-        Self {
-            pools: pool_states,
-        }
+        Self { pools: pool_states }
     }
 
     /// Try to acquire a slot in the named pool for the given task.

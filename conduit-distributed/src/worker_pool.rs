@@ -132,20 +132,15 @@ impl WorkerEntry {
 }
 
 /// Task routing strategy for selecting workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingStrategy {
     /// Assign to worker with most available slots (spread load).
+    #[default]
     LeastLoaded,
     /// Assign to worker with fewest available slots (pack tightly, save resources).
     BinPack,
     /// Simple round-robin across available workers.
     RoundRobin,
-}
-
-impl Default for RoutingStrategy {
-    fn default() -> Self {
-        Self::LeastLoaded
-    }
 }
 
 /// Manages the set of connected workers and handles task routing.
@@ -236,8 +231,11 @@ impl WorkerPool {
                 candidates
                     .iter()
                     .max_by(|a, b| {
-                        a.1.cmp(&b.1)
-                            .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal).reverse())
+                        a.1.cmp(&b.1).then_with(|| {
+                            a.2.partial_cmp(&b.2)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .reverse()
+                        })
                     })
                     .map(|(id, _, _)| id.clone())
             }
@@ -264,9 +262,7 @@ impl WorkerPool {
 
         if let Some(mut entry) = self.workers.get_mut(worker_id) {
             entry.active_tasks += 1;
-            entry
-                .running_assignments
-                .push(assignment_id.to_string());
+            entry.running_assignments.push(assignment_id.to_string());
         }
     }
 
@@ -275,9 +271,7 @@ impl WorkerPool {
         if let Some((_, worker_id)) = self.assignment_map.remove(assignment_id) {
             if let Some(mut entry) = self.workers.get_mut(&worker_id) {
                 entry.active_tasks = entry.active_tasks.saturating_sub(1);
-                entry
-                    .running_assignments
-                    .retain(|a| a != assignment_id);
+                entry.running_assignments.retain(|a| a != assignment_id);
 
                 if success {
                     entry.tasks_completed += 1;
@@ -324,7 +318,8 @@ impl WorkerPool {
 
             match entry.state {
                 WorkerState::Active | WorkerState::Draining => {
-                    if since_heartbeat > chrono::Duration::from_std(DEAD_TIMEOUT).unwrap_or_default()
+                    if since_heartbeat
+                        > chrono::Duration::from_std(DEAD_TIMEOUT).unwrap_or_default()
                     {
                         warn!(
                             worker = %entry.worker_id,
@@ -336,19 +331,19 @@ impl WorkerPool {
                         newly_dead.push(entry.worker_id.clone());
                     } else if since_heartbeat
                         > chrono::Duration::from_std(HEARTBEAT_TIMEOUT).unwrap_or_default()
+                        && entry.state != WorkerState::Draining
                     {
-                        if entry.state != WorkerState::Draining {
-                            warn!(
-                                worker = %entry.worker_id,
-                                "Worker disconnected (no heartbeat for {}s)",
-                                since_heartbeat.num_seconds()
-                            );
-                            entry.state = WorkerState::Disconnected;
-                        }
+                        warn!(
+                            worker = %entry.worker_id,
+                            "Worker disconnected (no heartbeat for {}s)",
+                            since_heartbeat.num_seconds()
+                        );
+                        entry.state = WorkerState::Disconnected;
                     }
                 }
                 WorkerState::Disconnected => {
-                    if since_heartbeat > chrono::Duration::from_std(DEAD_TIMEOUT).unwrap_or_default()
+                    if since_heartbeat
+                        > chrono::Duration::from_std(DEAD_TIMEOUT).unwrap_or_default()
                     {
                         warn!(worker = %entry.worker_id, "Disconnected worker declared dead");
                         entry.state = WorkerState::Dead;

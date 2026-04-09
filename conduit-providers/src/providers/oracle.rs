@@ -21,9 +21,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 
+use super::extra_str;
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::extra_str;
 
 /// Oracle Database provider
 #[allow(dead_code)]
@@ -76,7 +76,10 @@ impl Provider for OracleProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "oracle".into(), operation: "test_connection".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "oracle".into(),
+            operation: "test_connection".into(),
+        })
     }
 
     async fn close(&self) -> Result<(), ProviderError> {
@@ -91,7 +94,10 @@ impl SqlProvider for OracleProvider {
         _query: &str,
         _params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "oracle".into(), operation: "execute".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "oracle".into(),
+            operation: "execute".into(),
+        })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
@@ -103,6 +109,9 @@ impl SqlProvider for OracleProvider {
         _schema: &str,
         _table: &str,
     ) -> Result<Vec<ColumnInfo>, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "oracle".into(), operation: "describe_table".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "oracle".into(),
+            operation: "describe_table".into(),
+        })
     }
 }

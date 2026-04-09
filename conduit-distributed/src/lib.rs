@@ -45,14 +45,14 @@
 //! conduit run my_dag --distributed --bind 0.0.0.0:9400
 //! ```
 
-pub mod proto_types;
-pub mod worker_pool;
-pub mod coordinator;
-pub mod worker;
-pub mod distributed_executor;
 pub mod convert;
-pub mod grpc_server;
+pub mod coordinator;
+pub mod distributed_executor;
 pub mod grpc_client;
+pub mod grpc_server;
+pub mod proto_types;
+pub mod worker;
+pub mod worker_pool;
 
 /// Canonical location for generated protobuf types.
 /// All modules should reference `crate::generated_proto` instead of
@@ -62,12 +62,14 @@ pub mod generated_proto {
 }
 
 pub use coordinator::{Coordinator, CoordinatorConfig};
-pub use worker::{Worker, WorkerConfig};
-pub use worker_pool::{WorkerPool, RoutingStrategy};
-pub use distributed_executor::{DistributedExecutor, DistributedExecutorConfig, ExecutionMode, DispatchRequest, DispatchResult};
+pub use distributed_executor::{
+    DispatchRequest, DispatchResult, DistributedExecutor, DistributedExecutorConfig, ExecutionMode,
+};
+pub use grpc_client::{run_worker, GrpcClientError, WorkerGrpcClient};
+pub use grpc_server::{serve_grpc, CoordinatorGrpcService};
 pub use proto_types::*;
-pub use grpc_server::{CoordinatorGrpcService, serve_grpc};
-pub use grpc_client::{WorkerGrpcClient, run_worker, GrpcClientError};
+pub use worker::{Worker, WorkerConfig};
+pub use worker_pool::{RoutingStrategy, WorkerPool};
 
 #[cfg(test)]
 mod tests {

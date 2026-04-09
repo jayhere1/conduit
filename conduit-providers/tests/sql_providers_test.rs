@@ -18,8 +18,8 @@
 use std::collections::HashMap;
 
 use conduit_common::config::ConnectionConfig;
-use conduit_providers::traits::*;
 use conduit_providers::providers::*;
+use conduit_providers::traits::*;
 
 // ─── Helper Functions ───────────────────────────────────────────────────────
 
@@ -38,7 +38,10 @@ fn make_config(conn_type: &str) -> ConnectionConfig {
 
 /// Create a ConnectionConfig with extra parameters.
 #[allow(dead_code)]
-fn make_config_with_extras(conn_type: &str, extras: Vec<(&str, serde_json::Value)>) -> ConnectionConfig {
+fn make_config_with_extras(
+    conn_type: &str,
+    extras: Vec<(&str, serde_json::Value)>,
+) -> ConnectionConfig {
     let mut extra = HashMap::new();
     for (k, v) in extras {
         extra.insert(k.to_string(), v);
@@ -59,7 +62,10 @@ fn make_config_with_extras(conn_type: &str, extras: Vec<(&str, serde_json::Value
 async fn test_postgres_from_config_defaults() {
     let config = make_config("postgres");
     let provider = postgres::PostgresProvider::from_config("test_pg", &config);
-    assert!(provider.is_ok(), "PostgreSQL provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "PostgreSQL provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -109,7 +115,9 @@ async fn test_postgres_execute_insert() {
         .expect("Failed to create PostgreSQL provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
     assert!(result.is_ok());
 }
 
@@ -129,7 +137,10 @@ async fn test_postgres_close() {
 async fn test_snowflake_from_config_defaults() {
     let config = make_config("snowflake");
     let provider = snowflake::SnowflakeProvider::from_config("test_snowflake", &config);
-    assert!(provider.is_ok(), "Snowflake provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Snowflake provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -151,7 +162,10 @@ async fn test_snowflake_test_connection() {
         .expect("Failed to create Snowflake provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "Snowflake test_connection should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "Snowflake test_connection should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -162,7 +176,10 @@ async fn test_snowflake_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_err(), "Snowflake execute should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "Snowflake execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -172,8 +189,13 @@ async fn test_snowflake_execute_insert() {
         .expect("Failed to create Snowflake provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "Snowflake execute should return NotImplemented");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
+    assert!(
+        result.is_err(),
+        "Snowflake execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -192,7 +214,10 @@ async fn test_snowflake_close() {
 async fn test_clickhouse_from_config_defaults() {
     let config = make_config("clickhouse");
     let provider = clickhouse::ClickHouseProvider::from_config("test_clickhouse", &config);
-    assert!(provider.is_ok(), "ClickHouse provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "ClickHouse provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -214,7 +239,10 @@ async fn test_clickhouse_test_connection() {
         .expect("Failed to create ClickHouse provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "ClickHouse test_connection should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "ClickHouse test_connection should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -225,7 +253,10 @@ async fn test_clickhouse_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_err(), "ClickHouse execute should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "ClickHouse execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -235,8 +266,13 @@ async fn test_clickhouse_execute_insert() {
         .expect("Failed to create ClickHouse provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "ClickHouse execute should return NotImplemented");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
+    assert!(
+        result.is_err(),
+        "ClickHouse execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -255,7 +291,10 @@ async fn test_clickhouse_close() {
 async fn test_redshift_from_config_defaults() {
     let config = make_config("redshift");
     let provider = redshift::RedshiftProvider::from_config("test_redshift", &config);
-    assert!(provider.is_ok(), "Redshift provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Redshift provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -305,7 +344,9 @@ async fn test_redshift_execute_insert() {
         .expect("Failed to create Redshift provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
     assert!(result.is_ok());
 }
 
@@ -325,7 +366,10 @@ async fn test_redshift_close() {
 async fn test_bigquery_from_config_defaults() {
     let config = make_config("bigquery");
     let provider = bigquery::BigQueryProvider::from_config("test_bigquery", &config);
-    assert!(provider.is_ok(), "BigQuery provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "BigQuery provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -347,7 +391,10 @@ async fn test_bigquery_test_connection() {
         .expect("Failed to create BigQuery provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "BigQuery test_connection should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "BigQuery test_connection should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -358,7 +405,10 @@ async fn test_bigquery_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_err(), "BigQuery execute should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "BigQuery execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -368,8 +418,13 @@ async fn test_bigquery_execute_insert() {
         .expect("Failed to create BigQuery provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "BigQuery execute should return NotImplemented");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
+    assert!(
+        result.is_err(),
+        "BigQuery execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -388,7 +443,10 @@ async fn test_bigquery_close() {
 async fn test_duckdb_from_config_defaults() {
     let config = make_config("duckdb");
     let provider = duckdb::DuckDbProvider::from_config("test_duckdb", &config);
-    assert!(provider.is_ok(), "DuckDB provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "DuckDB provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -410,7 +468,10 @@ async fn test_duckdb_test_connection() {
         .expect("Failed to create DuckDB provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "DuckDB test_connection should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "DuckDB test_connection should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -421,7 +482,10 @@ async fn test_duckdb_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_err(), "DuckDB execute should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "DuckDB execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -431,8 +495,13 @@ async fn test_duckdb_execute_insert() {
         .expect("Failed to create DuckDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "DuckDB execute should return NotImplemented");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
+    assert!(
+        result.is_err(),
+        "DuckDB execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -451,7 +520,10 @@ async fn test_duckdb_close() {
 async fn test_mysql_from_config_defaults() {
     let config = make_config("mysql");
     let provider = mysql::MySqlProvider::from_config("test_mysql", &config);
-    assert!(provider.is_ok(), "MySQL provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "MySQL provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -501,7 +573,9 @@ async fn test_mysql_execute_insert() {
         .expect("Failed to create MySQL provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
     assert!(result.is_ok());
 }
 
@@ -521,7 +595,10 @@ async fn test_mysql_close() {
 async fn test_sqlite_from_config_defaults() {
     let config = make_config("sqlite");
     let provider = sqlite::SqliteProvider::from_config("test_sqlite", &config);
-    assert!(provider.is_ok(), "SQLite provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "SQLite provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -589,9 +666,13 @@ async fn test_sqlite_execute_insert() {
         .expect("Failed to create SQLite provider");
 
     let params = HashMap::new();
-    provider.execute("CREATE TABLE test_table (id INTEGER)", &params).await
+    provider
+        .execute("CREATE TABLE test_table (id INTEGER)", &params)
+        .await
         .expect("Failed to create table");
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
     assert!(result.is_ok());
 }
 
@@ -611,7 +692,10 @@ async fn test_sqlite_close() {
 async fn test_oracle_from_config_defaults() {
     let config = make_config("oracle");
     let provider = oracle::OracleProvider::from_config("test_oracle", &config);
-    assert!(provider.is_ok(), "Oracle provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Oracle provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -633,7 +717,10 @@ async fn test_oracle_test_connection() {
         .expect("Failed to create Oracle provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "Oracle test_connection should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "Oracle test_connection should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -644,7 +731,10 @@ async fn test_oracle_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1 FROM DUAL", &params).await;
-    assert!(result.is_err(), "Oracle execute should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "Oracle execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -654,8 +744,13 @@ async fn test_oracle_execute_insert() {
         .expect("Failed to create Oracle provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "Oracle execute should return NotImplemented");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
+    assert!(
+        result.is_err(),
+        "Oracle execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -674,7 +769,10 @@ async fn test_oracle_close() {
 async fn test_sqlserver_from_config_defaults() {
     let config = make_config("sqlserver");
     let provider = sqlserver::SqlServerProvider::from_config("test_sqlserver", &config);
-    assert!(provider.is_ok(), "SQL Server provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "SQL Server provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -696,7 +794,10 @@ async fn test_sqlserver_test_connection() {
         .expect("Failed to create SQL Server provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "SQL Server test_connection should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "SQL Server test_connection should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -707,7 +808,10 @@ async fn test_sqlserver_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_err(), "SQL Server execute should return NotImplemented");
+    assert!(
+        result.is_err(),
+        "SQL Server execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -717,8 +821,13 @@ async fn test_sqlserver_execute_insert() {
         .expect("Failed to create SQL Server provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "SQL Server execute should return NotImplemented");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
+    assert!(
+        result.is_err(),
+        "SQL Server execute should return NotImplemented"
+    );
 }
 
 #[tokio::test]
@@ -737,7 +846,10 @@ async fn test_sqlserver_close() {
 async fn test_cockroachdb_from_config_defaults() {
     let config = make_config("cockroachdb");
     let provider = cockroachdb::CockroachDbProvider::from_config("test_cockroachdb", &config);
-    assert!(provider.is_ok(), "CockroachDB provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "CockroachDB provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -787,7 +899,9 @@ async fn test_cockroachdb_execute_insert() {
         .expect("Failed to create CockroachDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
     assert!(result.is_ok());
 }
 
@@ -807,7 +921,10 @@ async fn test_cockroachdb_close() {
 async fn test_timescaledb_from_config_defaults() {
     let config = make_config("timescaledb");
     let provider = timescaledb::TimescaleDbProvider::from_config("test_timescaledb", &config);
-    assert!(provider.is_ok(), "TimescaleDB provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "TimescaleDB provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -857,7 +974,9 @@ async fn test_timescaledb_execute_insert() {
         .expect("Failed to create TimescaleDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .await;
     assert!(result.is_ok());
 }
 

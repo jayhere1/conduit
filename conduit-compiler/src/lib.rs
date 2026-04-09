@@ -10,11 +10,11 @@
 //! vs. Airflow's 60-120 seconds of Python interpretation.
 
 pub mod parser;
-pub mod resolver;
 pub mod plan;
+pub mod resolver;
 pub mod yaml_parser;
 
 pub use parser::DagParser;
-pub use resolver::DependencyResolver;
 pub use plan::ConduitPlan;
+pub use resolver::DependencyResolver;
 pub use yaml_parser::YamlDagParser;

@@ -2,18 +2,18 @@
 
 pub mod auth;
 pub mod backfill;
+pub mod cluster;
 pub mod connections;
 pub mod contracts;
 pub mod dags;
-pub mod runs;
+pub mod docs;
 pub mod envs;
-pub mod plan;
 pub mod events;
 pub mod lineage;
 pub mod metrics;
-pub mod cluster;
-pub mod docs;
+pub mod plan;
 pub mod prometheus;
+pub mod runs;
 
 use std::sync::Arc;
 
@@ -34,11 +34,7 @@ pub async fn health_check() -> Json<Value> {
 
 /// GET /api/v1/info — system information.
 pub async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let env_count = state
-        .env_manager
-        .list()
-        .map(|e| e.len())
-        .unwrap_or(0);
+    let env_count = state.env_manager.list().map(|e| e.len()).unwrap_or(0);
 
     let run_count = state.get_runs(None).len();
 

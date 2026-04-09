@@ -449,7 +449,10 @@ impl SecretsBackend for EnvVarBackend {
             Err(std::env::VarError::NotPresent) => Ok(None),
             Err(std::env::VarError::NotUnicode(_)) => Err(SecretsError::Other {
                 backend: "env".to_string(),
-                reason: format!("Environment variable '{}' contains invalid Unicode", var_name),
+                reason: format!(
+                    "Environment variable '{}' contains invalid Unicode",
+                    var_name
+                ),
             }),
         }
     }
@@ -505,12 +508,13 @@ impl VaultBackend {
 
     /// Parse a vault:// reference into (path, field).
     fn parse_reference(reference: &str) -> Result<(&str, &str), SecretsError> {
-        let stripped = reference.strip_prefix("vault://").ok_or_else(|| {
-            SecretsError::InvalidReference {
-                reference: reference.to_string(),
-                reason: "Expected vault:// prefix".to_string(),
-            }
-        })?;
+        let stripped =
+            reference
+                .strip_prefix("vault://")
+                .ok_or_else(|| SecretsError::InvalidReference {
+                    reference: reference.to_string(),
+                    reason: "Expected vault:// prefix".to_string(),
+                })?;
 
         if let Some(hash_pos) = stripped.rfind('#') {
             let path = &stripped[..hash_pos];
@@ -629,12 +633,13 @@ impl SecretsBackend for AwsSsmBackend {
     }
 
     async fn resolve(&self, reference: &str) -> Result<Option<String>, SecretsError> {
-        let param_name = reference.strip_prefix("ssm://").ok_or_else(|| {
-            SecretsError::InvalidReference {
-                reference: reference.to_string(),
-                reason: "Expected ssm:// prefix".to_string(),
-            }
-        })?;
+        let param_name =
+            reference
+                .strip_prefix("ssm://")
+                .ok_or_else(|| SecretsError::InvalidReference {
+                    reference: reference.to_string(),
+                    reason: "Expected ssm:// prefix".to_string(),
+                })?;
 
         let region = self.config.region.clone().unwrap_or_else(|| {
             std::env::var("AWS_REGION")
@@ -848,7 +853,13 @@ fn mask_reference(reference: &str) -> String {
         return format!("${{{}...}}", &var_name[..var_name.len().min(4)]);
     }
 
-    for prefix in &["vault://", "ssm://", "secretsmanager://", "gcp-secret://", "file://"] {
+    for prefix in &[
+        "vault://",
+        "ssm://",
+        "secretsmanager://",
+        "gcp-secret://",
+        "file://",
+    ] {
         if let Some(rest) = reference.strip_prefix(prefix) {
             let visible = &rest[..rest.len().min(8)];
             return format!("{}{}...", prefix, visible);
@@ -902,14 +913,21 @@ mod tests {
     #[test]
     fn test_mask_reference() {
         assert_eq!(mask_reference("${MY_PASSWORD}"), "${MY_P...}");
-        assert_eq!(mask_reference("vault://secret/data/db#pw"), "vault://secret/d...");
-        assert_eq!(mask_reference("ssm:///prod/db/password"), "ssm:///prod/db...");
+        assert_eq!(
+            mask_reference("vault://secret/data/db#pw"),
+            "vault://secret/d..."
+        );
+        assert_eq!(
+            mask_reference("ssm:///prod/db/password"),
+            "ssm:///prod/db..."
+        );
         assert_eq!(mask_reference("plain-value"), "***");
     }
 
     #[test]
     fn test_vault_parse_reference() {
-        let (path, field) = VaultBackend::parse_reference("vault://secret/data/mydb#password").unwrap();
+        let (path, field) =
+            VaultBackend::parse_reference("vault://secret/data/mydb#password").unwrap();
         assert_eq!(path, "secret/data/mydb");
         assert_eq!(field, "password");
 
@@ -949,10 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_secrets_chain_env_then_literal() {
-        let chain = SecretsChain::new(vec![
-            Arc::new(EnvVarBackend),
-            Arc::new(LiteralBackend),
-        ]);
+        let chain = SecretsChain::new(vec![Arc::new(EnvVarBackend), Arc::new(LiteralBackend)]);
 
         // Env var that exists
         let result = chain.resolve("${HOME}").await.unwrap();
@@ -965,9 +980,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_secrets_chain_caching() {
-        let chain = SecretsChain::new(vec![
-            Arc::new(LiteralBackend),
-        ]);
+        let chain = SecretsChain::new(vec![Arc::new(LiteralBackend)]);
 
         let result1 = chain.resolve("test-value").await.unwrap();
         let result2 = chain.resolve("test-value").await.unwrap();
@@ -997,9 +1010,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_uncached_chain() {
-        let chain = SecretsChain::new_uncached(vec![
-            Arc::new(LiteralBackend),
-        ]);
+        let chain = SecretsChain::new_uncached(vec![Arc::new(LiteralBackend)]);
 
         let result = chain.resolve("test-value").await.unwrap();
         assert_eq!(result, "test-value");
@@ -1011,9 +1022,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_cache() {
-        let chain = SecretsChain::new(vec![
-            Arc::new(LiteralBackend),
-        ]);
+        let chain = SecretsChain::new(vec![Arc::new(LiteralBackend)]);
 
         // Populate cache
         chain.resolve("secret-1").await.unwrap();

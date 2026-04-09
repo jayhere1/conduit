@@ -5,8 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use conduit_compiler::{ConduitPlan, DagParser, DependencyResolver, YamlDagParser};
 use conduit_common::dag::TaskType;
+use conduit_compiler::{ConduitPlan, DagParser, DependencyResolver, YamlDagParser};
 
 /// Resolve path to the fixtures directory.
 fn fixtures_dir() -> PathBuf {
@@ -27,14 +27,24 @@ fn compile_all_fixtures() {
         stats.dags_compiled
     );
     assert!(stats.tasks_total > 15);
-    assert!(stats.errors.is_empty(), "Unexpected errors: {:?}", stats.errors);
+    assert!(
+        stats.errors.is_empty(),
+        "Unexpected errors: {:?}",
+        stats.errors
+    );
 
     // Verify key DAGs exist
     assert!(plan.dags.contains_key("linear_etl"), "Missing linear_etl");
     assert!(plan.dags.contains_key("diamond_dag"), "Missing diamond_dag");
     assert!(plan.dags.contains_key("simple_etl"), "Missing simple_etl");
-    assert!(plan.dags.contains_key("incremental_pipeline"), "Missing incremental_pipeline");
-    assert!(plan.dags.contains_key("all_task_types"), "Missing all_task_types");
+    assert!(
+        plan.dags.contains_key("incremental_pipeline"),
+        "Missing incremental_pipeline"
+    );
+    assert!(
+        plan.dags.contains_key("all_task_types"),
+        "Missing all_task_types"
+    );
 }
 
 // ─── Python fixture: linear_etl.py ──────────────────────────────────────────
@@ -60,12 +70,20 @@ fn fixture_linear_etl_structure() {
     assert_eq!(extract.retry_delay, Some("5m".to_string()));
     assert_eq!(extract.pool, Some("source_pool".to_string()));
 
-    let transform = dag.tasks.iter().find(|t| t.id == "transform_orders").unwrap();
-    assert!(transform.raw_dependencies.contains(&"extract_orders".to_string()));
+    let transform = dag
+        .tasks
+        .iter()
+        .find(|t| t.id == "transform_orders")
+        .unwrap();
+    assert!(transform
+        .raw_dependencies
+        .contains(&"extract_orders".to_string()));
     assert_eq!(transform.timeout, Some("30m".to_string()));
 
     let load = dag.tasks.iter().find(|t| t.id == "load_orders").unwrap();
-    assert!(load.raw_dependencies.contains(&"transform_orders".to_string()));
+    assert!(load
+        .raw_dependencies
+        .contains(&"transform_orders".to_string()));
 }
 
 #[test]
@@ -78,9 +96,21 @@ fn fixture_linear_etl_resolves() {
 
     assert_eq!(dag.execution_order.len(), 3);
     // extract must come before transform, which must come before load
-    let extract_pos = dag.execution_order.iter().position(|t| t == "extract_orders").unwrap();
-    let transform_pos = dag.execution_order.iter().position(|t| t == "transform_orders").unwrap();
-    let load_pos = dag.execution_order.iter().position(|t| t == "load_orders").unwrap();
+    let extract_pos = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "extract_orders")
+        .unwrap();
+    let transform_pos = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "transform_orders")
+        .unwrap();
+    let load_pos = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "load_orders")
+        .unwrap();
 
     assert!(extract_pos < transform_pos);
     assert!(transform_pos < load_pos);
@@ -101,8 +131,12 @@ fn fixture_diamond_dag_structure() {
 
     // join should depend on both branch_left and branch_right
     let join_task = dag.tasks.iter().find(|t| t.id == "join").unwrap();
-    assert!(join_task.raw_dependencies.contains(&"branch_left".to_string()));
-    assert!(join_task.raw_dependencies.contains(&"branch_right".to_string()));
+    assert!(join_task
+        .raw_dependencies
+        .contains(&"branch_left".to_string()));
+    assert!(join_task
+        .raw_dependencies
+        .contains(&"branch_right".to_string()));
 }
 
 #[test]
@@ -114,15 +148,31 @@ fn fixture_diamond_dag_resolves_with_parallelism() {
     let dag = DependencyResolver::resolve(parsed.into_iter().next().unwrap()).unwrap();
 
     // start must come first, join must come last
-    let start_pos = dag.execution_order.iter().position(|t| t == "start").unwrap();
-    let join_pos = dag.execution_order.iter().position(|t| t == "join").unwrap();
+    let start_pos = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "start")
+        .unwrap();
+    let join_pos = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "join")
+        .unwrap();
 
     assert_eq!(start_pos, 0);
     assert_eq!(join_pos, dag.execution_order.len() - 1);
 
     // branch_left and branch_right should be between start and join
-    let left_pos = dag.execution_order.iter().position(|t| t == "branch_left").unwrap();
-    let right_pos = dag.execution_order.iter().position(|t| t == "branch_right").unwrap();
+    let left_pos = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "branch_left")
+        .unwrap();
+    let right_pos = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "branch_right")
+        .unwrap();
 
     assert!(left_pos > start_pos && left_pos < join_pos);
     assert!(right_pos > start_pos && right_pos < join_pos);
@@ -147,7 +197,10 @@ fn fixture_multi_dag_file() {
     assert_eq!(ingest.tasks.len(), 2);
     assert_eq!(ingest.schedule, Some("@daily".to_string()));
 
-    let monitor = parsed.iter().find(|d| d.id == "monitoring_pipeline").unwrap();
+    let monitor = parsed
+        .iter()
+        .find(|d| d.id == "monitoring_pipeline")
+        .unwrap();
     assert_eq!(monitor.tasks.len(), 2);
     assert_eq!(monitor.schedule, Some("@hourly".to_string()));
 }
@@ -160,7 +213,10 @@ fn fixture_yaml_simple_etl() {
     let dag = YamlDagParser::parse_string(&source, Path::new("simple_etl.yaml")).unwrap();
 
     assert_eq!(dag.id, "simple_etl");
-    assert_eq!(dag.description, Some("A simple ETL pipeline defined in YAML".to_string()));
+    assert_eq!(
+        dag.description,
+        Some("A simple ETL pipeline defined in YAML".to_string())
+    );
     assert_eq!(dag.schedule, Some("0 6 * * *".to_string()));
     assert_eq!(dag.tags, vec!["etl", "yaml"]);
     assert_eq!(dag.max_active_runs, 1);
@@ -187,8 +243,16 @@ fn fixture_yaml_simple_etl_resolves() {
     let resolved = DependencyResolver::resolve(dag).unwrap();
 
     assert_eq!(resolved.execution_order.len(), 3);
-    let extract_pos = resolved.execution_order.iter().position(|t| t == "extract").unwrap();
-    let load_pos = resolved.execution_order.iter().position(|t| t == "load").unwrap();
+    let extract_pos = resolved
+        .execution_order
+        .iter()
+        .position(|t| t == "extract")
+        .unwrap();
+    let load_pos = resolved
+        .execution_order
+        .iter()
+        .position(|t| t == "load")
+        .unwrap();
     assert!(extract_pos < load_pos);
 }
 
@@ -205,10 +269,14 @@ fn fixture_yaml_incremental() {
 
     // Both merge_users and append_events depend on extract_events
     let merge = dag.tasks.iter().find(|t| t.id == "merge_users").unwrap();
-    assert!(merge.raw_dependencies.contains(&"extract_events".to_string()));
+    assert!(merge
+        .raw_dependencies
+        .contains(&"extract_events".to_string()));
 
     let append = dag.tasks.iter().find(|t| t.id == "append_events").unwrap();
-    assert!(append.raw_dependencies.contains(&"extract_events".to_string()));
+    assert!(append
+        .raw_dependencies
+        .contains(&"extract_events".to_string()));
 }
 
 // ─── YAML fixture: all_task_types.yaml ───────────────────────────────────────
@@ -251,7 +319,11 @@ fn fixture_yaml_all_task_types_resolves() {
     assert_eq!(resolved.execution_order.len(), 5);
 
     // sensor_task must be last (depends on sql_task which depends on 3 others)
-    let sensor_pos = resolved.execution_order.iter().position(|t| t == "sensor_task").unwrap();
+    let sensor_pos = resolved
+        .execution_order
+        .iter()
+        .position(|t| t == "sensor_task")
+        .unwrap();
     assert_eq!(sensor_pos, 4);
 }
 

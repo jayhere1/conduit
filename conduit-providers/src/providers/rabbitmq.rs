@@ -17,11 +17,11 @@
 //!   routing_key: my.routing.key
 //! ```
 
-use async_trait::async_trait;
-use conduit_common::config::ConnectionConfig;
+use super::{extra_str, extra_u64};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, extra_u64};
+use async_trait::async_trait;
+use conduit_common::config::ConnectionConfig;
 
 /// RabbitMQ provider
 #[allow(dead_code)]
@@ -70,15 +70,15 @@ impl Provider for RabbitMqProvider {
             provider_type: "rabbitmq".to_string(),
             display_name: format!("RabbitMQ ({}:{}{})", self.host, self.port, self.vhost),
             version: None,
-            capabilities: vec![
-                Capability::StreamProduce,
-                Capability::StreamConsume,
-            ],
+            capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
         }
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "rabbitmq".into(), operation: "test_connection".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "rabbitmq".into(),
+            operation: "test_connection".into(),
+        })
     }
 
     async fn close(&self) -> Result<(), ProviderError> {
@@ -88,12 +88,27 @@ impl Provider for RabbitMqProvider {
 
 #[async_trait]
 impl StreamProvider for RabbitMqProvider {
-    async fn produce(&self, _topic: &str, _messages: &[StreamMessage]) -> Result<StreamResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "rabbitmq".into(), operation: "produce".into() })
+    async fn produce(
+        &self,
+        _topic: &str,
+        _messages: &[StreamMessage],
+    ) -> Result<StreamResult, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "rabbitmq".into(),
+            operation: "produce".into(),
+        })
     }
 
-    async fn consume(&self, _topic: &str, _group_id: &str, _max_messages: usize) -> Result<Vec<StreamMessage>, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "rabbitmq".into(), operation: "consume".into() })
+    async fn consume(
+        &self,
+        _topic: &str,
+        _group_id: &str,
+        _max_messages: usize,
+    ) -> Result<Vec<StreamMessage>, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "rabbitmq".into(),
+            operation: "consume".into(),
+        })
     }
 
     async fn list_topics(&self) -> Result<Vec<String>, ProviderError> {

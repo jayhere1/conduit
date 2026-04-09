@@ -34,7 +34,11 @@ use proto::coordinator_client::CoordinatorClient;
 
 /// Start a coordinator gRPC server on an ephemeral port and return the
 /// address plus a handle to the coordinator so tests can inspect state.
-async fn start_server() -> (SocketAddr, Arc<Coordinator>, mpsc::UnboundedReceiver<TaskResult>) {
+async fn start_server() -> (
+    SocketAddr,
+    Arc<Coordinator>,
+    mpsc::UnboundedReceiver<TaskResult>,
+) {
     let config = CoordinatorConfig {
         bind_addr: "127.0.0.1:0".into(),
         health_check_interval_secs: 60, // disable auto-checks during tests
@@ -64,9 +68,7 @@ async fn start_server() -> (SocketAddr, Arc<Coordinator>, mpsc::UnboundedReceive
 }
 
 /// Connect a tonic client to the server.
-async fn connect_client(
-    addr: SocketAddr,
-) -> CoordinatorClient<tonic::transport::Channel> {
+async fn connect_client(addr: SocketAddr) -> CoordinatorClient<tonic::transport::Channel> {
     let endpoint = format!("http://{}", addr);
     CoordinatorClient::connect(endpoint)
         .await
@@ -111,11 +113,7 @@ fn make_proto_result(
 
 /// Create a TaskSpec + TaskContext and submit via the coordinator, returning
 /// the assignment_id.
-async fn submit_task_helper(
-    coordinator: &Coordinator,
-    task_id: &str,
-    pool: &str,
-) -> String {
+async fn submit_task_helper(coordinator: &Coordinator, task_id: &str, pool: &str) -> String {
     let spec = TaskSpec {
         task_type: TaskType::Bash,
         script: format!("echo {}", task_id),
@@ -203,12 +201,14 @@ async fn test_two_workers_task_distribution() {
     assert!(
         !w1_tasks.is_empty(),
         "Worker 1 should have received at least one task, got: w1={:?} w2={:?}",
-        w1_tasks, w2_tasks
+        w1_tasks,
+        w2_tasks
     );
     assert!(
         !w2_tasks.is_empty(),
         "Worker 2 should have received at least one task, got: w1={:?} w2={:?}",
-        w1_tasks, w2_tasks
+        w1_tasks,
+        w2_tasks
     );
     assert_eq!(
         total_received, 4,
@@ -252,7 +252,9 @@ async fn test_worker_failure_triggers_reassignment() {
 
     // Mark worker-1 as draining (simulates what health_check would do
     // after heartbeat timeout; we can't wait 120s in a test).
-    coordinator.worker_pool().drain_worker("fail-w1", "simulated failure");
+    coordinator
+        .worker_pool()
+        .drain_worker("fail-w1", "simulated failure");
 
     // Now register worker-2.
     let mut client2 = connect_client(addr).await;
@@ -283,9 +285,8 @@ async fn test_worker_failure_triggers_reassignment() {
         environment: "test".into(),
         params: HashMap::new(),
     };
-    let new_assignment = coordinator.create_assignment(
-        "dag1", "run1", "reassign-task", 1, spec, ctx, 300,
-    );
+    let new_assignment =
+        coordinator.create_assignment("dag1", "run1", "reassign-task", 1, spec, ctx, 300);
     coordinator.submit_task(new_assignment, "default").await;
 
     // Worker-2 should receive the retried task.
@@ -342,10 +343,7 @@ async fn test_coordinator_tracks_inflight_correctly() {
 
     // Complete task 0 (success).
     let result0 = make_proto_result(&assignment_ids[0], "inflight-w1", "inflight-task-0", 1);
-    client
-        .report_result(Request::new(result0))
-        .await
-        .unwrap();
+    client.report_result(Request::new(result0)).await.unwrap();
     let _ = timeout(Duration::from_secs(1), result_rx.recv()).await;
 
     assert_eq!(
@@ -356,10 +354,7 @@ async fn test_coordinator_tracks_inflight_correctly() {
 
     // Complete task 1 (failure).
     let result1 = make_proto_result(&assignment_ids[1], "inflight-w1", "inflight-task-1", 2);
-    client
-        .report_result(Request::new(result1))
-        .await
-        .unwrap();
+    client.report_result(Request::new(result1)).await.unwrap();
     let _ = timeout(Duration::from_secs(1), result_rx.recv()).await;
 
     assert_eq!(
@@ -370,10 +365,7 @@ async fn test_coordinator_tracks_inflight_correctly() {
 
     // Complete task 2 (success).
     let result2 = make_proto_result(&assignment_ids[2], "inflight-w1", "inflight-task-2", 1);
-    client
-        .report_result(Request::new(result2))
-        .await
-        .unwrap();
+    client.report_result(Request::new(result2)).await.unwrap();
     let _ = timeout(Duration::from_secs(1), result_rx.recv()).await;
 
     assert_eq!(

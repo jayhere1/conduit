@@ -47,11 +47,17 @@ pub enum ProviderError {
 
     /// The provider operation is not yet implemented.
     #[error("{provider_type} provider: {operation} is not yet implemented")]
-    NotImplemented { provider_type: String, operation: String },
+    NotImplemented {
+        provider_type: String,
+        operation: String,
+    },
 
     /// Timeout exceeded.
     #[error("operation timed out on '{connection}' after {timeout_secs}s")]
-    Timeout { connection: String, timeout_secs: u64 },
+    Timeout {
+        connection: String,
+        timeout_secs: u64,
+    },
 
     /// Generic wrapped error.
     #[error(transparent)]

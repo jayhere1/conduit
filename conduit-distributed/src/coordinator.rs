@@ -22,11 +22,11 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::proto_types::*;
-use crate::worker_pool::{WorkerPool, RoutingStrategy};
+use crate::worker_pool::{RoutingStrategy, WorkerPool};
 
 /// Configuration for the coordinator.
 #[derive(Debug, Clone)]
@@ -145,8 +145,7 @@ impl Coordinator {
         self.pool.register(req);
 
         let (tx, rx) = mpsc::unbounded_channel();
-        self.worker_channels
-            .insert(req.worker_id.clone(), tx);
+        self.worker_channels.insert(req.worker_id.clone(), tx);
 
         rx
     }
@@ -188,6 +187,7 @@ impl Coordinator {
     }
 
     /// Create a new TaskAssignment from task parameters.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_assignment(
         &self,
         dag_id: &str,
@@ -514,7 +514,13 @@ mod tests {
         let mut worker_rx = coord.register_worker(&make_register("w1", 4));
 
         let assignment = coord.create_assignment(
-            "dag1", "run1", "task1", 0, make_spec(), make_context("task1"), 300,
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
         );
 
         coord.submit_task(assignment.clone(), "default").await;
@@ -530,7 +536,13 @@ mod tests {
         let (coord, _rx) = Coordinator::new(CoordinatorConfig::default());
 
         let assignment = coord.create_assignment(
-            "dag1", "run1", "task1", 0, make_spec(), make_context("task1"), 300,
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
         );
 
         coord.submit_task(assignment, "default").await;
@@ -546,7 +558,13 @@ mod tests {
         let mut _worker_rx = coord.register_worker(&make_register("w1", 4));
 
         let assignment = coord.create_assignment(
-            "dag1", "run1", "task1", 0, make_spec(), make_context("task1"), 300,
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
         );
         let assignment_id = assignment.assignment_id.clone();
 
@@ -582,7 +600,13 @@ mod tests {
 
         // Fill the only slot.
         let a1 = coord.create_assignment(
-            "dag1", "run1", "task1", 0, make_spec(), make_context("task1"), 300,
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
         );
         let a1_id = a1.assignment_id.clone();
         coord.submit_task(a1, "default").await;
@@ -590,7 +614,13 @@ mod tests {
 
         // Submit another — should queue.
         let a2 = coord.create_assignment(
-            "dag1", "run1", "task2", 0, make_spec(), make_context("task2"), 300,
+            "dag1",
+            "run1",
+            "task2",
+            0,
+            make_spec(),
+            make_context("task2"),
+            300,
         );
         coord.submit_task(a2, "default").await;
         assert_eq!(coord.pending_count().await, 1);
@@ -676,10 +706,22 @@ mod tests {
         let (coord, _rx) = Coordinator::new(CoordinatorConfig::default());
 
         let a1 = coord.create_assignment(
-            "dag1", "run1", "task1", 0, make_spec(), make_context("task1"), 300,
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
         );
         let a2 = coord.create_assignment(
-            "dag1", "run1", "task2", 0, make_spec(), make_context("task2"), 300,
+            "dag1",
+            "run1",
+            "task2",
+            0,
+            make_spec(),
+            make_context("task2"),
+            300,
         );
 
         assert_ne!(a1.assignment_id, a2.assignment_id);

@@ -3,8 +3,8 @@
 //! This is the core performance claim: Conduit compiles 1,000 DAGs in <2 seconds.
 //! Run with: cargo bench -p conduit-compiler
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use conduit_compiler::DagParser;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::fs;
 use tempfile::tempdir;
 
@@ -62,9 +62,7 @@ fn bench_parse_single_dag(c: &mut Criterion) {
 
     c.bench_function("parse_single_dag_10_tasks", |b| {
         let mut parser = DagParser::new().unwrap();
-        b.iter(|| {
-            parser.parse_source(black_box(&source), "bench.py").unwrap()
-        })
+        b.iter(|| parser.parse_source(black_box(&source), "bench.py").unwrap())
     });
 }
 
@@ -74,16 +72,12 @@ fn bench_parse_directory(c: &mut Criterion) {
     for num_dags in [10, 100, 500, 1000] {
         let dir = generate_dag_files(num_dags, 10);
 
-        group.bench_with_input(
-            BenchmarkId::new("dags", num_dags),
-            &num_dags,
-            |b, _| {
-                b.iter(|| {
-                    let mut parser = DagParser::new().unwrap();
-                    parser.parse_directory(black_box(dir.path())).unwrap()
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("dags", num_dags), &num_dags, |b, _| {
+            b.iter(|| {
+                let mut parser = DagParser::new().unwrap();
+                parser.parse_directory(black_box(dir.path())).unwrap()
+            })
+        });
     }
 
     group.finish();
@@ -95,15 +89,9 @@ fn bench_compile_full(c: &mut Criterion) {
     for num_dags in [10, 100, 1000] {
         let dir = generate_dag_files(num_dags, 10);
 
-        group.bench_with_input(
-            BenchmarkId::new("dags", num_dags),
-            &num_dags,
-            |b, _| {
-                b.iter(|| {
-                    conduit_compiler::ConduitPlan::compile(black_box(dir.path())).unwrap()
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("dags", num_dags), &num_dags, |b, _| {
+            b.iter(|| conduit_compiler::ConduitPlan::compile(black_box(dir.path())).unwrap())
+        });
     }
 
     group.finish();

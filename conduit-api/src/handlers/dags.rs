@@ -39,9 +39,7 @@ struct TaskSummary {
 }
 
 /// GET /api/v1/dags — list all compiled DAGs.
-pub async fn list_dags(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn list_dags(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let (plan, _stats) = ConduitPlan::compile(&state.dags_path)
         .map_err(|e| ApiError::CompilationFailed(e.to_string()))?;
 
@@ -187,9 +185,7 @@ pub async fn get_dag_graph(
 }
 
 /// POST /api/v1/dags/compile — recompile all DAGs and return results.
-pub async fn compile_dags(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn compile_dags(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let (_plan, stats) = ConduitPlan::compile(&state.dags_path)
         .map_err(|e| ApiError::CompilationFailed(e.to_string()))?;
 

@@ -32,9 +32,9 @@ use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 use std::time::Instant;
 
+use super::{extra_str, resolve_credential};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, resolve_credential};
 
 #[allow(dead_code)]
 pub struct GcsProvider {
@@ -64,8 +64,8 @@ impl GcsProvider {
             .as_deref()
             .map(|cred_ref| {
                 // If it's a file:// reference, extract the path
-                if cred_ref.starts_with("file://") {
-                    Ok(cred_ref[7..].to_string())
+                if let Some(path) = cred_ref.strip_prefix("file://") {
+                    Ok(path.to_string())
                 } else {
                     // Try to resolve as credential (could be env var or literal path)
                     resolve_credential(cred_ref).map(|_| cred_ref.to_string())
@@ -300,10 +300,7 @@ impl StorageProvider for GcsProvider {
             objects_affected: 1,
             bytes_transferred: 0,
             execution_time_ms: start.elapsed().as_millis() as u64,
-            uris: vec![
-                self.build_uri(source),
-                self.build_uri(dest),
-            ],
+            uris: vec![self.build_uri(source), self.build_uri(dest)],
         })
     }
 }

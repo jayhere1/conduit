@@ -6,8 +6,8 @@
 
 use std::sync::OnceLock;
 
-use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::encoding::text::encode;
+use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;

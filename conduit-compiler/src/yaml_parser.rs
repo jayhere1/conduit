@@ -50,14 +50,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use conduit_common::contracts::{
-    ContractCheck, DataContract, Severity, TaskContracts,
-};
+use conduit_common::contracts::{ContractCheck, DataContract, Severity, TaskContracts};
 use conduit_common::dag::*;
 use conduit_common::error::{ConduitError, ConduitResult};
-use conduit_common::incremental::{
-    IncrementalConfig, IncrementalStrategy, PartitionGranularity,
-};
+use conduit_common::incremental::{IncrementalConfig, IncrementalStrategy, PartitionGranularity};
 
 use crate::parser::{ParsedDag, ParsedTask};
 
@@ -369,7 +365,7 @@ impl YamlDagParser {
                     // Skip conduit.yaml config file
                     if path
                         .file_name()
-                        .map_or(false, |n| n == "conduit.yaml" || n == "conduit.yml")
+                        .is_some_and(|n| n == "conduit.yaml" || n == "conduit.yml")
                     {
                         continue;
                     }
@@ -392,7 +388,11 @@ impl YamlDagParser {
             let contracts = if yaml_task.contracts.is_empty() {
                 None
             } else {
-                Some(Self::resolve_contracts(task_id, &yaml.id, &yaml_task.contracts)?)
+                Some(Self::resolve_contracts(
+                    task_id,
+                    &yaml.id,
+                    &yaml_task.contracts,
+                )?)
             };
 
             tasks.push(ParsedTask {
@@ -510,13 +510,11 @@ impl YamlDagParser {
                 }
             }
 
-            "merge" | "merge_on_key" | "upsert" => {
-                IncrementalStrategy::MergeOnKey {
-                    unique_key: yaml.unique_key.clone(),
-                    time_column: yaml.time_column.clone(),
-                    invalidate_hard_deletes: yaml.invalidate_hard_deletes,
-                }
-            }
+            "merge" | "merge_on_key" | "upsert" => IncrementalStrategy::MergeOnKey {
+                unique_key: yaml.unique_key.clone(),
+                time_column: yaml.time_column.clone(),
+                invalidate_hard_deletes: yaml.invalidate_hard_deletes,
+            },
 
             "delete_insert" | "delete+insert" => {
                 let partition_column = yaml
@@ -597,7 +595,8 @@ impl YamlDagParser {
                 "freshness" => {
                     let max_age = yc.max_age.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': freshness contract requires 'max_age'", task_id
+                            "Task '{}': freshness contract requires 'max_age'",
+                            task_id
                         ))
                     })?;
                     ContractCheck::Freshness { max_age }
@@ -615,7 +614,8 @@ impl YamlDagParser {
                 "not_null" | "notnull" | "not_null_rate" => {
                     let column = yc.column.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': not_null contract requires 'column'", task_id
+                            "Task '{}': not_null contract requires 'column'",
+                            task_id
                         ))
                     })?;
                     ContractCheck::NotNullRate {
@@ -627,7 +627,8 @@ impl YamlDagParser {
                 "accepted_values" | "values" => {
                     let column = yc.column.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': accepted_values contract requires 'column'", task_id
+                            "Task '{}': accepted_values contract requires 'column'",
+                            task_id
                         ))
                     })?;
                     ContractCheck::AcceptedValues {
@@ -640,7 +641,8 @@ impl YamlDagParser {
                 "value_range" | "range" => {
                     let column = yc.column.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': value_range contract requires 'column'", task_id
+                            "Task '{}': value_range contract requires 'column'",
+                            task_id
                         ))
                     })?;
                     ContractCheck::ValueRange {
@@ -653,17 +655,20 @@ impl YamlDagParser {
                 "references" | "referential_integrity" | "fk" => {
                     let column = yc.column.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': references contract requires 'column'", task_id
+                            "Task '{}': references contract requires 'column'",
+                            task_id
                         ))
                     })?;
                     let ref_task = yc.ref_task.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': references contract requires 'ref_task'", task_id
+                            "Task '{}': references contract requires 'ref_task'",
+                            task_id
                         ))
                     })?;
                     let ref_column = yc.ref_column.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': references contract requires 'ref_column'", task_id
+                            "Task '{}': references contract requires 'ref_column'",
+                            task_id
                         ))
                     })?;
                     ContractCheck::ReferentialIntegrity {
@@ -681,7 +686,8 @@ impl YamlDagParser {
                 "metric" => {
                     let metric_name = yc.metric_name.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': metric contract requires 'metric_name'", task_id
+                            "Task '{}': metric contract requires 'metric_name'",
+                            task_id
                         ))
                     })?;
                     ContractCheck::Metric {
@@ -695,7 +701,8 @@ impl YamlDagParser {
                 "custom" => {
                     let assertion_name = yc.assertion_name.clone().ok_or_else(|| {
                         ConduitError::ConfigError(format!(
-                            "Task '{}': custom contract requires 'assertion_name'", task_id
+                            "Task '{}': custom contract requires 'assertion_name'",
+                            task_id
                         ))
                     })?;
                     ContractCheck::Custom { assertion_name }
@@ -711,9 +718,10 @@ impl YamlDagParser {
                 }
             };
 
-            let name = yc.name.clone().unwrap_or_else(|| {
-                format!("{}:{}", yc.check_type, task_id)
-            });
+            let name = yc
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", yc.check_type, task_id));
 
             tc.checks.push(DataContract {
                 name,
@@ -817,7 +825,10 @@ tasks:
 
         let result = YamlDagParser::parse_string(yaml, Path::new("test.yaml"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unknown task type"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unknown task type"));
     }
 
     #[test]
@@ -831,7 +842,10 @@ tasks:
 
         let result = YamlDagParser::parse_string(yaml, Path::new("test.yaml"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires 'command'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires 'command'"));
     }
 
     #[test]
@@ -851,7 +865,10 @@ tasks:
         };
 
         let config = YamlDagParser::resolve_incremental_config(&yaml_inc).unwrap();
-        assert!(matches!(config.strategy, IncrementalStrategy::Append { .. }));
+        assert!(matches!(
+            config.strategy,
+            IncrementalStrategy::Append { .. }
+        ));
         assert_eq!(config.batch_size, Some(5000));
     }
 
@@ -873,7 +890,11 @@ tasks:
 
         let config = YamlDagParser::resolve_incremental_config(&yaml_inc).unwrap();
         match config.strategy {
-            IncrementalStrategy::MergeOnKey { unique_key, invalidate_hard_deletes, .. } => {
+            IncrementalStrategy::MergeOnKey {
+                unique_key,
+                invalidate_hard_deletes,
+                ..
+            } => {
                 assert_eq!(unique_key, vec!["user_id"]);
                 assert!(invalidate_hard_deletes);
             }

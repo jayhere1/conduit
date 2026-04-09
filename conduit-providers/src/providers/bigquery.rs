@@ -16,9 +16,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 
+use super::extra_str;
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::extra_str;
 
 #[allow(dead_code)]
 pub struct BigQueryProvider {
@@ -41,7 +41,12 @@ impl BigQueryProvider {
             });
         }
 
-        Ok(Self { name: name.to_string(), project, dataset, location })
+        Ok(Self {
+            name: name.to_string(),
+            project,
+            dataset,
+            location,
+        })
     }
 }
 
@@ -53,30 +58,51 @@ impl Provider for BigQueryProvider {
             display_name: format!("BigQuery ({}/{})", self.project, self.dataset),
             version: None,
             capabilities: vec![
-                Capability::SqlQuery, Capability::SqlDdl, Capability::BulkLoad,
+                Capability::SqlQuery,
+                Capability::SqlDdl,
+                Capability::BulkLoad,
                 Capability::IncrementalRead,
             ],
         }
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "bigquery".into(), operation: "test_connection".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "bigquery".into(),
+            operation: "test_connection".into(),
+        })
     }
 
-    async fn close(&self) -> Result<(), ProviderError> { Ok(()) }
+    async fn close(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl SqlProvider for BigQueryProvider {
-    async fn execute(&self, _query: &str, _params: &HashMap<String, String>) -> Result<SqlResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "bigquery".into(), operation: "execute".into() })
+    async fn execute(
+        &self,
+        _query: &str,
+        _params: &HashMap<String, String>,
+    ) -> Result<SqlResult, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "bigquery".into(),
+            operation: "execute".into(),
+        })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
         Ok(vec![self.dataset.clone(), "INFORMATION_SCHEMA".to_string()])
     }
 
-    async fn describe_table(&self, _schema: &str, _table: &str) -> Result<Vec<ColumnInfo>, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "bigquery".into(), operation: "describe_table".into() })
+    async fn describe_table(
+        &self,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Vec<ColumnInfo>, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "bigquery".into(),
+            operation: "describe_table".into(),
+        })
     }
 }

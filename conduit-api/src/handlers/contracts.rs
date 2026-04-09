@@ -63,7 +63,12 @@ pub async fn list_contracts(State(state): State<Arc<AppState>>) -> Json<Value> {
                         .iter()
                         .map(|c| CheckSummary {
                             name: c.name.clone(),
-                            check_type: format!("{:?}", c.check).split('{').next().unwrap_or("unknown").trim().to_string(),
+                            check_type: format!("{:?}", c.check)
+                                .split('{')
+                                .next()
+                                .unwrap_or("unknown")
+                                .trim()
+                                .to_string(),
                             severity: match c.severity {
                                 Severity::Error => "error".to_string(),
                                 Severity::Warning => "warning".to_string(),

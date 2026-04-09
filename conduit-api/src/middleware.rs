@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::extract::FromRequestParts;
-use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
@@ -57,11 +57,13 @@ impl RequireAuth {
 }
 
 #[async_trait]
-impl FromRequestParts<Arc<AppState>> for RequireAuth
-{
+impl FromRequestParts<Arc<AppState>> for RequireAuth {
     type Rejection = AuthApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
         let auth_store = &state.auth_store;
 
         // If auth is disabled, create a synthetic admin context
@@ -81,8 +83,7 @@ impl FromRequestParts<Arc<AppState>> for RequireAuth
 
         let header_value = auth_header.ok_or(AuthApiError(AuthError::MissingToken))?;
 
-        let token = AuthStore::extract_bearer(header_value)
-            .map_err(AuthApiError)?;
+        let token = AuthStore::extract_bearer(header_value).map_err(AuthApiError)?;
 
         let context = auth_store.authenticate(token).map_err(AuthApiError)?;
 
@@ -101,11 +102,13 @@ impl FromRequestParts<Arc<AppState>> for RequireAuth
 pub struct OptionalAuth(pub Option<AuthContext>);
 
 #[async_trait]
-impl FromRequestParts<Arc<AppState>> for OptionalAuth
-{
+impl FromRequestParts<Arc<AppState>> for OptionalAuth {
     type Rejection = AuthApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
         let auth_store = &state.auth_store;
 
         if !auth_store.auth_enabled {
@@ -120,8 +123,7 @@ impl FromRequestParts<Arc<AppState>> for OptionalAuth
         match auth_header {
             None => Ok(OptionalAuth(None)),
             Some(header_value) => {
-                let token = AuthStore::extract_bearer(header_value)
-                    .map_err(AuthApiError)?;
+                let token = AuthStore::extract_bearer(header_value).map_err(AuthApiError)?;
                 let context = auth_store.authenticate(token).map_err(AuthApiError)?;
                 Ok(OptionalAuth(Some(context)))
             }

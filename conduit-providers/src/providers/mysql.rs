@@ -24,9 +24,9 @@ use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{Column, MySqlPool, Row};
 use tokio::sync::OnceCell;
 
+use super::{extra_str, extra_u64};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, extra_u64};
 
 /// MySQL / MariaDB provider backed by sqlx.
 #[allow(dead_code)]
@@ -46,7 +46,10 @@ pub struct MySqlProvider {
 impl MySqlProvider {
     /// Create a new MySQL provider from configuration.
     pub fn from_config(name: &str, config: &ConnectionConfig) -> Result<Self, ProviderError> {
-        let host = config.host.clone().unwrap_or_else(|| "localhost".to_string());
+        let host = config
+            .host
+            .clone()
+            .unwrap_or_else(|| "localhost".to_string());
         let port = config.port.unwrap_or(3306);
         let database = config.database.clone().unwrap_or_default();
         let user = extra_str(config, "user").unwrap_or_else(|| "conduit".to_string());
@@ -63,9 +66,13 @@ impl MySqlProvider {
 
         let connection_string = format!(
             "mysql://{}:{}@{}:{}/{}?charset={}&ssl-mode={}",
-            super::url_encode_credential(&user), super::url_encode_credential(&password),
-            host, port,
-            database, charset, ssl_mode
+            super::url_encode_credential(&user),
+            super::url_encode_credential(&password),
+            host,
+            port,
+            database,
+            charset,
+            ssl_mode
         );
 
         Ok(Self {
@@ -191,18 +198,21 @@ impl SqlProvider for MySqlProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(query)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
+            let rows = sqlx::query(query).fetch_all(pool).await.map_err(|e| {
+                ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
             let columns: Vec<String> = if let Some(first) = rows.first() {
-                first.columns().iter().map(|c| c.name().to_string()).collect()
+                first
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -231,13 +241,14 @@ impl SqlProvider for MySqlProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(query)
-                .execute(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
-                    connection: self.name.clone(),
-                    reason: e.to_string(),
-                })?;
+            let result =
+                sqlx::query(query)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| ProviderError::QueryFailed {
+                        connection: self.name.clone(),
+                        reason: e.to_string(),
+                    })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
@@ -265,14 +276,15 @@ impl SqlProvider for MySqlProvider {
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
         let pool = self.ensure_pool().await?;
 
-        let rows: Vec<(String,)> =
-            sqlx::query_as("SELECT schema_name FROM information_schema.schemata ORDER BY schema_name")
-                .fetch_all(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
-                    connection: self.name.clone(),
-                    reason: e.to_string(),
-                })?;
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| ProviderError::QueryFailed {
+            connection: self.name.clone(),
+            reason: e.to_string(),
+        })?;
 
         Ok(rows.into_iter().map(|(s,)| s).collect())
     }

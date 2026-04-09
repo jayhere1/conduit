@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::Request;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::convert;
 use crate::proto_types as local;
@@ -109,7 +109,7 @@ impl WorkerGrpcClient {
         let mut endpoint = tonic::transport::Endpoint::from_shared(endpoint_uri.clone())
             .map_err(|e| GrpcClientError::ConnectionFailed {
                 addr: addr.clone(),
-                source: e.into(),
+                source: e,
             })?
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(300));
@@ -117,7 +117,8 @@ impl WorkerGrpcClient {
         if let Some(ca_path) = &self.config.tls_ca_cert_path {
             let ca_cert = std::fs::read_to_string(ca_path).map_err(|e| {
                 GrpcClientError::TlsConfig(format!(
-                    "Failed to read CA certificate at {}: {}", ca_path, e
+                    "Failed to read CA certificate at {}: {}",
+                    ca_path, e
                 ))
             })?;
             let ca = tonic::transport::Certificate::from_pem(ca_cert);
@@ -127,7 +128,8 @@ impl WorkerGrpcClient {
             })?;
         }
 
-        let channel = endpoint.connect()
+        let channel = endpoint
+            .connect()
             .await
             .map_err(|e| GrpcClientError::ConnectionFailed {
                 addr: addr.clone(),
@@ -198,8 +200,7 @@ impl WorkerGrpcClient {
         while let Some(result) = assignment_stream.next().await {
             match result {
                 Ok(proto_assignment) => {
-                    let local_assignment =
-                        convert::task_assignment_from_proto(&proto_assignment);
+                    let local_assignment = convert::task_assignment_from_proto(&proto_assignment);
 
                     info!(
                         assignment_id = %local_assignment.assignment_id,
