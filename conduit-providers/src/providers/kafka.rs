@@ -58,7 +58,39 @@ impl Provider for KafkaProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "kafka".into(), operation: "test_connection".into() })
+        use tokio::net::TcpStream;
+        use tokio::time::{timeout, Duration};
+        use std::time::Instant;
+
+        let start = Instant::now();
+        // Connect to the first broker in the bootstrap servers list
+        let first_broker = self.bootstrap_servers.split(',').next().unwrap_or("localhost:9092");
+        let addr = if first_broker.contains(':') {
+            first_broker.to_string()
+        } else {
+            format!("{}:9092", first_broker)
+        };
+
+        match timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await {
+            Ok(Ok(_)) => Ok(ConnectionTestResult {
+                success: true,
+                message: format!("TCP connection to broker {} successful", addr),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+            Ok(Err(e)) => Ok(ConnectionTestResult {
+                success: false,
+                message: format!("Connection failed: {}", e),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+            Err(_) => Ok(ConnectionTestResult {
+                success: false,
+                message: format!("Connection timed out after 5s to {}", addr),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+        }
     }
 
     async fn close(&self) -> Result<(), ProviderError> { Ok(()) }

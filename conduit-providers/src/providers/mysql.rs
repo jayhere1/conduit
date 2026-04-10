@@ -39,6 +39,7 @@ pub struct MySqlProvider {
     charset: String,
     ssl_mode: String,
     connection_timeout: u64,
+    max_connections: u32,
     connection_string: String,
     pool: OnceCell<MySqlPool>,
 }
@@ -53,6 +54,7 @@ impl MySqlProvider {
         let charset = extra_str(config, "charset").unwrap_or_else(|| "utf8mb4".to_string());
         let ssl_mode = extra_str(config, "ssl_mode").unwrap_or_else(|| "preferred".to_string());
         let connection_timeout = extra_u64(config, "connection_timeout").unwrap_or(30);
+        let max_connections = extra_u64(config, "max_connections").unwrap_or(5) as u32;
 
         let password = config
             .credentials
@@ -77,6 +79,7 @@ impl MySqlProvider {
             charset,
             ssl_mode,
             connection_timeout,
+            max_connections,
             connection_string,
             pool: OnceCell::new(),
         })
@@ -87,13 +90,13 @@ impl MySqlProvider {
         self.pool
             .get_or_try_init(|| async {
                 MySqlPoolOptions::new()
-                    .max_connections(5)
+                    .max_connections(self.max_connections)
                     .acquire_timeout(std::time::Duration::from_secs(self.connection_timeout))
                     .connect(&self.connection_string)
                     .await
                     .map_err(|e| ProviderError::ConnectionFailed {
                         name: self.name.clone(),
-                        reason: e.to_string(),
+                        reason: super::sanitize::sanitize_error(&e.to_string()),
                     })
             })
             .await
@@ -147,7 +150,7 @@ impl Provider for MySqlProvider {
             .await
             .map_err(|e| ProviderError::ConnectionFailed {
                 name: self.name.clone(),
-                reason: e.to_string(),
+                reason: super::sanitize::sanitize_error(&e.to_string()),
             })?;
 
         let latency = start.elapsed().as_millis() as u64;
@@ -184,6 +187,7 @@ impl SqlProvider for MySqlProvider {
         query: &str,
         _params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
+        let query = super::sanitize::sanitize_query(query, &self.name)?;
         let start = std::time::Instant::now();
         let pool = self.ensure_pool().await?;
 
@@ -191,12 +195,12 @@ impl SqlProvider for MySqlProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(query)
+            let rows = sqlx::query(&query)
                 .fetch_all(pool)
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
@@ -231,12 +235,12 @@ impl SqlProvider for MySqlProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(query)
+            let result = sqlx::query(&query)
                 .execute(pool)
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
@@ -271,7 +275,7 @@ impl SqlProvider for MySqlProvider {
                 .await
                 .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
-                    reason: e.to_string(),
+                    reason: super::sanitize::sanitize_error(&e.to_string()),
                 })?;
 
         Ok(rows.into_iter().map(|(s,)| s).collect())
@@ -303,7 +307,7 @@ impl SqlProvider for MySqlProvider {
         .await
         .map_err(|e| ProviderError::QueryFailed {
             connection: self.name.clone(),
-            reason: e.to_string(),
+            reason: super::sanitize::sanitize_error(&e.to_string()),
         })?;
 
         let pk_rows: Vec<(String,)> = sqlx::query_as(

@@ -269,15 +269,26 @@ mod tests {
 
     #[test]
     fn hash_is_deterministic() {
+        let salt = "test-salt";
         let key = "cdt_test_key_000000000000000000000";
-        assert_eq!(hash_key(key), hash_key(key));
+        assert_eq!(hash_key(salt, key), hash_key(salt, key));
     }
 
     #[test]
     fn different_keys_different_hashes() {
+        let salt = "test-salt";
         assert_ne!(
-            hash_key("cdt_key_aaaa0000000000000000000000"),
-            hash_key("cdt_key_bbbb0000000000000000000000"),
+            hash_key(salt, "cdt_key_aaaa0000000000000000000000"),
+            hash_key(salt, "cdt_key_bbbb0000000000000000000000"),
+        );
+    }
+
+    #[test]
+    fn different_salts_different_hashes() {
+        let key = "cdt_key_aaaa0000000000000000000000";
+        assert_ne!(
+            hash_key("salt-a", key),
+            hash_key("salt-b", key),
         );
     }
 
@@ -298,6 +309,7 @@ mod tests {
             id: "x".to_string(),
             name: "x".to_string(),
             key_hash: "h".to_string(),
+            salt: "s".to_string(),
             key_prefix: "cdt_x".to_string(),
             role: Role::Viewer,
             created_at: chrono::Utc::now(),
@@ -316,6 +328,7 @@ mod tests {
             id: "x".to_string(),
             name: "x".to_string(),
             key_hash: "h".to_string(),
+            salt: "s".to_string(),
             key_prefix: "cdt_x".to_string(),
             role: Role::Viewer,
             created_at: chrono::Utc::now(),
@@ -334,6 +347,7 @@ mod tests {
             id: "x".to_string(),
             name: "x".to_string(),
             key_hash: "h".to_string(),
+            salt: "s".to_string(),
             key_prefix: "cdt_x".to_string(),
             role: Role::Viewer,
             created_at: chrono::Utc::now(),
@@ -352,6 +366,7 @@ mod tests {
             id: "x".to_string(),
             name: "x".to_string(),
             key_hash: "h".to_string(),
+            salt: "s".to_string(),
             key_prefix: "cdt_x".to_string(),
             role: Role::Viewer,
             created_at: chrono::Utc::now(),

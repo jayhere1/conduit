@@ -45,11 +45,33 @@ impl Provider for SlackProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        Ok(ConnectionTestResult {
-            success: true,
-            message: format!("Slack configured: workspace={}", self.workspace),
-            latency_ms: 0, server_version: None,
-        })
+        use tokio::net::TcpStream;
+        use tokio::time::{timeout, Duration};
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let addr = "hooks.slack.com:443";
+
+        match timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+            Ok(Ok(_)) => Ok(ConnectionTestResult {
+                success: true,
+                message: format!("TCP connection to {} successful (workspace={})", addr, self.workspace),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+            Ok(Err(e)) => Ok(ConnectionTestResult {
+                success: false,
+                message: format!("Connection failed: {}", e),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+            Err(_) => Ok(ConnectionTestResult {
+                success: false,
+                message: format!("Connection timed out after 5s to {}", addr),
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: None,
+            }),
+        }
     }
 
     async fn close(&self) -> Result<(), ProviderError> { Ok(()) }

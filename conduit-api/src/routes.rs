@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use axum::routing::{get, post, delete};
 use axum::Router;
+use axum::http::{header, Method};
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
@@ -109,16 +111,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let limiter = rate_limit::create_rate_limiter();
     let api_routes = api_routes
         .layer(axum::middleware::from_fn(rate_limit::rate_limit_middleware))
-        .layer(axum::Extension(limiter.clone()));
+        .layer(axum::Extension(limiter.clone()))
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)); // 10 MB
 
     let ws_routes = Router::new()
         .route("/events", get(websocket::ws_handler))
         .layer(axum::middleware::from_fn(rate_limit::rate_limit_middleware))
-        .layer(axum::Extension(limiter));
+        .layer(axum::Extension(limiter.clone()));
 
-    // Prometheus scrape endpoint at top-level /metrics (no rate limit)
+    // Prometheus scrape endpoint with rate limiting
     let metrics_route = Router::new()
-        .route("/metrics", get(handlers::prometheus::prometheus_metrics));
+        .route("/metrics", get(handlers::prometheus::prometheus_metrics))
+        .layer(axum::middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(axum::Extension(limiter));
 
     let mut router = Router::new()
         .merge(metrics_route)
@@ -142,8 +147,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         tracing::info!("Authentication disabled — all endpoints are publicly accessible");
     }
 
+    // CORS: allow any origin but restrict methods and headers.
+    // TODO: restrict origins in production via configuration.
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+
     router
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

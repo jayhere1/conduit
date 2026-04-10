@@ -151,7 +151,7 @@ async fn test_snowflake_test_connection() {
         .expect("Failed to create Snowflake provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "Snowflake test_connection should return NotImplemented");
+    assert!(result.is_ok(), "Snowflake test_connection should succeed (returns Ok with success=false for unreachable hosts)");
 }
 
 #[tokio::test]
@@ -214,7 +214,7 @@ async fn test_clickhouse_test_connection() {
         .expect("Failed to create ClickHouse provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "ClickHouse test_connection should return NotImplemented");
+    assert!(result.is_ok(), "ClickHouse test_connection should succeed (returns Ok with success=false for unreachable hosts)");
 }
 
 #[tokio::test]
@@ -347,7 +347,7 @@ async fn test_bigquery_test_connection() {
         .expect("Failed to create BigQuery provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "BigQuery test_connection should return NotImplemented");
+    assert!(result.is_ok(), "BigQuery test_connection should succeed (returns Ok with success=false for unreachable hosts)");
 }
 
 #[tokio::test]
@@ -410,7 +410,7 @@ async fn test_duckdb_test_connection() {
         .expect("Failed to create DuckDB provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "DuckDB test_connection should return NotImplemented");
+    assert!(result.is_ok(), "DuckDB test_connection should succeed (returns Ok with success=false for missing files)");
 }
 
 #[tokio::test]
@@ -633,7 +633,7 @@ async fn test_oracle_test_connection() {
         .expect("Failed to create Oracle provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "Oracle test_connection should return NotImplemented");
+    assert!(result.is_ok(), "Oracle test_connection should succeed (returns Ok with success=false for unreachable hosts)");
 }
 
 #[tokio::test]
@@ -696,7 +696,7 @@ async fn test_sqlserver_test_connection() {
         .expect("Failed to create SQL Server provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_err(), "SQL Server test_connection should return NotImplemented");
+    assert!(result.is_ok(), "SQL Server test_connection should succeed (returns Ok with success=false for unreachable hosts)");
 }
 
 #[tokio::test]
