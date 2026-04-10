@@ -369,6 +369,54 @@ enum Commands {
         #[command(subcommand)]
         action: ClusterCommands,
     },
+
+    /// Run SQL queries locally (powered by DuckDB)
+    Query {
+        /// SQL query to execute
+        sql: String,
+
+        /// Named connection from conduit.yaml (default: ephemeral in-memory DuckDB)
+        #[arg(short, long)]
+        connection: Option<String>,
+
+        /// Query a local file (Parquet, CSV, JSON) — registers it as a table
+        #[arg(short, long)]
+        file: Option<Vec<PathBuf>>,
+
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+
+        /// Maximum rows to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
+
+        /// Path to conduit.yaml (for connection resolution)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+
+    /// Preview a SQL task's output locally
+    Preview {
+        /// Task reference: dag_id.task_id
+        task_ref: String,
+
+        /// Path to DAG definitions
+        #[arg(short, long, default_value = "./dags")]
+        dags_path: PathBuf,
+
+        /// Override connection (default: ephemeral DuckDB)
+        #[arg(short, long)]
+        connection: Option<String>,
+
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+
+        /// Maximum rows to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -554,6 +602,36 @@ fn main() -> Result<()> {
                 coordinator,
             } => cmd_cluster_drain(&coordinator, &worker_id),
         },
+
+        Commands::Query {
+            sql,
+            connection,
+            file,
+            format,
+            limit,
+            config,
+        } => rt.block_on(cmd_query(
+            &sql,
+            connection.as_deref(),
+            file,
+            &format,
+            limit,
+            config,
+        )),
+
+        Commands::Preview {
+            task_ref,
+            dags_path,
+            connection,
+            format,
+            limit,
+        } => rt.block_on(cmd_preview(
+            &task_ref,
+            &dags_path,
+            connection.as_deref(),
+            &format,
+            limit,
+        )),
     }
 }
 
@@ -2451,6 +2529,314 @@ fn cmd_cluster_drain(coordinator_addr: &str, worker_id: &str) -> Result<()> {
     );
 
     Ok(())
+}
+
+// ─── conduit query ───────────────────────────────────────────────────────────
+
+async fn cmd_query(
+    sql: &str,
+    connection: Option<&str>,
+    files: Option<Vec<PathBuf>>,
+    format: &str,
+    limit: usize,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    use conduit_providers::providers::duckdb::DuckDbProvider;
+    use conduit_providers::traits::SqlProvider;
+
+    let provider: DuckDbProvider = if let Some(conn_name) = connection {
+        // Load config and resolve the named connection
+        let config_file = config_path.unwrap_or_else(|| PathBuf::from("conduit.yaml"));
+        let config = conduit_common::config::ConduitConfig::load(&config_file)?;
+        let conn_config = config.connections.get(conn_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Connection '{}' not found in {}",
+                conn_name,
+                config_file.display()
+            )
+        })?;
+        if conn_config.conn_type != "duckdb" && conn_config.conn_type != "duck" {
+            anyhow::bail!(
+                "conduit query currently only supports DuckDB connections. \
+                 '{}' is type '{}'.",
+                conn_name,
+                conn_config.conn_type
+            );
+        }
+        DuckDbProvider::from_config(conn_name, conn_config)?
+    } else {
+        DuckDbProvider::ephemeral()
+    };
+
+    // Register local files as views
+    if let Some(ref file_list) = files {
+        for path in file_list {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("data");
+            let abs_path = std::fs::canonicalize(path)
+                .unwrap_or_else(|_| path.clone())
+                .display()
+                .to_string();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+            let reader_fn = match ext {
+                "parquet" | "pq" => "read_parquet",
+                "csv" | "tsv" => "read_csv",
+                "json" | "jsonl" | "ndjson" => "read_json",
+                _ => {
+                    anyhow::bail!(
+                        "Unsupported file format '.{ext}'. Supported: parquet, csv, json"
+                    )
+                }
+            };
+
+            let create_sql = format!(
+                "CREATE OR REPLACE VIEW \"{stem}\" AS SELECT * FROM {reader_fn}('{abs_path}')"
+            );
+            provider.execute_raw(&create_sql).await?;
+            eprintln!(
+                "  Registered file '{}' as table '{}'",
+                path.display(),
+                stem
+            );
+        }
+    }
+
+    // Apply limit to SELECT queries
+    let final_sql = {
+        let trimmed = sql.trim().to_uppercase();
+        if (trimmed.starts_with("SELECT") || trimmed.starts_with("WITH"))
+            && !trimmed.contains("LIMIT")
+        {
+            format!("{} LIMIT {}", sql.trim().trim_end_matches(';'), limit)
+        } else {
+            sql.to_string()
+        }
+    };
+
+    let result = provider
+        .execute(&final_sql, &std::collections::HashMap::new())
+        .await?;
+
+    render_result(&result, format, limit);
+
+    Ok(())
+}
+
+// ─── conduit preview ─────────────────────────────────────────────────────────
+
+async fn cmd_preview(
+    task_ref: &str,
+    dags_path: &Path,
+    connection: Option<&str>,
+    format: &str,
+    limit: usize,
+) -> Result<()> {
+    use conduit_common::dag::TaskType;
+    use conduit_providers::providers::duckdb::DuckDbProvider;
+    use conduit_providers::traits::SqlProvider;
+
+    // Parse task_ref as "dag_id.task_id"
+    let (dag_id, task_id) = task_ref.split_once('.').ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid task reference '{}'. Expected format: dag_id.task_id",
+            task_ref
+        )
+    })?;
+
+    // Compile DAGs
+    let start = Instant::now();
+    let (plan, stats) = ConduitPlan::compile(dags_path)?;
+    eprintln!(
+        "  Compiled {} DAGs ({} tasks) in {:.1}ms",
+        stats.dags_compiled,
+        stats.tasks_total,
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+
+    // Look up the DAG and task
+    let dag = plan.dags.get(dag_id).ok_or_else(|| {
+        anyhow::anyhow!("DAG '{}' not found. Available: {:?}", dag_id, plan.dags.keys().collect::<Vec<_>>())
+    })?;
+
+    let task = dag.tasks.get(task_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Task '{}' not found in DAG '{}'. Available: {:?}",
+            task_id,
+            dag_id,
+            dag.tasks.keys().collect::<Vec<_>>()
+        )
+    })?;
+
+    match &task.task_type {
+        TaskType::Sql {
+            connection: task_conn,
+            query,
+        } => {
+            eprintln!("  Task: {}.{}", dag_id, task_id);
+            eprintln!("  Type: SQL (connection: {})", connection.unwrap_or(task_conn));
+            eprintln!("  Query: {}", truncate_str(query, 120));
+            eprintln!();
+
+            let provider: Box<dyn SqlProvider> = if let Some(conn_name) = connection {
+                let config_path = dags_path.parent().unwrap_or(Path::new(".")).join("conduit.yaml");
+                if config_path.exists() {
+                    let config = conduit_common::config::ConduitConfig::load(&config_path)?;
+                    if let Some(conn_config) = config.connections.get(conn_name) {
+                        if conn_config.conn_type == "duckdb" || conn_config.conn_type == "duck" {
+                            Box::new(DuckDbProvider::from_config(conn_name, conn_config)?)
+                        } else {
+                            anyhow::bail!(
+                                "Preview currently only supports DuckDB connections. \
+                                 '{}' is type '{}'.",
+                                conn_name,
+                                conn_config.conn_type
+                            );
+                        }
+                    } else {
+                        anyhow::bail!("Connection '{}' not found in config", conn_name);
+                    }
+                } else {
+                    Box::new(DuckDbProvider::ephemeral())
+                }
+            } else {
+                Box::new(DuckDbProvider::ephemeral())
+            };
+
+            let final_sql = {
+                let trimmed = query.trim().to_uppercase();
+                if (trimmed.starts_with("SELECT") || trimmed.starts_with("WITH"))
+                    && !trimmed.contains("LIMIT")
+                {
+                    format!("{} LIMIT {}", query.trim().trim_end_matches(';'), limit)
+                } else {
+                    query.clone()
+                }
+            };
+
+            match provider
+                .execute(&final_sql, &std::collections::HashMap::new())
+                .await
+            {
+                Ok(result) => render_result(&result, format, limit),
+                Err(e) => {
+                    eprintln!("  Query execution failed (this is expected for queries referencing");
+                    eprintln!("  external tables — use --connection to point to a real database):");
+                    eprintln!("  Error: {}", e);
+                }
+            }
+        }
+        other => {
+            eprintln!("  Task: {}.{}", dag_id, task_id);
+            eprintln!("  Type: {:?}", task_type_name(other));
+            eprintln!("  Dependencies: {:?}", task.dependencies.iter().map(|d| &d.task_id).collect::<Vec<_>>());
+            eprintln!();
+            eprintln!("  Preview is only available for SQL tasks.");
+        }
+    }
+
+    Ok(())
+}
+
+// ─── shared output helpers ───────────────────────────────────────────────────
+
+fn render_result(result: &conduit_providers::traits::SqlResult, format: &str, _limit: usize) {
+    match format {
+        "json" => {
+            let output = serde_json::json!({
+                "columns": result.columns,
+                "rows": result.sample_rows,
+                "rows_returned": result.rows_returned,
+                "execution_time_ms": result.execution_time_ms,
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        }
+        "csv" => {
+            if !result.columns.is_empty() {
+                println!("{}", result.columns.join(","));
+            }
+            for row in &result.sample_rows {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => {
+                            if s.contains(',') || s.contains('"') || s.contains('\n') {
+                                format!("\"{}\"", s.replace('"', "\"\""))
+                            } else {
+                                s.clone()
+                            }
+                        }
+                        serde_json::Value::Null => String::new(),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                println!("{}", cells.join(","));
+            }
+        }
+        _ => {
+            // table format (default)
+            use comfy_table::{ContentArrangement, Table};
+
+            if result.columns.is_empty() {
+                if let Some(rows) = result.rows_returned {
+                    eprintln!("  ({} rows, no columns)", rows);
+                } else {
+                    eprintln!("  ({} rows affected)", result.rows_affected);
+                }
+                return;
+            }
+
+            let mut table = Table::new();
+            table.set_content_arrangement(ContentArrangement::Dynamic);
+            table.set_header(&result.columns);
+
+            for row in &result.sample_rows {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Null => "NULL".to_string(),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                table.add_row(cells);
+            }
+
+            println!("{table}");
+
+            if let Some(total) = result.rows_returned {
+                let shown = result.sample_rows.len() as u64;
+                if shown < total {
+                    eprintln!("  ({} of {} rows shown)", shown, total);
+                } else {
+                    eprintln!("  ({} rows)", total);
+                }
+            }
+            eprintln!("  Execution time: {}ms", result.execution_time_ms);
+        }
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.len() > max {
+        format!("{}...", &s[..max])
+    } else {
+        s
+    }
+}
+
+fn task_type_name(tt: &conduit_common::dag::TaskType) -> &'static str {
+    use conduit_common::dag::TaskType;
+    match tt {
+        TaskType::Python { .. } => "Python",
+        TaskType::Bash { .. } => "Bash",
+        TaskType::Sql { .. } => "SQL",
+        TaskType::Sensor { .. } => "Sensor",
+        TaskType::Executable { .. } => "Executable",
+    }
 }
 
 // ─── hostname helper ────────────────────────────────────────────────────────

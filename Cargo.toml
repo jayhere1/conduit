@@ -84,6 +84,12 @@ percent-encoding = "2"
 # SQL parsing (for lineage)
 sqlparser = { version = "0.52", features = ["serde"] }
 
+# Embedded analytics (DuckDB)
+duckdb = { version = "1", features = ["bundled"] }
+
+# Table rendering
+comfy-table = "7"
+
 # Testing
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"

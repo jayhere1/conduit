@@ -8,6 +8,7 @@
 pub mod bigquery;
 pub mod clickhouse;
 pub mod cockroachdb;
+#[cfg(feature = "duckdb")]
 pub mod duckdb;
 pub mod mysql;
 pub mod oracle;

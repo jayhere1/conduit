@@ -295,6 +295,7 @@ impl ProviderRegistry {
                 let p = providers::bigquery::BigQueryProvider::from_config(name, config)?;
                 Ok(ProviderInstance::Sql(Arc::new(p)))
             }
+            #[cfg(feature = "duckdb")]
             "duckdb" | "duck" => {
                 let p = providers::duckdb::DuckDbProvider::from_config(name, config)?;
                 Ok(ProviderInstance::Sql(Arc::new(p)))
@@ -545,6 +546,7 @@ fn format_display_name(provider_type: &str) -> String {
         "clickhouse" | "ch" => "ClickHouse".to_string(),
         "redshift" => "Amazon Redshift".to_string(),
         "bigquery" | "bq" => "Google BigQuery".to_string(),
+        #[cfg(feature = "duckdb")]
         "duckdb" | "duck" => "DuckDB".to_string(),
         "mysql" | "mariadb" => "MySQL".to_string(),
         "sqlite" => "SQLite".to_string(),

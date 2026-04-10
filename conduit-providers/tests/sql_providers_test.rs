@@ -463,52 +463,100 @@ async fn test_duckdb_provider_info() {
 
 #[tokio::test]
 async fn test_duckdb_test_connection() {
-    let config = make_config("duckdb");
-    let provider = duckdb::DuckDbProvider::from_config("test_duckdb", &config)
-        .expect("Failed to create DuckDB provider");
+    let provider = duckdb::DuckDbProvider::ephemeral();
 
     let result = provider.test_connection().await;
-    assert!(
-        result.is_err(),
-        "DuckDB test_connection should return NotImplemented"
-    );
+    assert!(result.is_ok(), "DuckDB test_connection should succeed");
+    let info = result.unwrap();
+    assert!(info.success);
+    assert!(info.server_version.is_some());
 }
 
 #[tokio::test]
 async fn test_duckdb_execute_select() {
-    let config = make_config("duckdb");
-    let provider = duckdb::DuckDbProvider::from_config("test_duckdb", &config)
-        .expect("Failed to create DuckDB provider");
-
-    let params = HashMap::new();
-    let result = provider.execute("SELECT 1", &params).await;
-    assert!(
-        result.is_err(),
-        "DuckDB execute should return NotImplemented"
-    );
-}
-
-#[tokio::test]
-async fn test_duckdb_execute_insert() {
-    let config = make_config("duckdb");
-    let provider = duckdb::DuckDbProvider::from_config("test_duckdb", &config)
-        .expect("Failed to create DuckDB provider");
+    let provider = duckdb::DuckDbProvider::ephemeral();
 
     let params = HashMap::new();
     let result = provider
-        .execute("INSERT INTO test_table VALUES (1)", &params)
+        .execute("SELECT 1 AS n, 'hello' AS greeting", &params)
         .await;
-    assert!(
-        result.is_err(),
-        "DuckDB execute should return NotImplemented"
-    );
+    assert!(result.is_ok(), "DuckDB execute should succeed");
+    let sql_result = result.unwrap();
+    assert_eq!(sql_result.rows_returned, Some(1));
+    assert_eq!(sql_result.columns, vec!["n", "greeting"]);
+    assert_eq!(sql_result.sample_rows.len(), 1);
+    assert_eq!(sql_result.sample_rows[0][0], serde_json::json!(1));
+    assert_eq!(sql_result.sample_rows[0][1], serde_json::json!("hello"));
+}
+
+#[tokio::test]
+async fn test_duckdb_execute_ddl_and_dml() {
+    let provider = duckdb::DuckDbProvider::ephemeral();
+    let params = HashMap::new();
+
+    // Create table
+    let result = provider
+        .execute("CREATE TABLE test_t (id INTEGER, name TEXT)", &params)
+        .await;
+    assert!(result.is_ok(), "CREATE TABLE should succeed");
+
+    // Insert data
+    let result = provider
+        .execute(
+            "INSERT INTO test_t VALUES (1, 'Alice'), (2, 'Bob')",
+            &params,
+        )
+        .await;
+    assert!(result.is_ok(), "INSERT should succeed");
+
+    // Query back
+    let result = provider
+        .execute("SELECT * FROM test_t ORDER BY id", &params)
+        .await;
+    assert!(result.is_ok());
+    let sql_result = result.unwrap();
+    assert_eq!(sql_result.rows_returned, Some(2));
+    assert_eq!(sql_result.columns, vec!["id", "name"]);
+    assert_eq!(sql_result.sample_rows[0][1], serde_json::json!("Alice"));
+    assert_eq!(sql_result.sample_rows[1][1], serde_json::json!("Bob"));
+}
+
+#[tokio::test]
+async fn test_duckdb_list_schemas() {
+    let provider = duckdb::DuckDbProvider::ephemeral();
+
+    let schemas = provider.list_schemas().await;
+    assert!(schemas.is_ok());
+    let schemas = schemas.unwrap();
+    assert!(schemas.contains(&"main".to_string()));
+    assert!(schemas.contains(&"information_schema".to_string()));
+}
+
+#[tokio::test]
+async fn test_duckdb_describe_table() {
+    let provider = duckdb::DuckDbProvider::ephemeral();
+    let params = HashMap::new();
+
+    provider
+        .execute(
+            "CREATE TABLE test_desc (id INTEGER NOT NULL, name TEXT, score DOUBLE)",
+            &params,
+        )
+        .await
+        .expect("CREATE should succeed");
+
+    let columns = provider.describe_table("main", "test_desc").await;
+    assert!(columns.is_ok());
+    let columns = columns.unwrap();
+    assert_eq!(columns.len(), 3);
+    assert_eq!(columns[0].name, "id");
+    assert_eq!(columns[1].name, "name");
+    assert_eq!(columns[2].name, "score");
 }
 
 #[tokio::test]
 async fn test_duckdb_close() {
-    let config = make_config("duckdb");
-    let provider = duckdb::DuckDbProvider::from_config("test_duckdb", &config)
-        .expect("Failed to create DuckDB provider");
+    let provider = duckdb::DuckDbProvider::ephemeral();
 
     let result = provider.close().await;
     assert!(result.is_ok());

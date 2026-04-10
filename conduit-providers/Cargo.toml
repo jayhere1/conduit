@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Provider plugin system: connection registry and data source adapters"
 
+[features]
+default = ["duckdb"]
+duckdb = ["dep:duckdb"]
+
 [dependencies]
 conduit-common = { path = "../conduit-common" }
 tokio = { workspace = true }
@@ -20,6 +24,7 @@ uuid = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
 percent-encoding = { workspace = true }
+duckdb = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

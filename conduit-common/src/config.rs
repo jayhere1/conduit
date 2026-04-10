@@ -186,8 +186,7 @@ impl ConduitConfig {
             return Err(ConduitError::FileNotFound(path.display().to_string()));
         }
         let content = std::fs::read_to_string(path)?;
-        // Use serde_json for now; swap to serde_yaml when added as dependency
-        serde_json::from_str(&content).map_err(|e| {
+        serde_yaml::from_str(&content).map_err(|e| {
             ConduitError::ConfigError(format!("Failed to parse {}: {}", path.display(), e))
         })
     }
