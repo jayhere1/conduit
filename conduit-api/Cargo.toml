@@ -37,6 +37,7 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 tower = { workspace = true }
 conduit-common = { path = "../conduit-common" }
+conduit-compiler = { path = "../conduit-compiler" }
 conduit-state = { path = "../conduit-state" }
 conduit-scheduler = { path = "../conduit-scheduler" }
 conduit-executor = { path = "../conduit-executor" }

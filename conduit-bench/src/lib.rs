@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use chrono::Utc;
 use conduit_common::dag::{
     Dag, Task, TaskType, TaskDependency, DependencyType, TriggerRule, ResourceLimits,
+    IncrementalConfig,
 };
+use conduit_common::contracts::TaskContracts;
 use conduit_common::error::ConduitResult;
 
 /// Generate a DAG with n tasks in a diamond pattern (fan-out then fan-in).
@@ -42,6 +44,8 @@ pub fn generate_dag(dag_id: &str, n_tasks: usize) -> Dag {
             timeout: None,
             priority: 0,
             resources: ResourceLimits::default(),
+            incremental: None,
+            contracts: None,
         },
     );
     execution_order.push(root_id.clone());
