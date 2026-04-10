@@ -20,6 +20,11 @@ uuid = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
 percent-encoding = { workspace = true }
+jsonwebtoken = "9"
+base64 = "0.22"
+duckdb = { version = "1", features = ["bundled"] }
+rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"] }
+rskafka = "0.6"
 
 [dev-dependencies]
 tempfile = { workspace = true }

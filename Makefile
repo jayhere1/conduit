@@ -28,8 +28,11 @@ test-python:                    ## Run Python SDK tests
 test-ui:                        ## Run React UI tests
 	cd conduit-ui && npm install --silent && npm test
 
-test-integration:               ## Run SQL provider tests (requires live databases)
-	cargo test --package conduit-providers --test sql_providers_test -- --ignored
+test-integration:               ## Run SQL provider tests (starts Docker databases automatically)
+	./scripts/test-integration.sh
+
+bench:                          ## Run Criterion benchmarks (scheduler, compiler, planner, state, lineage)
+	cd conduit-bench && cargo bench
 
 test-e2e:                       ## Run Docker Compose E2E tests
 	docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e-test

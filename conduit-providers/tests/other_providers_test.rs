@@ -84,6 +84,7 @@ async fn test_s3_provider_info() {
 }
 
 #[tokio::test]
+#[ignore] // Requires real S3 credentials
 async fn test_s3_write_object() {
     let config = make_config("s3");
     let provider = s3::S3Provider::from_config("test_s3", &config)
@@ -100,6 +101,7 @@ async fn test_s3_write_object() {
 }
 
 #[tokio::test]
+#[ignore] // Requires real S3 credentials
 async fn test_s3_copy_object() {
     let config = make_config("s3");
     let provider = s3::S3Provider::from_config("test_s3", &config)
@@ -157,6 +159,7 @@ async fn test_kafka_provider_info() {
 }
 
 #[tokio::test]
+#[ignore] // Requires live Kafka broker
 async fn test_kafka_produce() {
     let config = make_config("kafka");
     let provider = kafka::KafkaProvider::from_config("test_kafka", &config)
@@ -182,6 +185,7 @@ async fn test_kafka_produce() {
 }
 
 #[tokio::test]
+#[ignore] // Requires live Kafka broker
 async fn test_kafka_consume() {
     let config = make_config("kafka");
     let provider = kafka::KafkaProvider::from_config("test_kafka", &config)
@@ -192,6 +196,7 @@ async fn test_kafka_consume() {
 }
 
 #[tokio::test]
+#[ignore] // Requires live Kafka broker
 async fn test_kafka_list_topics() {
     let config = make_config("kafka");
     let provider = kafka::KafkaProvider::from_config("test_kafka", &config)

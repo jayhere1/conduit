@@ -1,6 +1,7 @@
 //! Amazon S3 provider.
 //!
-//! Connects to Amazon S3 and S3-compatible services (MinIO, DigitalOcean Spaces, etc.).
+//! Uses the `rust-s3` crate for real S3 operations. Supports S3-compatible
+//! services (MinIO, DigitalOcean Spaces, etc.) via endpoint_url override.
 //!
 //! # Configuration
 //! ```yaml
@@ -10,13 +11,10 @@
 //!     database: my-data-bucket           # bucket name (required)
 //!     region: us-east-1                  # AWS region (optional, defaults to us-east-1)
 //!     prefix: raw/                       # default key prefix (optional)
-//!     access_key_id: ${AWS_ACCESS_KEY_ID}     # (optional, uses default AWS creds if not provided)
-//!     credentials: ${AWS_SECRET_ACCESS_KEY}   # secret access key
-//!     endpoint_url: http://minio:9000    # S3-compatible override (MinIO, etc.)
+//!     access_key_id: ${AWS_ACCESS_KEY_ID}
+//!     credentials: ${AWS_SECRET_ACCESS_KEY}
+//!     endpoint_url: http://minio:9000    # S3-compatible override
 //! ```
-//!
-//! If `access_key_id` and `credentials` are not provided, the provider attempts to use
-//! AWS default credential chain (environment variables, ~/.aws/config, IAM roles, etc.)
 
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
@@ -26,7 +24,6 @@ use crate::errors::ProviderError;
 use crate::traits::*;
 use super::{extra_str, resolve_credential};
 
-#[allow(dead_code)]
 pub struct S3Provider {
     name: String,
     bucket: String,
@@ -51,7 +48,6 @@ impl S3Provider {
             });
         }
 
-        // Resolve credentials
         let access_key_id = extra_str(config, "access_key_id")
             .map(|key_ref| resolve_credential(&key_ref))
             .transpose()?;
@@ -73,15 +69,54 @@ impl S3Provider {
         })
     }
 
-    /// Get the full S3 URI for a key
-    fn build_uri(&self, key: &str) -> String {
-        format!("s3://{}/{}{}", self.bucket, self.prefix, key)
+    /// Build the S3 bucket handle.
+    fn build_bucket(&self) -> Result<s3::Bucket, ProviderError> {
+        let region = if let Some(ref endpoint) = self.endpoint_url {
+            s3::Region::Custom {
+                region: self.region.clone(),
+                endpoint: endpoint.clone(),
+            }
+        } else {
+            self.region
+                .parse()
+                .unwrap_or(s3::Region::UsEast1)
+        };
+
+        let credentials = if let (Some(ref key), Some(ref secret)) =
+            (&self.access_key_id, &self.secret_access_key)
+        {
+            s3::creds::Credentials::new(Some(key), Some(secret), None, None, None)
+                .map_err(|e| ProviderError::AuthenticationFailed {
+                    connection: self.name.clone(),
+                    reason: format!("Invalid S3 credentials: {}", e),
+                })?
+        } else {
+            // Try default credential chain
+            s3::creds::Credentials::default().map_err(|e| {
+                ProviderError::AuthenticationFailed {
+                    connection: self.name.clone(),
+                    reason: format!("No S3 credentials available: {}", e),
+                }
+            })?
+        };
+
+        let mut bucket = s3::Bucket::new(&self.bucket, region, credentials).map_err(|e| {
+            ProviderError::ConnectionFailed {
+                name: self.name.clone(),
+                reason: format!("Failed to create S3 bucket handle: {}", e),
+            }
+        })?;
+
+        // For path-style addressing (MinIO, local dev)
+        if self.endpoint_url.is_some() {
+            bucket.set_path_style();
+        }
+
+        Ok(*bucket)
     }
 
-    /// Check if credentials are available
-    #[allow(dead_code)]
-    fn has_credentials(&self) -> bool {
-        self.access_key_id.is_some() && self.secret_access_key.is_some()
+    fn full_key(&self, path: &str) -> String {
+        format!("{}{}", self.prefix, path)
     }
 }
 
@@ -102,41 +137,32 @@ impl Provider for S3Provider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        use tokio::net::TcpStream;
-        use tokio::time::{timeout, Duration};
-
         let start = Instant::now();
-        let addr = if let Some(ref endpoint) = self.endpoint_url {
-            // Custom endpoint (MinIO, etc.) -- extract host:port
-            let stripped = endpoint
-                .strip_prefix("https://")
-                .or_else(|| endpoint.strip_prefix("http://"))
-                .unwrap_or(endpoint);
-            if stripped.contains(':') {
-                stripped.to_string()
-            } else {
-                format!("{}:443", stripped)
-            }
-        } else {
-            format!("s3.{}.amazonaws.com:443", self.region)
-        };
 
-        match timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await {
-            Ok(Ok(_)) => Ok(ConnectionTestResult {
-                success: true,
-                message: format!("TCP connection to {} successful (bucket={})", addr, self.bucket),
-                latency_ms: start.elapsed().as_millis() as u64,
-                server_version: None,
-            }),
-            Ok(Err(e)) => Ok(ConnectionTestResult {
+        match self.build_bucket() {
+            Ok(bucket) => {
+                // Try to list with max 1 result to verify access
+                match bucket.list(self.prefix.clone(), Some("/".to_string())).await {
+                    Ok(_) => Ok(ConnectionTestResult {
+                        success: true,
+                        message: format!(
+                            "S3 bucket '{}' accessible (region={})",
+                            self.bucket, self.region
+                        ),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        server_version: None,
+                    }),
+                    Err(e) => Ok(ConnectionTestResult {
+                        success: false,
+                        message: format!("S3 access failed: {}", e),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        server_version: None,
+                    }),
+                }
+            }
+            Err(e) => Ok(ConnectionTestResult {
                 success: false,
-                message: format!("Connection failed: {}", e),
-                latency_ms: start.elapsed().as_millis() as u64,
-                server_version: None,
-            }),
-            Err(_) => Ok(ConnectionTestResult {
-                success: false,
-                message: format!("Connection timed out after 5s to {}", addr),
+                message: format!("S3 configuration error: {}", e),
                 latency_ms: start.elapsed().as_millis() as u64,
                 server_version: None,
             }),
@@ -151,123 +177,130 @@ impl Provider for S3Provider {
 #[async_trait]
 impl StorageProvider for S3Provider {
     async fn read_object(&self, path: &str) -> Result<Vec<u8>, ProviderError> {
-        let start = Instant::now();
+        let bucket = self.build_bucket()?;
+        let key = self.full_key(path);
 
-        // For now, simulate S3 GetObject behavior
-        // In production, this would use aws-sdk-s3 or similar
-        // The pattern is:
-        // 1. Resolve full key: bucket + prefix + path
-        // 2. Make HEAD request to check existence
-        // 3. Make GET request to retrieve object
-        // 4. Handle S3 error responses (NoSuchKey, AccessDenied, etc.)
+        let response = bucket.get_object(&key).await.map_err(|e| {
+            ProviderError::StorageFailed {
+                connection: self.name.clone(),
+                reason: format!("S3 GetObject failed for '{}': {}", key, e),
+            }
+        })?;
 
-        let key = format!("{}{}", self.prefix, path);
+        if response.status_code() != 200 {
+            return Err(ProviderError::StorageFailed {
+                connection: self.name.clone(),
+                reason: format!(
+                    "S3 GetObject returned status {} for '{}'",
+                    response.status_code(),
+                    key
+                ),
+            });
+        }
 
-        // Simulate S3 behavior - would normally perform actual HTTP request
-        tracing::debug!(
-            connection = %self.name,
-            bucket = %self.bucket,
-            key = %key,
-            elapsed_ms = start.elapsed().as_millis(),
-            "S3 read_object"
-        );
-
-        // Return appropriate error since we can't make real S3 calls without the SDK
-        Err(ProviderError::StorageFailed {
-            connection: self.name.clone(),
-            reason: format!(
-                "S3 read_object not fully implemented (would read s3://{}/{})",
-                self.bucket, key
-            ),
-        })
+        Ok(response.to_vec())
     }
 
     async fn write_object(&self, path: &str, data: &[u8]) -> Result<StorageResult, ProviderError> {
         let start = Instant::now();
-        let key = format!("{}{}", self.prefix, path);
-        let bytes_transferred = data.len() as u64;
+        let bucket = self.build_bucket()?;
+        let key = self.full_key(path);
+        let bytes = data.len() as u64;
 
-        // Simulate S3 PutObject behavior
-        tracing::debug!(
-            connection = %self.name,
-            bucket = %self.bucket,
-            key = %key,
-            size_bytes = bytes_transferred,
-            "S3 write_object"
-        );
+        let response = bucket
+            .put_object(&key, data)
+            .await
+            .map_err(|e| ProviderError::StorageFailed {
+                connection: self.name.clone(),
+                reason: format!("S3 PutObject failed for '{}': {}", key, e),
+            })?;
+
+        if response.status_code() != 200 {
+            return Err(ProviderError::StorageFailed {
+                connection: self.name.clone(),
+                reason: format!(
+                    "S3 PutObject returned status {} for '{}'",
+                    response.status_code(),
+                    key
+                ),
+            });
+        }
 
         Ok(StorageResult {
             operation: "PutObject".to_string(),
             objects_affected: 1,
-            bytes_transferred,
+            bytes_transferred: bytes,
             execution_time_ms: start.elapsed().as_millis() as u64,
-            uris: vec![self.build_uri(path)],
+            uris: vec![format!("s3://{}/{}", self.bucket, key)],
         })
     }
 
     async fn list_objects(&self, prefix: &str) -> Result<Vec<String>, ProviderError> {
-        let list_prefix = format!("{}{}", self.prefix, prefix);
+        let bucket = self.build_bucket()?;
+        let full_prefix = format!("{}{}", self.prefix, prefix);
 
-        // Simulate S3 ListObjectsV2 behavior
-        // In production, this would:
-        // 1. Use ListObjectsV2 API
-        // 2. Handle pagination with ContinuationToken
-        // 3. Filter and return object keys
+        let results = bucket
+            .list(full_prefix, None)
+            .await
+            .map_err(|e| ProviderError::StorageFailed {
+                connection: self.name.clone(),
+                reason: format!("S3 ListObjects failed: {}", e),
+            })?;
 
-        tracing::debug!(
-            connection = %self.name,
-            bucket = %self.bucket,
-            prefix = %list_prefix,
-            "S3 list_objects"
-        );
+        let keys: Vec<String> = results
+            .into_iter()
+            .flat_map(|page| {
+                page.contents
+                    .into_iter()
+                    .map(|obj| obj.key)
+            })
+            .collect();
 
-        // Return empty list as we can't make real S3 calls
-        Ok(vec![])
+        Ok(keys)
     }
 
     async fn delete_object(&self, path: &str) -> Result<(), ProviderError> {
-        let start = std::time::Instant::now();
-        let key = format!("{}{}", self.prefix, path);
+        let bucket = self.build_bucket()?;
+        let key = self.full_key(path);
 
-        // Simulate S3 DeleteObject behavior
-        tracing::debug!(
-            connection = %self.name,
-            bucket = %self.bucket,
-            key = %key,
-            elapsed_ms = start.elapsed().as_millis(),
-            "S3 delete_object"
-        );
+        let response = bucket
+            .delete_object(&key)
+            .await
+            .map_err(|e| ProviderError::StorageFailed {
+                connection: self.name.clone(),
+                reason: format!("S3 DeleteObject failed for '{}': {}", key, e),
+            })?;
+
+        if response.status_code() != 204 && response.status_code() != 200 {
+            return Err(ProviderError::StorageFailed {
+                connection: self.name.clone(),
+                reason: format!(
+                    "S3 DeleteObject returned status {} for '{}'",
+                    response.status_code(),
+                    key
+                ),
+            });
+        }
 
         Ok(())
     }
 
     async fn copy_object(&self, source: &str, dest: &str) -> Result<StorageResult, ProviderError> {
         let start = Instant::now();
-        let source_key = format!("{}{}", self.prefix, source);
-        let dest_key = format!("{}{}", self.prefix, dest);
 
-        // Simulate S3 CopyObject behavior
-        // In production, this would:
-        // 1. Check source object exists
-        // 2. Use CopyObject API (server-side copy)
-        // 3. Return source and dest metadata
-
-        tracing::debug!(
-            connection = %self.name,
-            bucket = %self.bucket,
-            source = %source_key,
-            dest = %dest_key,
-            "S3 copy_object"
-        );
+        // S3 copy: read source, write to dest
+        let data = self.read_object(source).await?;
+        let bytes = data.len() as u64;
+        self.write_object(dest, &data).await?;
 
         Ok(StorageResult {
             operation: "CopyObject".to_string(),
             objects_affected: 1,
-            bytes_transferred: 0,
+            bytes_transferred: bytes,
             execution_time_ms: start.elapsed().as_millis() as u64,
             uris: vec![
-                self.build_uri(source),
-                self.build_uri(dest),
+                format!("s3://{}/{}", self.bucket, self.full_key(source)),
+                format!("s3://{}/{}", self.bucket, self.full_key(dest)),
             ],
         })
     }

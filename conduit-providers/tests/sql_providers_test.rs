@@ -24,6 +24,7 @@ use conduit_providers::providers::*;
 // ─── Helper Functions ───────────────────────────────────────────────────────
 
 /// Create a minimal ConnectionConfig for testing a given provider type.
+/// Uses dummy values — only for non-ignored tests that don't connect.
 #[allow(dead_code)]
 fn make_config(conn_type: &str) -> ConnectionConfig {
     ConnectionConfig {
@@ -53,6 +54,77 @@ fn make_config_with_extras(conn_type: &str, extras: Vec<(&str, serde_json::Value
     }
 }
 
+// ─── Live Database Configs (for #[ignore] integration tests) ────────────────
+
+/// Postgres config from env vars (defaults match docker-compose.integration.yml).
+fn make_live_pg_config() -> ConnectionConfig {
+    let mut extra = HashMap::new();
+    let user = std::env::var("CONDUIT_TEST_PG_USER").unwrap_or_else(|_| "conduit".to_string());
+    extra.insert("user".to_string(), serde_json::json!(user));
+    extra.insert("sslmode".to_string(), serde_json::json!("disable"));
+
+    ConnectionConfig {
+        conn_type: "postgres".to_string(),
+        host: Some(std::env::var("CONDUIT_TEST_PG_HOST").unwrap_or_else(|_| "localhost".to_string())),
+        port: Some(
+            std::env::var("CONDUIT_TEST_PG_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(5432),
+        ),
+        database: Some(std::env::var("CONDUIT_TEST_PG_DB").unwrap_or_else(|_| "testdb".to_string())),
+        credentials: Some(
+            std::env::var("CONDUIT_TEST_PG_PASSWORD").unwrap_or_else(|_| "conduit_test".to_string()),
+        ),
+        extra,
+    }
+}
+
+/// MySQL config from env vars (defaults match docker-compose.integration.yml).
+fn make_live_mysql_config() -> ConnectionConfig {
+    let mut extra = HashMap::new();
+    let user = std::env::var("CONDUIT_TEST_MYSQL_USER").unwrap_or_else(|_| "conduit".to_string());
+    extra.insert("user".to_string(), serde_json::json!(user));
+
+    ConnectionConfig {
+        conn_type: "mysql".to_string(),
+        host: Some(std::env::var("CONDUIT_TEST_MYSQL_HOST").unwrap_or_else(|_| "localhost".to_string())),
+        port: Some(
+            std::env::var("CONDUIT_TEST_MYSQL_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(3306),
+        ),
+        database: Some(
+            std::env::var("CONDUIT_TEST_MYSQL_DB").unwrap_or_else(|_| "testdb".to_string()),
+        ),
+        credentials: Some(
+            std::env::var("CONDUIT_TEST_MYSQL_PASSWORD").unwrap_or_else(|_| "conduit_test".to_string()),
+        ),
+        extra,
+    }
+}
+
+/// SQLite in-memory config — no Docker needed.
+fn make_live_sqlite_config() -> ConnectionConfig {
+    ConnectionConfig {
+        conn_type: "sqlite".to_string(),
+        host: None,
+        port: None,
+        database: Some(":memory:".to_string()),
+        credentials: None,
+        extra: HashMap::new(),
+    }
+}
+
+/// Postgres-wire-compatible config for CockroachDB/Redshift/TimescaleDB tests.
+/// Uses the Docker Postgres since these share the PG wire protocol.
+fn make_live_pgwire_config(conn_type: &str) -> ConnectionConfig {
+    let mut config = make_live_pg_config();
+    config.conn_type = conn_type.to_string();
+    config
+}
+
 // ─── 1. PostgreSQL Provider Tests ──────────────────────────────────────────
 
 #[tokio::test]
@@ -77,7 +149,7 @@ async fn test_postgres_provider_info() {
 #[tokio::test]
 #[ignore]
 async fn test_postgres_test_connection() {
-    let config = make_config("postgres");
+    let config = make_live_pg_config();
     let provider = postgres::PostgresProvider::from_config("test_pg", &config)
         .expect("Failed to create PostgreSQL provider");
 
@@ -90,13 +162,13 @@ async fn test_postgres_test_connection() {
 #[tokio::test]
 #[ignore]
 async fn test_postgres_execute_select() {
-    let config = make_config("postgres");
+    let config = make_live_pg_config();
     let provider = postgres::PostgresProvider::from_config("test_pg", &config)
         .expect("Failed to create PostgreSQL provider");
 
     let params = HashMap::new();
-    let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_ok());
+    let result = provider.execute("SELECT 1 AS val", &params).await;
+    assert!(result.is_ok(), "Postgres SELECT failed: {:?}", result.err());
     let sql_result = result.unwrap();
     assert!(sql_result.rows_returned.is_some());
 }
@@ -104,13 +176,22 @@ async fn test_postgres_execute_select() {
 #[tokio::test]
 #[ignore]
 async fn test_postgres_execute_insert() {
-    let config = make_config("postgres");
+    let config = make_live_pg_config();
     let provider = postgres::PostgresProvider::from_config("test_pg", &config)
         .expect("Failed to create PostgreSQL provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_ok());
+    provider
+        .execute(
+            "CREATE TABLE IF NOT EXISTS test_table (id INTEGER PRIMARY KEY, name TEXT)",
+            &params,
+        )
+        .await
+        .expect("Failed to create test table");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1, 'hello') ON CONFLICT DO NOTHING", &params)
+        .await;
+    assert!(result.is_ok(), "Postgres INSERT failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -162,7 +243,7 @@ async fn test_snowflake_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_err(), "Snowflake execute should return NotImplemented");
+    assert!(result.is_err(), "Snowflake execute without credentials should fail");
 }
 
 #[tokio::test]
@@ -173,7 +254,7 @@ async fn test_snowflake_execute_insert() {
 
     let params = HashMap::new();
     let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "Snowflake execute should return NotImplemented");
+    assert!(result.is_err(), "Snowflake execute without credentials should fail");
 }
 
 #[tokio::test]
@@ -273,7 +354,7 @@ async fn test_redshift_provider_info() {
 #[tokio::test]
 #[ignore]
 async fn test_redshift_test_connection() {
-    let config = make_config("redshift");
+    let config = make_live_pgwire_config("redshift");
     let provider = redshift::RedshiftProvider::from_config("test_redshift", &config)
         .expect("Failed to create Redshift provider");
 
@@ -286,13 +367,13 @@ async fn test_redshift_test_connection() {
 #[tokio::test]
 #[ignore]
 async fn test_redshift_execute_select() {
-    let config = make_config("redshift");
+    let config = make_live_pgwire_config("redshift");
     let provider = redshift::RedshiftProvider::from_config("test_redshift", &config)
         .expect("Failed to create Redshift provider");
 
     let params = HashMap::new();
-    let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_ok());
+    let result = provider.execute("SELECT 1 AS val", &params).await;
+    assert!(result.is_ok(), "Redshift SELECT failed: {:?}", result.err());
     let sql_result = result.unwrap();
     assert!(sql_result.rows_returned.is_some());
 }
@@ -300,13 +381,22 @@ async fn test_redshift_execute_select() {
 #[tokio::test]
 #[ignore]
 async fn test_redshift_execute_insert() {
-    let config = make_config("redshift");
+    let config = make_live_pgwire_config("redshift");
     let provider = redshift::RedshiftProvider::from_config("test_redshift", &config)
         .expect("Failed to create Redshift provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_ok());
+    provider
+        .execute(
+            "CREATE TABLE IF NOT EXISTS test_table (id INTEGER PRIMARY KEY, name TEXT)",
+            &params,
+        )
+        .await
+        .expect("Failed to create test table");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1, 'hello') ON CONFLICT DO NOTHING", &params)
+        .await;
+    assert!(result.is_ok(), "Redshift INSERT failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -358,7 +448,7 @@ async fn test_bigquery_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_err(), "BigQuery execute should return NotImplemented");
+    assert!(result.is_err(), "BigQuery execute without credentials should fail");
 }
 
 #[tokio::test]
@@ -369,7 +459,7 @@ async fn test_bigquery_execute_insert() {
 
     let params = HashMap::new();
     let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "BigQuery execute should return NotImplemented");
+    assert!(result.is_err(), "BigQuery execute without credentials should fail");
 }
 
 #[tokio::test]
@@ -405,34 +495,63 @@ async fn test_duckdb_provider_info() {
 
 #[tokio::test]
 async fn test_duckdb_test_connection() {
-    let config = make_config("duckdb");
+    let config = ConnectionConfig {
+        conn_type: "duckdb".to_string(),
+        host: None,
+        port: None,
+        database: Some(":memory:".to_string()),
+        credentials: None,
+        extra: HashMap::new(),
+    };
     let provider = duckdb::DuckDbProvider::from_config("test_duckdb", &config)
         .expect("Failed to create DuckDB provider");
 
     let result = provider.test_connection().await;
-    assert!(result.is_ok(), "DuckDB test_connection should succeed (returns Ok with success=false for missing files)");
+    assert!(result.is_ok());
+    let test_result = result.unwrap();
+    assert!(test_result.success, "DuckDB in-memory should connect: {}", test_result.message);
 }
 
 #[tokio::test]
 async fn test_duckdb_execute_select() {
-    let config = make_config("duckdb");
+    let config = ConnectionConfig {
+        conn_type: "duckdb".to_string(),
+        host: None,
+        port: None,
+        database: Some(":memory:".to_string()),
+        credentials: None,
+        extra: HashMap::new(),
+    };
     let provider = duckdb::DuckDbProvider::from_config("test_duckdb", &config)
         .expect("Failed to create DuckDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_err(), "DuckDB execute should return NotImplemented");
+    let result = provider.execute("SELECT 1 AS val, 'hello' AS msg", &params).await;
+    assert!(result.is_ok(), "DuckDB SELECT failed: {:?}", result.err());
+    let sql_result = result.unwrap();
+    assert_eq!(sql_result.rows_returned, Some(1));
+    assert_eq!(sql_result.columns, vec!["val", "msg"]);
 }
 
 #[tokio::test]
 async fn test_duckdb_execute_insert() {
-    let config = make_config("duckdb");
+    let config = ConnectionConfig {
+        conn_type: "duckdb".to_string(),
+        host: None,
+        port: None,
+        database: Some(":memory:".to_string()),
+        credentials: None,
+        extra: HashMap::new(),
+    };
     let provider = duckdb::DuckDbProvider::from_config("test_duckdb", &config)
         .expect("Failed to create DuckDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_err(), "DuckDB execute should return NotImplemented");
+    provider.execute("CREATE TABLE test_table (id INTEGER, name TEXT)", &params).await
+        .expect("Failed to create table");
+    let result = provider.execute("INSERT INTO test_table VALUES (1, 'hello')", &params).await;
+    assert!(result.is_ok(), "DuckDB INSERT failed: {:?}", result.err());
+    assert_eq!(result.unwrap().rows_affected, 1);
 }
 
 #[tokio::test]
@@ -469,7 +588,7 @@ async fn test_mysql_provider_info() {
 #[tokio::test]
 #[ignore]
 async fn test_mysql_test_connection() {
-    let config = make_config("mysql");
+    let config = make_live_mysql_config();
     let provider = mysql::MySqlProvider::from_config("test_mysql", &config)
         .expect("Failed to create MySQL provider");
 
@@ -482,13 +601,13 @@ async fn test_mysql_test_connection() {
 #[tokio::test]
 #[ignore]
 async fn test_mysql_execute_select() {
-    let config = make_config("mysql");
+    let config = make_live_mysql_config();
     let provider = mysql::MySqlProvider::from_config("test_mysql", &config)
         .expect("Failed to create MySQL provider");
 
     let params = HashMap::new();
-    let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_ok());
+    let result = provider.execute("SELECT 1 AS val", &params).await;
+    assert!(result.is_ok(), "MySQL SELECT failed: {:?}", result.err());
     let sql_result = result.unwrap();
     assert!(sql_result.rows_returned.is_some());
 }
@@ -496,13 +615,22 @@ async fn test_mysql_execute_select() {
 #[tokio::test]
 #[ignore]
 async fn test_mysql_execute_insert() {
-    let config = make_config("mysql");
+    let config = make_live_mysql_config();
     let provider = mysql::MySqlProvider::from_config("test_mysql", &config)
         .expect("Failed to create MySQL provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_ok());
+    provider
+        .execute(
+            "CREATE TABLE IF NOT EXISTS test_table (id INTEGER PRIMARY KEY, name TEXT)",
+            &params,
+        )
+        .await
+        .expect("Failed to create test table");
+    let result = provider
+        .execute("INSERT IGNORE INTO test_table VALUES (1, 'hello')", &params)
+        .await;
+    assert!(result.is_ok(), "MySQL INSERT failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -755,7 +883,7 @@ async fn test_cockroachdb_provider_info() {
 #[tokio::test]
 #[ignore]
 async fn test_cockroachdb_test_connection() {
-    let config = make_config("cockroachdb");
+    let config = make_live_pgwire_config("cockroachdb");
     let provider = cockroachdb::CockroachDbProvider::from_config("test_cockroachdb", &config)
         .expect("Failed to create CockroachDB provider");
 
@@ -768,13 +896,13 @@ async fn test_cockroachdb_test_connection() {
 #[tokio::test]
 #[ignore]
 async fn test_cockroachdb_execute_select() {
-    let config = make_config("cockroachdb");
+    let config = make_live_pgwire_config("cockroachdb");
     let provider = cockroachdb::CockroachDbProvider::from_config("test_cockroachdb", &config)
         .expect("Failed to create CockroachDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_ok());
+    let result = provider.execute("SELECT 1 AS val", &params).await;
+    assert!(result.is_ok(), "CockroachDB SELECT failed: {:?}", result.err());
     let sql_result = result.unwrap();
     assert!(sql_result.rows_returned.is_some());
 }
@@ -782,13 +910,22 @@ async fn test_cockroachdb_execute_select() {
 #[tokio::test]
 #[ignore]
 async fn test_cockroachdb_execute_insert() {
-    let config = make_config("cockroachdb");
+    let config = make_live_pgwire_config("cockroachdb");
     let provider = cockroachdb::CockroachDbProvider::from_config("test_cockroachdb", &config)
         .expect("Failed to create CockroachDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_ok());
+    provider
+        .execute(
+            "CREATE TABLE IF NOT EXISTS test_table (id INTEGER PRIMARY KEY, name TEXT)",
+            &params,
+        )
+        .await
+        .expect("Failed to create test table");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1, 'hello') ON CONFLICT DO NOTHING", &params)
+        .await;
+    assert!(result.is_ok(), "CockroachDB INSERT failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -825,7 +962,7 @@ async fn test_timescaledb_provider_info() {
 #[tokio::test]
 #[ignore]
 async fn test_timescaledb_test_connection() {
-    let config = make_config("timescaledb");
+    let config = make_live_pgwire_config("timescaledb");
     let provider = timescaledb::TimescaleDbProvider::from_config("test_timescaledb", &config)
         .expect("Failed to create TimescaleDB provider");
 
@@ -838,13 +975,13 @@ async fn test_timescaledb_test_connection() {
 #[tokio::test]
 #[ignore]
 async fn test_timescaledb_execute_select() {
-    let config = make_config("timescaledb");
+    let config = make_live_pgwire_config("timescaledb");
     let provider = timescaledb::TimescaleDbProvider::from_config("test_timescaledb", &config)
         .expect("Failed to create TimescaleDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("SELECT 1", &params).await;
-    assert!(result.is_ok());
+    let result = provider.execute("SELECT 1 AS val", &params).await;
+    assert!(result.is_ok(), "TimescaleDB SELECT failed: {:?}", result.err());
     let sql_result = result.unwrap();
     assert!(sql_result.rows_returned.is_some());
 }
@@ -852,13 +989,22 @@ async fn test_timescaledb_execute_select() {
 #[tokio::test]
 #[ignore]
 async fn test_timescaledb_execute_insert() {
-    let config = make_config("timescaledb");
+    let config = make_live_pgwire_config("timescaledb");
     let provider = timescaledb::TimescaleDbProvider::from_config("test_timescaledb", &config)
         .expect("Failed to create TimescaleDB provider");
 
     let params = HashMap::new();
-    let result = provider.execute("INSERT INTO test_table VALUES (1)", &params).await;
-    assert!(result.is_ok());
+    provider
+        .execute(
+            "CREATE TABLE IF NOT EXISTS test_table (id INTEGER PRIMARY KEY, name TEXT)",
+            &params,
+        )
+        .await
+        .expect("Failed to create test table");
+    let result = provider
+        .execute("INSERT INTO test_table VALUES (1, 'hello') ON CONFLICT DO NOTHING", &params)
+        .await;
+    assert!(result.is_ok(), "TimescaleDB INSERT failed: {:?}", result.err());
 }
 
 #[tokio::test]
