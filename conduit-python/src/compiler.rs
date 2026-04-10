@@ -52,27 +52,28 @@ pub fn compile_dags(path: &str) -> PyResult<String> {
     let plan_json = json!({
         "dags": dags.iter().map(|dag| {
             json!({
-                "id": dag.id.0,
-                "name": dag.name,
-                "tasks": dag.tasks.iter().map(|task| {
+                "id": dag.id,
+                "tasks": dag.tasks.iter().map(|(task_id, task)| {
                     json!({
-                        "id": task.id.0,
-                        "type": task.task_type,
+                        "id": task_id,
+                        "type": format!("{:?}", task.task_type),
                         "dependencies": task.dependencies.iter().map(|dep| {
                             json!({
-                                "task_id": dep.task_id.0,
-                                "kind": format!("{:?}", dep.kind)
+                                "task_id": dep.task_id,
+                                "dependency_type": format!("{:?}", dep.dependency_type)
                             })
                         }).collect::<Vec<_>>(),
-                        "config": task.config,
                         "trigger_rule": format!("{:?}", task.trigger_rule),
-                        "pool": task.pool.as_ref().map(|p| json!({
-                            "name": p.name,
-                            "slots": p.slots
-                        }))
+                        "pool": task.pool,
+                        "retries": task.retries,
+                        "timeout": task.timeout,
+                        "priority": task.priority
                     })
                 }).collect::<Vec<_>>(),
-                "description": dag.description
+                "description": dag.description,
+                "schedule": dag.schedule,
+                "tags": dag.tags,
+                "execution_order": dag.execution_order
             })
         }).collect::<Vec<_>>()
     });
@@ -117,15 +118,15 @@ pub fn validate_dag(path: &str) -> PyResult<String> {
     for dag in &dags {
         // Check for empty DAGs
         if dag.tasks.is_empty() {
-            warnings.push(format!("DAG '{}' contains no tasks", dag.id.0));
+            warnings.push(format!("DAG '{}' contains no tasks", dag.id));
         }
 
         // Check for tasks with no dependencies (orphans in non-root DAGs)
-        for task in &dag.tasks {
+        for (task_id, task) in &dag.tasks {
             if task.dependencies.is_empty() && dag.tasks.len() > 1 {
                 warnings.push(format!(
                     "Task '{}' in DAG '{}' has no dependencies",
-                    task.id.0, dag.id.0
+                    task_id, dag.id
                 ));
             }
         }

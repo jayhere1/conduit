@@ -7,12 +7,7 @@ use pyo3::exceptions::PyValueError;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-/// Convert ConduitError to PyErr
-fn error_to_pyerr(err: conduit_common::error::ConduitError) -> PyErr {
-    PyValueError::new_err(err.to_string())
-}
+use std::path::PathBuf;
 
 /// Python-facing environment store wrapper
 ///
@@ -50,6 +45,7 @@ impl EnvironmentStore {
     /// Args:
     ///     name: Environment name (e.g., "dev", "staging", "prod")
     ///     based_on: Optional parent environment to inherit from
+    #[pyo3(signature = (name, based_on=None))]
     fn create_env(&self, name: &str, based_on: Option<&str>) -> PyResult<()> {
         let mut envs = self.environments.lock().unwrap();
 

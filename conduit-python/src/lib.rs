@@ -14,13 +14,6 @@ pub mod lineage;
 pub mod state;
 
 use pyo3::prelude::*;
-use pyo3::exceptions::PyValueError;
-use conduit_common::error::ConduitError;
-
-/// Convert ConduitError to PyErr for Python exception handling
-fn conduit_error_to_pyerr(err: ConduitError) -> PyErr {
-    PyValueError::new_err(err.to_string())
-}
 
 /// Create the conduit_native module exposed to Python
 #[pymodule]
