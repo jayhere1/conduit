@@ -1,0 +1,134 @@
+id: ecommerce_etl
+description: E-commerce data warehouse ETL — multi-stage pipeline with realistic processing
+schedule: "0 6 * * *"
+tags: [etl, warehouse, ecommerce]
+
+tasks:
+  # ── Extract layer ──────────────────────────────────────────
+  extract_orders:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Connecting to orders database..."
+      sleep 2
+      echo "CONDUIT::LOG::INFO::Extracting orders from last 24h..."
+      sleep 3
+      echo "CONDUIT::METRIC::rows_extracted::12847"
+      echo "CONDUIT::LOG::INFO::Extracted 12,847 orders"
+      echo "CONDUIT::XCOM::{\"rows\": 12847, \"source\": \"orders_db\"}"
+    retries: 2
+    timeout: 10m
+
+  extract_customers:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Pulling customer updates from CRM..."
+      sleep 2
+      echo "CONDUIT::LOG::INFO::Fetching changed records since last sync..."
+      sleep 2
+      echo "CONDUIT::METRIC::rows_extracted::3421"
+      echo "CONDUIT::LOG::INFO::Extracted 3,421 customer records"
+      echo "CONDUIT::XCOM::{\"rows\": 3421, \"source\": \"crm_api\"}"
+    retries: 2
+    timeout: 10m
+
+  extract_products:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Syncing product catalog..."
+      sleep 1
+      echo "CONDUIT::LOG::INFO::Downloading product images metadata..."
+      sleep 2
+      echo "CONDUIT::METRIC::rows_extracted::8923"
+      echo "CONDUIT::LOG::INFO::Extracted 8,923 products"
+    timeout: 5m
+
+  # ── Transform layer ────────────────────────────────────────
+  clean_orders:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Deduplicating order records..."
+      sleep 2
+      echo "CONDUIT::LOG::INFO::Validating order amounts..."
+      sleep 1
+      echo "CONDUIT::LOG::INFO::Normalizing currency codes..."
+      sleep 1
+      echo "CONDUIT::METRIC::rows_cleaned::12801"
+      echo "CONDUIT::METRIC::duplicates_removed::46"
+      echo "CONDUIT::LOG::INFO::Cleaned 12,801 orders (46 duplicates removed)"
+    depends_on: [extract_orders]
+    timeout: 15m
+
+  enrich_customers:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Geocoding customer addresses..."
+      sleep 3
+      echo "CONDUIT::LOG::INFO::Computing customer lifetime value..."
+      sleep 2
+      echo "CONDUIT::METRIC::rows_enriched::3421"
+      echo "CONDUIT::LOG::INFO::Enriched 3,421 customer profiles"
+    depends_on: [extract_customers]
+    timeout: 15m
+
+  # ── Join layer ─────────────────────────────────────────────
+  build_order_facts:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Joining orders × customers × products..."
+      sleep 2
+      echo "CONDUIT::LOG::INFO::Computing order-level metrics..."
+      sleep 2
+      echo "CONDUIT::LOG::INFO::Building fact table..."
+      sleep 1
+      echo "CONDUIT::METRIC::fact_rows::12801"
+      echo "CONDUIT::LOG::INFO::Built 12,801 order fact records"
+    depends_on: [clean_orders, enrich_customers, extract_products]
+    timeout: 30m
+
+  # ── Aggregate layer ────────────────────────────────────────
+  daily_revenue:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Aggregating daily revenue by region..."
+      sleep 2
+      echo "CONDUIT::METRIC::total_revenue::847293.42"
+      echo "CONDUIT::LOG::INFO::Daily revenue: $847,293.42 across 12 regions"
+    depends_on: [build_order_facts]
+    timeout: 10m
+
+  customer_segments:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Running customer segmentation model..."
+      sleep 3
+      echo "CONDUIT::LOG::INFO::Assigning segments: VIP(127), Regular(2891), New(403)..."
+      sleep 1
+      echo "CONDUIT::METRIC::segments_updated::3421"
+      echo "CONDUIT::LOG::INFO::Segmented 3,421 customers"
+    depends_on: [build_order_facts]
+    timeout: 10m
+
+  # ── Load layer ─────────────────────────────────────────────
+  load_warehouse:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Loading fact table to warehouse..."
+      sleep 2
+      echo "CONDUIT::LOG::INFO::Updating materialized views..."
+      sleep 2
+      echo "CONDUIT::LOG::INFO::Refreshing BI cache..."
+      sleep 1
+      echo "CONDUIT::METRIC::rows_loaded::12801"
+      echo "CONDUIT::LOG::INFO::Warehouse load complete"
+    depends_on: [daily_revenue, customer_segments]
+    timeout: 30m
+
+  notify_stakeholders:
+    type: shell
+    command: |
+      echo "CONDUIT::LOG::INFO::Sending Slack notification to #data-team..."
+      sleep 1
+      echo "CONDUIT::LOG::INFO::Emailing daily report to stakeholders..."
+      sleep 1
+      echo "CONDUIT::LOG::INFO::Pipeline complete — all stakeholders notified"
+    depends_on: [load_warehouse]

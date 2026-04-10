@@ -1,0 +1,74 @@
+id: analytics_sql
+description: SQL analytics pipeline — testable locally via DuckDB
+schedule: "0 8 * * *"
+
+tasks:
+  create_source:
+    type: sql
+    connection: local
+    query: |
+      CREATE OR REPLACE TABLE raw_events AS
+      SELECT
+        i AS event_id,
+        'user_' || (i % 50) AS user_id,
+        CASE (i % 4)
+          WHEN 0 THEN 'page_view'
+          WHEN 1 THEN 'click'
+          WHEN 2 THEN 'purchase'
+          WHEN 3 THEN 'signup'
+        END AS event_type,
+        (random() * 100)::DECIMAL(10,2) AS amount,
+        TIMESTAMP '2026-04-01' + INTERVAL (i * 37) MINUTE AS event_time
+      FROM generate_series(1, 1000) t(i)
+
+  aggregate_by_user:
+    type: sql
+    connection: local
+    query: |
+      SELECT
+        user_id,
+        COUNT(*) AS total_events,
+        COUNT(*) FILTER (WHERE event_type = 'purchase') AS purchases,
+        COALESCE(SUM(amount) FILTER (WHERE event_type = 'purchase'), 0) AS total_spent,
+        MIN(event_time) AS first_seen,
+        MAX(event_time) AS last_seen
+      FROM raw_events
+      GROUP BY user_id
+      ORDER BY total_spent DESC
+    depends_on: [create_source]
+
+  aggregate_by_hour:
+    type: sql
+    connection: local
+    query: |
+      SELECT
+        date_trunc('hour', event_time) AS hour,
+        event_type,
+        COUNT(*) AS event_count,
+        SUM(amount) AS total_amount
+      FROM raw_events
+      GROUP BY 1, 2
+      ORDER BY 1, 2
+    depends_on: [create_source]
+
+  top_spenders:
+    type: sql
+    connection: local
+    query: |
+      SELECT
+        user_id,
+        purchases,
+        total_spent,
+        RANK() OVER (ORDER BY total_spent DESC) AS spend_rank
+      FROM (
+        SELECT
+          user_id,
+          COUNT(*) FILTER (WHERE event_type = 'purchase') AS purchases,
+          COALESCE(SUM(amount) FILTER (WHERE event_type = 'purchase'), 0) AS total_spent
+        FROM raw_events
+        GROUP BY user_id
+      )
+      WHERE purchases > 0
+      ORDER BY spend_rank
+      LIMIT 10
+    depends_on: [create_source]

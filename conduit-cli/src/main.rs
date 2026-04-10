@@ -383,6 +383,10 @@ enum Commands {
         #[arg(short, long)]
         file: Option<Vec<PathBuf>>,
 
+        /// Run setup SQL before the main query (e.g. CREATE TABLE statements)
+        #[arg(short, long)]
+        setup: Option<Vec<String>>,
+
         /// Output format: table, json, csv
         #[arg(long, default_value = "table")]
         format: String,
@@ -607,6 +611,7 @@ fn main() -> Result<()> {
             sql,
             connection,
             file,
+            setup,
             format,
             limit,
             config,
@@ -614,6 +619,7 @@ fn main() -> Result<()> {
             &sql,
             connection.as_deref(),
             file,
+            setup,
             &format,
             limit,
             config,
@@ -2537,6 +2543,7 @@ async fn cmd_query(
     sql: &str,
     connection: Option<&str>,
     files: Option<Vec<PathBuf>>,
+    setup: Option<Vec<String>>,
     format: &str,
     limit: usize,
     config_path: Option<PathBuf>,
@@ -2604,6 +2611,14 @@ async fn cmd_query(
         }
     }
 
+    // Run setup SQL (e.g. CREATE TABLE statements to prepare the environment)
+    if let Some(ref setup_stmts) = setup {
+        for stmt in setup_stmts {
+            eprintln!("  Setup: {}", truncate_str(stmt, 80));
+            provider.execute_raw(stmt).await?;
+        }
+    }
+
     // Apply limit to SELECT queries
     let final_sql = {
         let trimmed = sql.trim().to_uppercase();
@@ -2658,7 +2673,11 @@ async fn cmd_preview(
 
     // Look up the DAG and task
     let dag = plan.dags.get(dag_id).ok_or_else(|| {
-        anyhow::anyhow!("DAG '{}' not found. Available: {:?}", dag_id, plan.dags.keys().collect::<Vec<_>>())
+        anyhow::anyhow!(
+            "DAG '{}' not found. Available: {:?}",
+            dag_id,
+            plan.dags.keys().collect::<Vec<_>>()
+        )
     })?;
 
     let task = dag.tasks.get(task_id).ok_or_else(|| {
@@ -2676,17 +2695,20 @@ async fn cmd_preview(
             query,
         } => {
             eprintln!("  Task: {}.{}", dag_id, task_id);
-            eprintln!("  Type: SQL (connection: {})", connection.unwrap_or(task_conn));
+            eprintln!(
+                "  Type: SQL (connection: {})",
+                connection.unwrap_or(task_conn)
+            );
             eprintln!("  Query: {}", truncate_str(query, 120));
-            eprintln!();
 
-            let provider: Box<dyn SqlProvider> = if let Some(conn_name) = connection {
-                let config_path = dags_path.parent().unwrap_or(Path::new(".")).join("conduit.yaml");
+            let provider = if let Some(conn_name) = connection {
+                let config_path =
+                    dags_path.parent().unwrap_or(Path::new(".")).join("conduit.yaml");
                 if config_path.exists() {
                     let config = conduit_common::config::ConduitConfig::load(&config_path)?;
                     if let Some(conn_config) = config.connections.get(conn_name) {
                         if conn_config.conn_type == "duckdb" || conn_config.conn_type == "duck" {
-                            Box::new(DuckDbProvider::from_config(conn_name, conn_config)?)
+                            DuckDbProvider::from_config(conn_name, conn_config)?
                         } else {
                             anyhow::bail!(
                                 "Preview currently only supports DuckDB connections. \
@@ -2699,11 +2721,27 @@ async fn cmd_preview(
                         anyhow::bail!("Connection '{}' not found in config", conn_name);
                     }
                 } else {
-                    Box::new(DuckDbProvider::ephemeral())
+                    DuckDbProvider::ephemeral()
                 }
             } else {
-                Box::new(DuckDbProvider::ephemeral())
+                DuckDbProvider::ephemeral()
             };
+
+            // Walk upstream SQL dependencies in topological order and execute
+            // them first, so the target task can reference their tables.
+            let upstream = collect_upstream_sql(dag, task_id);
+            if !upstream.is_empty() {
+                eprintln!(
+                    "  Running {} upstream SQL task(s) as setup...",
+                    upstream.len()
+                );
+                for (up_id, up_sql) in &upstream {
+                    eprintln!("    [setup] {}", up_id);
+                    provider.execute_raw(up_sql).await?;
+                }
+            }
+
+            eprintln!();
 
             let final_sql = {
                 let trimmed = query.trim().to_uppercase();
@@ -2722,8 +2760,7 @@ async fn cmd_preview(
             {
                 Ok(result) => render_result(&result, format, limit),
                 Err(e) => {
-                    eprintln!("  Query execution failed (this is expected for queries referencing");
-                    eprintln!("  external tables — use --connection to point to a real database):");
+                    eprintln!("  Query execution failed:");
                     eprintln!("  Error: {}", e);
                 }
             }
@@ -2731,13 +2768,61 @@ async fn cmd_preview(
         other => {
             eprintln!("  Task: {}.{}", dag_id, task_id);
             eprintln!("  Type: {:?}", task_type_name(other));
-            eprintln!("  Dependencies: {:?}", task.dependencies.iter().map(|d| &d.task_id).collect::<Vec<_>>());
+            eprintln!(
+                "  Dependencies: {:?}",
+                task.dependencies
+                    .iter()
+                    .map(|d| &d.task_id)
+                    .collect::<Vec<_>>()
+            );
             eprintln!();
             eprintln!("  Preview is only available for SQL tasks.");
         }
     }
 
     Ok(())
+}
+
+/// Walk the DAG's execution_order to collect upstream SQL tasks for a given target.
+/// Returns (task_id, query) pairs in topological order, excluding the target itself.
+fn collect_upstream_sql(
+    dag: &conduit_common::dag::Dag,
+    target_task_id: &str,
+) -> Vec<(String, String)> {
+    use conduit_common::dag::TaskType;
+
+    // Collect all transitive upstream task IDs via BFS
+    let mut needed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+
+    // Seed with direct dependencies of the target
+    if let Some(task) = dag.tasks.get(target_task_id) {
+        for dep in &task.dependencies {
+            queue.push_back(dep.task_id.clone());
+        }
+    }
+
+    while let Some(tid) = queue.pop_front() {
+        if needed.insert(tid.clone()) {
+            if let Some(t) = dag.tasks.get(&tid) {
+                for dep in &t.dependencies {
+                    queue.push_back(dep.task_id.clone());
+                }
+            }
+        }
+    }
+
+    // Return SQL tasks in topological order
+    dag.execution_order
+        .iter()
+        .filter(|tid| needed.contains(tid.as_str()))
+        .filter_map(|tid| {
+            dag.tasks.get(tid.as_str()).and_then(|t| match &t.task_type {
+                TaskType::Sql { query, .. } => Some((tid.clone(), query.clone())),
+                _ => None,
+            })
+        })
+        .collect()
 }
 
 // ─── shared output helpers ───────────────────────────────────────────────────
