@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/your-org/conduit"
+Repository = "https://github.com/jayhere1/conduit"
 Documentation = "https://docs.conduit.dev"
 
 [tool.maturin]
