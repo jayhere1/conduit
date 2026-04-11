@@ -7,11 +7,6 @@ use pyo3::exceptions::PyValueError;
 use serde_json::{json, Value};
 use conduit_lineage::SqlLineageExtractor;
 
-/// Convert ConduitError to PyErr
-fn error_to_pyerr(err: conduit_common::error::ConduitError) -> PyErr {
-    PyValueError::new_err(err.to_string())
-}
-
 /// Extract SQL lineage from a query
 ///
 /// Parses SQL and extracts source tables, output columns, and column-level dependencies.
@@ -27,26 +22,42 @@ fn error_to_pyerr(err: conduit_common::error::ConduitError) -> PyErr {
 ///     }
 #[pyfunction]
 pub fn extract_sql_lineage(sql: &str) -> PyResult<String> {
-    // Use SqlLineageExtractor to parse the SQL
-    let extractor = SqlLineageExtractor::new();
+    let lineage = SqlLineageExtractor::extract(sql);
 
-    let lineage = extractor.extract(sql)
-        .map_err(error_to_pyerr)?;
+    // Build a lookup from output column name to its source column references
+    let source_map: std::collections::HashMap<&str, Vec<String>> = lineage
+        .column_mappings
+        .iter()
+        .map(|mapping| {
+            let sources: Vec<String> = mapping
+                .inputs
+                .iter()
+                .map(|col_ref| format!("{}.{}", col_ref.task_id, col_ref.column_name))
+                .collect();
+            (mapping.output.as_str(), sources)
+        })
+        .collect();
 
     let result = json!({
         "sql": sql,
-        "input_tables": lineage.source_tables,
+        "input_tables": lineage.source_tables.iter().map(|t| &t.name).collect::<Vec<_>>(),
         "output_columns": lineage.output_columns.iter().map(|col| {
+            let sources = source_map.get(col.name.as_str())
+                .cloned()
+                .unwrap_or_default();
             json!({
                 "name": col.name,
-                "type": format!("{:?}", col.col_type),
-                "sources": col.source_refs
+                "expression": col.expression,
+                "is_computed": col.is_computed,
+                "sources": sources
             })
         }).collect::<Vec<_>>(),
-        "column_dependencies": lineage.column_deps.iter().map(|(output, sources)| {
+        "column_dependencies": lineage.column_mappings.iter().map(|mapping| {
             json!({
-                "output": output,
-                "sources": sources
+                "output": mapping.output,
+                "sources": mapping.inputs.iter().map(|col_ref| {
+                    format!("{}.{}", col_ref.task_id, col_ref.column_name)
+                }).collect::<Vec<_>>()
             })
         }).collect::<Vec<_>>()
     });
@@ -157,13 +168,15 @@ pub fn diff_schemas(old_json: &str, new_json: &str) -> PyResult<String> {
     let new_schema: Value = serde_json::from_str(new_json)
         .map_err(|e| PyValueError::new_err(format!("Invalid new schema JSON: {}", e)))?;
 
+    let empty_vec = vec![];
     let old_cols = old_schema.get("columns")
         .and_then(|v| v.as_array())
-        .unwrap_or(&vec![]);
+        .unwrap_or(&empty_vec);
 
+    let empty_vec2 = vec![];
     let new_cols = new_schema.get("columns")
         .and_then(|v| v.as_array())
-        .unwrap_or(&vec![]);
+        .unwrap_or(&empty_vec2);
 
     let mut added_columns = Vec::new();
     let mut removed_columns = Vec::new();

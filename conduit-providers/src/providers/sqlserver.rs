@@ -22,9 +22,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 
+use super::{extra_bool, extra_str};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, extra_bool};
 
 /// Microsoft SQL Server provider
 #[allow(dead_code)]
@@ -80,9 +80,9 @@ impl Provider for SqlServerProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
+        use std::time::Instant;
         use tokio::net::TcpStream;
         use tokio::time::{timeout, Duration};
-        use std::time::Instant;
 
         let start = Instant::now();
         let addr = format!("{}:{}", self.host, self.port);
@@ -121,7 +121,10 @@ impl SqlProvider for SqlServerProvider {
         _query: &str,
         _params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "sqlserver".into(), operation: "execute".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "sqlserver".into(),
+            operation: "execute".into(),
+        })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
@@ -133,6 +136,9 @@ impl SqlProvider for SqlServerProvider {
         _schema: &str,
         _table: &str,
     ) -> Result<Vec<ColumnInfo>, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "sqlserver".into(), operation: "describe_table".into() })
+        Err(ProviderError::NotImplemented {
+            provider_type: "sqlserver".into(),
+            operation: "describe_table".into(),
+        })
     }
 }

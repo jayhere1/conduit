@@ -90,10 +90,7 @@ impl ConduitPlan {
             "Compilation complete"
         );
 
-        let dags: HashMap<String, Dag> = resolved
-            .into_iter()
-            .map(|d| (d.id.clone(), d))
-            .collect();
+        let dags: HashMap<String, Dag> = resolved.into_iter().map(|d| (d.id.clone(), d)).collect();
 
         let plan = ConduitPlan {
             dags: dags.clone(),

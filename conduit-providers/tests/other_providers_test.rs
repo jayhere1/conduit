@@ -12,9 +12,9 @@
 use std::collections::HashMap;
 
 use conduit_common::config::ConnectionConfig;
+use conduit_providers::providers::*;
 use conduit_providers::traits::*;
 use conduit_providers::traits_saas::*;
-use conduit_providers::providers::*;
 
 // ─── Helper Functions ───────────────────────────────────────────────────────
 
@@ -31,7 +31,10 @@ fn make_config(conn_type: &str) -> ConnectionConfig {
 }
 
 /// Create a ConnectionConfig with extra parameters.
-fn make_config_with_extras(conn_type: &str, extras: Vec<(&str, serde_json::Value)>) -> ConnectionConfig {
+fn make_config_with_extras(
+    conn_type: &str,
+    extras: Vec<(&str, serde_json::Value)>,
+) -> ConnectionConfig {
     let mut extra = HashMap::new();
     for (k, v) in extras {
         extra.insert(k.to_string(), v);
@@ -54,7 +57,10 @@ fn make_config_with_extras(conn_type: &str, extras: Vec<(&str, serde_json::Value
 async fn test_s3_from_config() {
     let config = make_config("s3");
     let provider = s3::S3Provider::from_config("test_s3", &config);
-    assert!(provider.is_ok(), "S3 provider should initialize with bucket in database field");
+    assert!(
+        provider.is_ok(),
+        "S3 provider should initialize with bucket in database field"
+    );
 }
 
 #[tokio::test]
@@ -65,7 +71,10 @@ async fn test_s3_requires_bucket() {
     assert!(provider.is_err(), "S3 should error without bucket name");
     match provider {
         Err(conduit_providers::ProviderError::InvalidConfig { reason, .. }) => {
-            assert!(reason.contains("bucket"), "Error should mention bucket requirement");
+            assert!(
+                reason.contains("bucket"),
+                "Error should mention bucket requirement"
+            );
         }
         _ => panic!("Expected InvalidConfig error"),
     }
@@ -74,8 +83,8 @@ async fn test_s3_requires_bucket() {
 #[tokio::test]
 async fn test_s3_provider_info() {
     let config = make_config("s3");
-    let provider = s3::S3Provider::from_config("test_s3", &config)
-        .expect("Failed to create S3 provider");
+    let provider =
+        s3::S3Provider::from_config("test_s3", &config).expect("Failed to create S3 provider");
 
     let info = provider.info();
     assert_eq!(info.provider_type, "s3");
@@ -87,8 +96,8 @@ async fn test_s3_provider_info() {
 #[ignore] // Requires real S3 credentials
 async fn test_s3_write_object() {
     let config = make_config("s3");
-    let provider = s3::S3Provider::from_config("test_s3", &config)
-        .expect("Failed to create S3 provider");
+    let provider =
+        s3::S3Provider::from_config("test_s3", &config).expect("Failed to create S3 provider");
 
     let test_data = b"test data";
     let result = provider.write_object("test/file.txt", test_data).await;
@@ -104,28 +113,35 @@ async fn test_s3_write_object() {
 #[ignore] // Requires real S3 credentials
 async fn test_s3_copy_object() {
     let config = make_config("s3");
-    let provider = s3::S3Provider::from_config("test_s3", &config)
-        .expect("Failed to create S3 provider");
+    let provider =
+        s3::S3Provider::from_config("test_s3", &config).expect("Failed to create S3 provider");
 
     let result = provider.copy_object("source.txt", "dest.txt").await;
     assert!(result.is_ok());
     let storage_result = result.unwrap();
     assert_eq!(storage_result.objects_affected, 1);
-    assert_eq!(storage_result.uris.len(), 2, "Copy should return source and dest URIs");
+    assert_eq!(
+        storage_result.uris.len(),
+        2,
+        "Copy should return source and dest URIs"
+    );
 }
 
 #[tokio::test]
 async fn test_gcs_from_config() {
     let config = make_config("gcs");
     let provider = gcs::GcsProvider::from_config("test_gcs", &config);
-    assert!(provider.is_ok(), "GCS provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "GCS provider should initialize from config"
+    );
 }
 
 #[tokio::test]
 async fn test_gcs_provider_info() {
     let config = make_config("gcs");
-    let provider = gcs::GcsProvider::from_config("test_gcs", &config)
-        .expect("Failed to create GCS provider");
+    let provider =
+        gcs::GcsProvider::from_config("test_gcs", &config).expect("Failed to create GCS provider");
 
     let info = provider.info();
     assert_eq!(info.provider_type, "gcs");
@@ -143,7 +159,10 @@ async fn test_gcs_provider_info() {
 async fn test_kafka_from_config() {
     let config = make_config("kafka");
     let provider = kafka::KafkaProvider::from_config("test_kafka", &config);
-    assert!(provider.is_ok(), "Kafka provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Kafka provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -216,7 +235,10 @@ async fn test_kafka_broker_count_in_display() {
         .expect("Failed to create Kafka provider");
 
     let info = provider.info();
-    assert!(info.display_name.contains("2 brokers"), "Display should show broker count");
+    assert!(
+        info.display_name.contains("2 brokers"),
+        "Display should show broker count"
+    );
 }
 
 // ─── RabbitMQ Provider Tests ────────────────────────────────────────────────
@@ -225,7 +247,10 @@ async fn test_kafka_broker_count_in_display() {
 async fn test_rabbitmq_from_config() {
     let config = make_config("rabbitmq");
     let provider = rabbitmq::RabbitMqProvider::from_config("test_rabbitmq", &config);
-    assert!(provider.is_ok(), "RabbitMQ provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "RabbitMQ provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -283,7 +308,10 @@ async fn test_rabbitmq_list_topics() {
 async fn test_kinesis_from_config() {
     let config = make_config("kinesis");
     let provider = kinesis::KinesisProvider::from_config("test_kinesis", &config);
-    assert!(provider.is_ok(), "Kinesis provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Kinesis provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -304,14 +332,12 @@ async fn test_kinesis_produce() {
     let provider = kinesis::KinesisProvider::from_config("test_kinesis", &config)
         .expect("Failed to create Kinesis provider");
 
-    let messages = vec![
-        StreamMessage {
-            key: Some("partition_key".to_string()),
-            value: b"record1".to_vec(),
-            headers: HashMap::new(),
-            timestamp: None,
-        },
-    ];
+    let messages = vec![StreamMessage {
+        key: Some("partition_key".to_string()),
+        value: b"record1".to_vec(),
+        headers: HashMap::new(),
+        timestamp: None,
+    }];
 
     let result = provider.produce("test_stream", &messages).await;
     assert!(result.is_err());
@@ -343,7 +369,10 @@ async fn test_kinesis_list_topics() {
 async fn test_pubsub_from_config() {
     let config = make_config("pubsub");
     let provider = pubsub::PubSubProvider::from_config("test_pubsub", &config);
-    assert!(provider.is_ok(), "Pub/Sub provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Pub/Sub provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -401,7 +430,10 @@ async fn test_pubsub_list_topics() {
 async fn test_redis_stream_from_config() {
     let config = make_config("redis_stream");
     let provider = redis_stream::RedisStreamProvider::from_config("test_redis_stream", &config);
-    assert!(provider.is_ok(), "Redis Stream provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Redis Stream provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -463,7 +495,10 @@ async fn test_redis_stream_list_topics() {
 async fn test_salesforce_from_config() {
     let config = make_config("salesforce");
     let provider = salesforce::SalesforceProvider::from_config("test_sfdc", &config);
-    assert!(provider.is_ok(), "Salesforce provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Salesforce provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -547,7 +582,10 @@ async fn test_salesforce_list_object_types() {
 async fn test_hubspot_from_config() {
     let config = make_config("hubspot");
     let provider = hubspot::HubSpotProvider::from_config("test_hs", &config);
-    assert!(provider.is_ok(), "HubSpot provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "HubSpot provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -630,7 +668,10 @@ async fn test_hubspot_list_object_types() {
 async fn test_stripe_from_config() {
     let config = make_config("stripe");
     let provider = stripe::StripeProvider::from_config("test_stripe", &config);
-    assert!(provider.is_ok(), "Stripe provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Stripe provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -713,7 +754,10 @@ async fn test_stripe_list_object_types() {
 async fn test_github_from_config() {
     let config = make_config("github");
     let provider = github::GitHubProvider::from_config("test_gh", &config);
-    assert!(provider.is_ok(), "GitHub provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "GitHub provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -796,7 +840,10 @@ async fn test_github_list_object_types() {
 async fn test_jira_from_config() {
     let config = make_config("jira");
     let provider = jira::JiraProvider::from_config("test_jira", &config);
-    assert!(provider.is_ok(), "Jira provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Jira provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -879,7 +926,10 @@ async fn test_jira_list_object_types() {
 async fn test_slack_from_config() {
     let config = make_config("slack");
     let provider = slack::SlackProvider::from_config("test_slack", &config);
-    assert!(provider.is_ok(), "Slack provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Slack provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -966,7 +1016,10 @@ async fn test_slack_list_object_types() {
 async fn test_mongodb_from_config() {
     let config = make_config("mongodb");
     let provider = mongodb::MongoDbProvider::from_config("test_mongo", &config);
-    assert!(provider.is_ok(), "MongoDB provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "MongoDB provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -1051,7 +1104,10 @@ async fn test_mongodb_list_collections() {
 async fn test_dynamodb_from_config() {
     let config = make_config("dynamodb");
     let provider = dynamodb::DynamoDbProvider::from_config("test_dynamo", &config);
-    assert!(provider.is_ok(), "DynamoDB provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "DynamoDB provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -1083,9 +1139,7 @@ async fn test_dynamodb_insert() {
     let provider = dynamodb::DynamoDbProvider::from_config("test_dynamo", &config)
         .expect("Failed to create DynamoDB provider");
 
-    let documents = vec![
-        serde_json::json!({"id": "1", "data": "test"}),
-    ];
+    let documents = vec![serde_json::json!({"id": "1", "data": "test"})];
     let result = provider.insert("items", &documents).await;
     assert!(result.is_ok());
     let doc_result = result.unwrap();
@@ -1135,7 +1189,10 @@ async fn test_dynamodb_list_collections() {
 async fn test_cassandra_from_config() {
     let config = make_config("cassandra");
     let provider = cassandra::CassandraProvider::from_config("test_cassandra", &config);
-    assert!(provider.is_ok(), "Cassandra provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Cassandra provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -1167,9 +1224,7 @@ async fn test_cassandra_insert() {
     let provider = cassandra::CassandraProvider::from_config("test_cassandra", &config)
         .expect("Failed to create Cassandra provider");
 
-    let documents = vec![
-        serde_json::json!({"event_id": "1", "timestamp": "2024-01-01"}),
-    ];
+    let documents = vec![serde_json::json!({"event_id": "1", "timestamp": "2024-01-01"})];
     let result = provider.insert("events", &documents).await;
     assert!(result.is_ok());
     let doc_result = result.unwrap();
@@ -1219,7 +1274,10 @@ async fn test_cassandra_list_collections() {
 async fn test_elasticsearch_from_config() {
     let config = make_config("elasticsearch");
     let provider = elasticsearch::ElasticsearchProvider::from_config("test_es", &config);
-    assert!(provider.is_ok(), "Elasticsearch provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Elasticsearch provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -1251,9 +1309,7 @@ async fn test_elasticsearch_insert() {
     let provider = elasticsearch::ElasticsearchProvider::from_config("test_es", &config)
         .expect("Failed to create Elasticsearch provider");
 
-    let documents = vec![
-        serde_json::json!({"message": "log entry"}),
-    ];
+    let documents = vec![serde_json::json!({"message": "log entry"})];
     let result = provider.insert("logs", &documents).await;
     assert!(result.is_ok());
     let doc_result = result.unwrap();
@@ -1303,7 +1359,10 @@ async fn test_elasticsearch_list_collections() {
 async fn test_redis_doc_from_config() {
     let config = make_config("redis_doc");
     let provider = redis_doc::RedisDocProvider::from_config("test_redis_doc", &config);
-    assert!(provider.is_ok(), "Redis Doc provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Redis Doc provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -1335,9 +1394,7 @@ async fn test_redis_doc_insert() {
     let provider = redis_doc::RedisDocProvider::from_config("test_redis_doc", &config)
         .expect("Failed to create Redis Doc provider");
 
-    let documents = vec![
-        serde_json::json!({"key": "value"}),
-    ];
+    let documents = vec![serde_json::json!({"key": "value"})];
     let result = provider.insert("cache", &documents).await;
     assert!(result.is_ok());
     let doc_result = result.unwrap();
@@ -1387,7 +1444,10 @@ async fn test_redis_doc_list_collections() {
 async fn test_neo4j_from_config() {
     let config = make_config("neo4j");
     let provider = neo4j::Neo4jProvider::from_config("test_neo4j", &config);
-    assert!(provider.is_ok(), "Neo4j provider should initialize from config");
+    assert!(
+        provider.is_ok(),
+        "Neo4j provider should initialize from config"
+    );
 }
 
 #[tokio::test]
@@ -1419,9 +1479,7 @@ async fn test_neo4j_insert() {
     let provider = neo4j::Neo4jProvider::from_config("test_neo4j", &config)
         .expect("Failed to create Neo4j provider");
 
-    let documents = vec![
-        serde_json::json!({"name": "Alice", "label": "Person"}),
-    ];
+    let documents = vec![serde_json::json!({"name": "Alice", "label": "Person"})];
     let result = provider.insert("nodes", &documents).await;
     assert!(result.is_ok());
     let doc_result = result.unwrap();
@@ -1474,28 +1532,58 @@ async fn test_all_stream_providers_have_stream_capabilities() {
     let config = make_config("kafka");
 
     let kafka = kafka::KafkaProvider::from_config("k", &config).unwrap();
-    assert!(kafka.info().capabilities.contains(&Capability::StreamProduce));
-    assert!(kafka.info().capabilities.contains(&Capability::StreamConsume));
+    assert!(kafka
+        .info()
+        .capabilities
+        .contains(&Capability::StreamProduce));
+    assert!(kafka
+        .info()
+        .capabilities
+        .contains(&Capability::StreamConsume));
 
     let config = make_config("rabbitmq");
     let rabbitmq = rabbitmq::RabbitMqProvider::from_config("r", &config).unwrap();
-    assert!(rabbitmq.info().capabilities.contains(&Capability::StreamProduce));
-    assert!(rabbitmq.info().capabilities.contains(&Capability::StreamConsume));
+    assert!(rabbitmq
+        .info()
+        .capabilities
+        .contains(&Capability::StreamProduce));
+    assert!(rabbitmq
+        .info()
+        .capabilities
+        .contains(&Capability::StreamConsume));
 
     let config = make_config("kinesis");
     let kinesis = kinesis::KinesisProvider::from_config("ki", &config).unwrap();
-    assert!(kinesis.info().capabilities.contains(&Capability::StreamProduce));
-    assert!(kinesis.info().capabilities.contains(&Capability::StreamConsume));
+    assert!(kinesis
+        .info()
+        .capabilities
+        .contains(&Capability::StreamProduce));
+    assert!(kinesis
+        .info()
+        .capabilities
+        .contains(&Capability::StreamConsume));
 
     let config = make_config("pubsub");
     let pubsub = pubsub::PubSubProvider::from_config("ps", &config).unwrap();
-    assert!(pubsub.info().capabilities.contains(&Capability::StreamProduce));
-    assert!(pubsub.info().capabilities.contains(&Capability::StreamConsume));
+    assert!(pubsub
+        .info()
+        .capabilities
+        .contains(&Capability::StreamProduce));
+    assert!(pubsub
+        .info()
+        .capabilities
+        .contains(&Capability::StreamConsume));
 
     let config = make_config("redis_stream");
     let redis_stream = redis_stream::RedisStreamProvider::from_config("rs", &config).unwrap();
-    assert!(redis_stream.info().capabilities.contains(&Capability::StreamProduce));
-    assert!(redis_stream.info().capabilities.contains(&Capability::StreamConsume));
+    assert!(redis_stream
+        .info()
+        .capabilities
+        .contains(&Capability::StreamProduce));
+    assert!(redis_stream
+        .info()
+        .capabilities
+        .contains(&Capability::StreamConsume));
 }
 
 #[tokio::test]

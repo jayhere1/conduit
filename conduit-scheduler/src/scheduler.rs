@@ -9,9 +9,9 @@
 //! All state mutations are derived from events, enabling deterministic replay
 //! and time-travel debugging.
 
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -21,8 +21,8 @@ use conduit_common::metrics;
 use conduit_state::EventStore;
 
 use crate::cron::CronSchedule;
-use crate::trigger::TriggerRuleEvaluator;
 use crate::pool_manager::PoolManager;
+use crate::trigger::TriggerRuleEvaluator;
 
 /// An event that the scheduler reacts to.
 #[derive(Debug, Clone)]
@@ -51,9 +51,7 @@ pub enum SchedulerEvent {
         attempt: u32,
     },
     /// Periodic cron tick (evaluates all scheduled DAGs).
-    CronTick {
-        timestamp: DateTime<Utc>,
-    },
+    CronTick { timestamp: DateTime<Utc> },
     /// An external sensor triggered.
     SensorTriggered {
         sensor_id: String,
@@ -357,10 +355,7 @@ impl Scheduler {
                     }
                     self.handle_cron_tick(timestamp);
                 }
-                SchedulerEvent::SensorTriggered {
-                    sensor_id,
-                    payload,
-                } => {
+                SchedulerEvent::SensorTriggered { sensor_id, payload } => {
                     self.handle_sensor_triggered(&sensor_id, payload);
                 }
                 SchedulerEvent::Shutdown => {
@@ -477,8 +472,7 @@ impl Scheduler {
                     status: "completed".to_string(),
                 })
                 .inc();
-            m.task_duration_seconds
-                .observe(duration_ms as f64 / 1000.0);
+            m.task_duration_seconds.observe(duration_ms as f64 / 1000.0);
             m.active_tasks.dec();
         }
 
@@ -660,12 +654,7 @@ impl Scheduler {
             let task = &dag.tasks[task_id];
 
             // Check if this task is ready
-            let is_ready = evaluator.evaluate(
-                &task.trigger_rule,
-                task_id,
-                dag,
-                run_state,
-            );
+            let is_ready = evaluator.evaluate(&task.trigger_rule, task_id, dag, run_state);
 
             if is_ready {
                 if let Some(m) = metrics::try_global() {
@@ -699,13 +688,20 @@ impl Scheduler {
         let all_terminal = dag.execution_order.iter().all(|task_id| {
             matches!(
                 run_state.task_states.get(task_id),
-                Some(TaskState::Success { .. } | TaskState::Failed { .. } | TaskState::Skipped { .. })
+                Some(
+                    TaskState::Success { .. }
+                        | TaskState::Failed { .. }
+                        | TaskState::Skipped { .. }
+                )
             )
         });
 
         if all_terminal {
             let has_failures = dag.execution_order.iter().any(|task_id| {
-                matches!(run_state.task_states.get(task_id), Some(TaskState::Failed { .. }))
+                matches!(
+                    run_state.task_states.get(task_id),
+                    Some(TaskState::Failed { .. })
+                )
             });
 
             let status = if has_failures {
@@ -841,7 +837,10 @@ mod tests {
 
     #[test]
     fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration(&Some("30s".to_string())), Duration::seconds(30));
+        assert_eq!(
+            parse_duration(&Some("30s".to_string())),
+            Duration::seconds(30)
+        );
     }
 
     #[test]
@@ -854,10 +853,7 @@ mod tests {
 
     #[test]
     fn test_parse_duration_hours() {
-        assert_eq!(
-            parse_duration(&Some("2h".to_string())),
-            Duration::hours(2)
-        );
+        assert_eq!(parse_duration(&Some("2h".to_string())), Duration::hours(2));
     }
 
     #[test]

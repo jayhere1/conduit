@@ -3,8 +3,8 @@
 //! Ensures that attempting to decode random bytes as protobuf messages
 //! never panics — it must always return `Ok` or `Err`.
 
-use prost::Message;
 use proptest::prelude::*;
+use prost::Message;
 
 use conduit_distributed::generated_proto;
 

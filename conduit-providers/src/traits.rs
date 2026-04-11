@@ -96,10 +96,7 @@ impl SqlResult {
         ));
 
         if let Some(rows) = self.rows_returned {
-            out.push_str(&format!(
-                "CONDUIT::LOG::INFO::Rows returned: {}\n",
-                rows
-            ));
+            out.push_str(&format!("CONDUIT::LOG::INFO::Rows returned: {}\n", rows));
         }
 
         out.push_str(&format!(
@@ -210,10 +207,7 @@ pub trait SqlProvider: Provider {
     ) -> Result<SqlResult, ProviderError>;
 
     /// Execute a SQL query without returning rows (DDL, DML).
-    async fn execute_statement(
-        &self,
-        statement: &str,
-    ) -> Result<SqlResult, ProviderError> {
+    async fn execute_statement(&self, statement: &str) -> Result<SqlResult, ProviderError> {
         // Default: delegates to execute with no params
         self.execute(statement, &HashMap::new()).await
     }

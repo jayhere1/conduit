@@ -35,13 +35,11 @@ impl WatermarkStore {
 
     /// Load watermarks from a JSON file.
     pub fn from_file(path: &std::path::Path) -> ConduitResult<Self> {
-        let data = std::fs::read_to_string(path).map_err(|e| {
-            ConduitError::ConfigError(format!("Failed to read watermarks: {}", e))
-        })?;
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| ConduitError::ConfigError(format!("Failed to read watermarks: {}", e)))?;
 
-        let list: Vec<Watermark> = serde_json::from_str(&data).map_err(|e| {
-            ConduitError::ConfigError(format!("Failed to parse watermarks: {}", e))
-        })?;
+        let list: Vec<Watermark> = serde_json::from_str(&data)
+            .map_err(|e| ConduitError::ConfigError(format!("Failed to parse watermarks: {}", e)))?;
 
         let mut map = HashMap::new();
         for wm in list {
@@ -62,9 +60,8 @@ impl WatermarkStore {
 
         let list: Vec<&Watermark> = wms.values().collect();
         let data = serde_json::to_string_pretty(&list)?;
-        std::fs::write(path, data).map_err(|e| {
-            ConduitError::ConfigError(format!("Failed to write watermarks: {}", e))
-        })?;
+        std::fs::write(path, data)
+            .map_err(|e| ConduitError::ConfigError(format!("Failed to write watermarks: {}", e)))?;
         Ok(())
     }
 
@@ -115,7 +112,7 @@ impl IncrementalEngine {
         // Determine if this should be a full refresh
         let is_full_refresh = force_full_refresh
             || config.force_full_refresh
-            || watermark.map_or(true, |w| w.is_initial());
+            || watermark.is_none_or(|w| w.is_initial());
 
         // If full refresh, return simple context
         if is_full_refresh {
@@ -270,7 +267,10 @@ impl IncrementalEngine {
                 }
             }
 
-            IncrementalStrategy::MergeOnKey { time_column: Some(tc), .. } => {
+            IncrementalStrategy::MergeOnKey {
+                time_column: Some(tc),
+                ..
+            } => {
                 if let Some(start) = &context.effective_start {
                     format!("{} WHERE {} > '{}'", trimmed, tc, start)
                 } else {
@@ -278,7 +278,9 @@ impl IncrementalEngine {
                 }
             }
 
-            IncrementalStrategy::DeleteInsert { partition_column, .. } => {
+            IncrementalStrategy::DeleteInsert {
+                partition_column, ..
+            } => {
                 if !context.target_partitions.is_empty() {
                     let parts: Vec<String> = context
                         .target_partitions
@@ -356,10 +358,8 @@ impl IncrementalEngine {
                             .unwrap_or(current + Duration::days(31))
                     }
                 }
-                PartitionGranularity::Year => {
-                    NaiveDate::from_ymd_opt(current.year() + 1, 1, 1)
-                        .unwrap_or(current + Duration::days(366))
-                }
+                PartitionGranularity::Year => NaiveDate::from_ymd_opt(current.year() + 1, 1, 1)
+                    .unwrap_or(current + Duration::days(366)),
             };
         }
 
@@ -374,8 +374,8 @@ impl IncrementalEngine {
         }
 
         // Check multi-char suffixes first
-        if s.ends_with("ms") {
-            if let Ok(n) = s[..s.len() - 2].parse::<i64>() {
+        if let Some(num_str) = s.strip_suffix("ms") {
+            if let Ok(n) = num_str.parse::<i64>() {
                 return Duration::milliseconds(n);
             }
         }
@@ -431,12 +431,7 @@ mod tests {
         let mut wm = Watermark::new("etl", "extract");
         wm.advance_timestamp(ts, "run_001");
 
-        let ctx = IncrementalEngine::build_context(
-            &config,
-            Some(&wm),
-            false,
-            Utc::now(),
-        );
+        let ctx = IncrementalEngine::build_context(&config, Some(&wm), false, Utc::now());
 
         assert!(!ctx.is_full_refresh);
         assert_eq!(ctx.batch_size, Some(5000));
@@ -496,11 +491,7 @@ mod tests {
             batch_size: None,
         };
 
-        let result = IncrementalEngine::rewrite_sql(
-            "SELECT * FROM orders",
-            &config,
-            &ctx,
-        );
+        let result = IncrementalEngine::rewrite_sql("SELECT * FROM orders", &config, &ctx);
 
         assert!(result.contains("WHERE created_at >"));
         assert!(result.contains("2026-03-21"));
@@ -518,18 +509,11 @@ mod tests {
             is_full_refresh: false,
             watermark: WatermarkValue::Partition("2026-03-20".to_string()),
             effective_start: None,
-            target_partitions: vec![
-                "2026-03-21".to_string(),
-                "2026-03-22".to_string(),
-            ],
+            target_partitions: vec!["2026-03-21".to_string(), "2026-03-22".to_string()],
             batch_size: None,
         };
 
-        let result = IncrementalEngine::rewrite_sql(
-            "SELECT * FROM events",
-            &config,
-            &ctx,
-        );
+        let result = IncrementalEngine::rewrite_sql("SELECT * FROM events", &config, &ctx);
 
         assert!(result.contains("WHERE dt IN"));
         assert!(result.contains("'2026-03-21'"));
@@ -551,11 +535,7 @@ mod tests {
             batch_size: None,
         };
 
-        let result = IncrementalEngine::rewrite_sql(
-            "SELECT * FROM orders",
-            &config,
-            &ctx,
-        );
+        let result = IncrementalEngine::rewrite_sql("SELECT * FROM orders", &config, &ctx);
 
         assert_eq!(result, "SELECT * FROM orders");
     }
@@ -699,11 +679,20 @@ mod tests {
 
     #[test]
     fn parse_duration_variants() {
-        assert_eq!(IncrementalEngine::parse_duration("30s"), Duration::seconds(30));
-        assert_eq!(IncrementalEngine::parse_duration("5m"), Duration::minutes(5));
+        assert_eq!(
+            IncrementalEngine::parse_duration("30s"),
+            Duration::seconds(30)
+        );
+        assert_eq!(
+            IncrementalEngine::parse_duration("5m"),
+            Duration::minutes(5)
+        );
         assert_eq!(IncrementalEngine::parse_duration("2h"), Duration::hours(2));
         assert_eq!(IncrementalEngine::parse_duration("1d"), Duration::days(1));
         assert_eq!(IncrementalEngine::parse_duration("1w"), Duration::weeks(1));
-        assert_eq!(IncrementalEngine::parse_duration("500ms"), Duration::milliseconds(500));
+        assert_eq!(
+            IncrementalEngine::parse_duration("500ms"),
+            Duration::milliseconds(500)
+        );
     }
 }

@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use conduit_common::config::ConnectionConfig;
-use conduit_providers::registry::{ProviderRegistry, supported_provider_types};
 use conduit_providers::errors::ProviderError;
+use conduit_providers::registry::{supported_provider_types, ProviderRegistry};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -188,7 +188,10 @@ async fn test_from_configs_timescaledb() {
 async fn test_from_configs_s3() {
     let mut conns = HashMap::new();
     // S3 requires database field for bucket name
-    conns.insert("s3_conn".to_string(), make_config_with_db("s3", "my-bucket"));
+    conns.insert(
+        "s3_conn".to_string(),
+        make_config_with_db("s3", "my-bucket"),
+    );
 
     let registry = ProviderRegistry::from_configs(&conns).await;
     assert!(registry.get("s3_conn").is_some());
@@ -262,7 +265,11 @@ async fn test_from_configs_redis_stream() {
 
     let registry = ProviderRegistry::from_configs(&conns).await;
     assert!(registry.get("redis_stream_conn").is_some());
-    assert!(registry.get("redis_stream_conn").unwrap().as_stream().is_some());
+    assert!(registry
+        .get("redis_stream_conn")
+        .unwrap()
+        .as_stream()
+        .is_some());
 }
 
 #[tokio::test]
@@ -372,7 +379,11 @@ async fn test_from_configs_redis_kv() {
 
     let registry = ProviderRegistry::from_configs(&conns).await;
     assert!(registry.get("redis_kv_conn").is_some());
-    assert!(registry.get("redis_kv_conn").unwrap().as_document().is_some());
+    assert!(registry
+        .get("redis_kv_conn")
+        .unwrap()
+        .as_document()
+        .is_some());
 }
 
 #[tokio::test]
@@ -493,7 +504,10 @@ fn test_get_nonexistent_connection() {
 #[tokio::test]
 async fn test_get_sql_wrong_type() {
     let mut conns = HashMap::new();
-    conns.insert("storage_conn".to_string(), make_config_with_db("s3", "bucket"));
+    conns.insert(
+        "storage_conn".to_string(),
+        make_config_with_db("s3", "bucket"),
+    );
 
     let registry = ProviderRegistry::from_configs(&conns).await;
     let result = registry.get_sql("storage_conn");
@@ -601,11 +615,7 @@ fn test_supported_types_no_duplicate_ids() {
     // Check that all IDs are unique
     let mut seen = std::collections::HashSet::new();
     for id in ids {
-        assert!(
-            seen.insert(id),
-            "Duplicate provider type ID: {}",
-            id
-        );
+        assert!(seen.insert(id), "Duplicate provider type ID: {}", id);
     }
 }
 
@@ -639,10 +649,7 @@ fn test_supported_types_stream_count() {
 #[test]
 fn test_supported_types_saas_count() {
     let types = supported_provider_types();
-    let saas_count = types
-        .iter()
-        .filter(|(_, _, _, cat)| *cat == "saas")
-        .count();
+    let saas_count = types.iter().filter(|(_, _, _, cat)| *cat == "saas").count();
     assert_eq!(saas_count, 6);
 }
 
@@ -659,10 +666,7 @@ fn test_supported_types_document_count() {
 #[test]
 fn test_supported_types_http_count() {
     let types = supported_provider_types();
-    let http_count = types
-        .iter()
-        .filter(|(_, _, _, cat)| *cat == "http")
-        .count();
+    let http_count = types.iter().filter(|(_, _, _, cat)| *cat == "http").count();
     assert_eq!(http_count, 1);
 }
 

@@ -24,9 +24,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 
+use super::{extra_str, resolve_credential};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, resolve_credential};
 
 pub struct SnowflakeProvider {
     name: String,
@@ -43,7 +43,10 @@ pub struct SnowflakeProvider {
 impl SnowflakeProvider {
     pub fn from_config(name: &str, config: &ConnectionConfig) -> Result<Self, ProviderError> {
         let account = config.host.clone().unwrap_or_default();
-        let database = config.database.clone().unwrap_or_else(|| "analytics".to_string());
+        let database = config
+            .database
+            .clone()
+            .unwrap_or_else(|| "analytics".to_string());
         let user = extra_str(config, "user").unwrap_or_else(|| "conduit".to_string());
         let warehouse = extra_str(config, "warehouse").unwrap_or_else(|| "compute_wh".to_string());
         let role = extra_str(config, "role").unwrap_or_else(|| "public".to_string());
@@ -225,11 +228,7 @@ impl SnowflakeProvider {
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .map(|row| {
-                        row.as_array()
-                            .cloned()
-                            .unwrap_or_default()
-                    })
+                    .map(|row| row.as_array().cloned().unwrap_or_default())
                     .collect()
             })
             .unwrap_or_default();

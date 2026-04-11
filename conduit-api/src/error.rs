@@ -25,15 +25,25 @@ impl IntoResponse for ApiError {
             ApiError::Internal(msg) => {
                 // Log the full error internally but never expose it to clients
                 tracing::error!(error = %msg, "Internal server error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Internal server error".to_string(),
+                )
             }
             ApiError::CompilationFailed(msg) => {
                 // Strip absolute paths: keep only the portion starting at "dags/" or the
                 // last path component so we never leak server directory structure.
                 let sanitized = sanitize_paths(&msg);
-                (StatusCode::UNPROCESSABLE_ENTITY, "compilation_failed", sanitized)
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "compilation_failed",
+                    sanitized,
+                )
             }
-            ApiError::EnvironmentNotFound(msg) => (StatusCode::NOT_FOUND, "environment_not_found", msg),
+            ApiError::EnvironmentNotFound(msg) => {
+                (StatusCode::NOT_FOUND, "environment_not_found", msg)
+            }
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg),
         };
@@ -101,8 +111,12 @@ impl From<conduit_common::error::ConduitError> for ApiError {
         use conduit_common::error::ConduitError;
         match err {
             ConduitError::EnvironmentNotFound(name) => ApiError::EnvironmentNotFound(name),
-            ConduitError::SnapshotNotFound(id) => ApiError::NotFound(format!("Snapshot not found: {}", id)),
-            ConduitError::FileNotFound(path) => ApiError::NotFound(format!("File not found: {}", path)),
+            ConduitError::SnapshotNotFound(id) => {
+                ApiError::NotFound(format!("Snapshot not found: {}", id))
+            }
+            ConduitError::FileNotFound(path) => {
+                ApiError::NotFound(format!("File not found: {}", path))
+            }
             ConduitError::ConfigError(msg) => ApiError::BadRequest(msg),
             ConduitError::ParseError { file, message } => {
                 ApiError::CompilationFailed(format!("{}: {}", file, message))

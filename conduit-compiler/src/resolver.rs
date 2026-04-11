@@ -79,7 +79,11 @@ impl DependencyResolver {
                 // Fill in the module path for Python tasks
                 let task_type = match pt.task_type {
                     TaskType::Python { module, function } => TaskType::Python {
-                        module: if module.is_empty() { module_name.clone() } else { module },
+                        module: if module.is_empty() {
+                            module_name.clone()
+                        } else {
+                            module
+                        },
                         function,
                     },
                     other => other,
@@ -278,7 +282,10 @@ mod tests {
 
         let result = DependencyResolver::resolve(parsed);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConduitError::UnknownTaskRef { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConduitError::UnknownTaskRef { .. }
+        ));
     }
 
     #[test]
@@ -290,6 +297,9 @@ mod tests {
 
         let result = DependencyResolver::resolve(parsed);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConduitError::DuplicateTaskId { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConduitError::DuplicateTaskId { .. }
+        ));
     }
 }

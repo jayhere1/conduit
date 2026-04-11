@@ -180,6 +180,9 @@ mod tests {
             partitions: vec![],
         };
 
-        assert_eq!(result.succeeded + result.failed + result.skipped, result.total_partitions);
+        assert_eq!(
+            result.succeeded + result.failed + result.skipped,
+            result.total_partitions
+        );
     }
 }

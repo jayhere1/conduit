@@ -23,12 +23,12 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use conduit_common::dag::{
-    Dag, Task, TaskDependency, TaskType, TriggerRule, ResourceLimits, DependencyType,
+    Dag, DependencyType, ResourceLimits, Task, TaskDependency, TaskType, TriggerRule,
 };
 use conduit_common::event::{Event, EventKind, RunStatus};
 use conduit_executor::{ExecutorCommand, ExecutorEvent, TaskExecutor, TaskOutcome};
 use conduit_scheduler::{
-    PoolManager, Scheduler, SchedulerCommand, SchedulerEvent, RunStatus as SchedulerRunStatus,
+    PoolManager, RunStatus as SchedulerRunStatus, Scheduler, SchedulerCommand, SchedulerEvent,
 };
 use conduit_state::EventStore;
 
@@ -431,14 +431,10 @@ async fn e2e_linear_dag_runs_to_completion() {
         .unwrap();
 
     // Launch scheduler in background.
-    let scheduler_handle = tokio::spawn(async move {
-        scheduler.run().await
-    });
+    let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
 
     // Launch executor in background.
-    let executor_handle = tokio::spawn(async move {
-        executor.run().await
-    });
+    let executor_handle = tokio::spawn(async move { executor.run().await });
 
     // Request a DAG run.
     scheduler_event_tx
@@ -584,12 +580,8 @@ async fn e2e_diamond_dag_fan_out_fan_in() {
         })
         .unwrap();
 
-    let scheduler_handle = tokio::spawn(async move {
-        scheduler.run().await
-    });
-    let executor_handle = tokio::spawn(async move {
-        executor.run().await
-    });
+    let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
+    let executor_handle = tokio::spawn(async move { executor.run().await });
 
     scheduler_event_tx
         .send(SchedulerEvent::DagRunRequested {
@@ -716,12 +708,8 @@ async fn e2e_task_failure_propagates() {
         })
         .unwrap();
 
-    let scheduler_handle = tokio::spawn(async move {
-        scheduler.run().await
-    });
-    let executor_handle = tokio::spawn(async move {
-        executor.run().await
-    });
+    let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
+    let executor_handle = tokio::spawn(async move { executor.run().await });
 
     scheduler_event_tx
         .send(SchedulerEvent::DagRunRequested {
@@ -759,27 +747,39 @@ async fn e2e_task_failure_propagates() {
     let events = event_store.range(1, 100).unwrap();
 
     // Extract should succeed.
-    let extract_completed = events.iter().any(|e| matches!(&e.kind,
-        EventKind::TaskCompleted { task_id, .. } if task_id == "extract"
-    ));
+    let extract_completed = events.iter().any(|e| {
+        matches!(&e.kind,
+            EventKind::TaskCompleted { task_id, .. } if task_id == "extract"
+        )
+    });
     assert!(extract_completed, "extract should have completed");
 
     // Transform should have a TaskFailed event.
-    let transform_failed = events.iter().any(|e| matches!(&e.kind,
-        EventKind::TaskFailed { task_id, .. } if task_id == "transform"
-    ));
+    let transform_failed = events.iter().any(|e| {
+        matches!(&e.kind,
+            EventKind::TaskFailed { task_id, .. } if task_id == "transform"
+        )
+    });
     assert!(transform_failed, "transform should have failed");
 
     // Load should either be skipped or not started.
-    let load_completed = events.iter().any(|e| matches!(&e.kind,
-        EventKind::TaskCompleted { task_id, .. } if task_id == "load"
-    ));
+    let load_completed = events.iter().any(|e| {
+        matches!(&e.kind,
+            EventKind::TaskCompleted { task_id, .. } if task_id == "load"
+        )
+    });
     assert!(!load_completed, "load should NOT have completed");
 
     // DAG run should be marked as Failed.
-    let dag_failed = events.iter().any(|e| matches!(&e.kind,
-        EventKind::DagRunCompleted { status: RunStatus::Failed, .. }
-    ));
+    let dag_failed = events.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::DagRunCompleted {
+                status: RunStatus::Failed,
+                ..
+            }
+        )
+    });
     assert!(dag_failed, "DAG run should have failed");
 }
 

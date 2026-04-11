@@ -1,10 +1,10 @@
 //! SaaS provider trait for first-party API integrations.
 
-use std::collections::HashMap;
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use crate::errors::ProviderError;
 use crate::traits::Provider;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Result from a SaaS API operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,11 +65,8 @@ pub trait SaasProvider: Provider {
     ) -> Result<SaasResult, ProviderError>;
 
     /// Delete a record by ID.
-    async fn delete(
-        &self,
-        object_type: &str,
-        record_id: &str,
-    ) -> Result<SaasResult, ProviderError>;
+    async fn delete(&self, object_type: &str, record_id: &str)
+        -> Result<SaasResult, ProviderError>;
 
     /// List available object types / entities.
     async fn list_object_types(&self) -> Result<Vec<String>, ProviderError>;

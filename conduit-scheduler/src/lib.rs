@@ -18,13 +18,15 @@
 //! Phase 1 implements single-node scheduling.
 //! Phase 4 adds Raft-based distributed scheduling.
 
-pub mod scheduler;
 pub mod cron;
-pub mod trigger;
 pub mod pool_manager;
+pub mod scheduler;
+pub mod trigger;
 
 // Re-export key types
-pub use scheduler::{Scheduler, SchedulerEvent, SchedulerCommand, DagRunState, TaskState, RunStatus};
 pub use cron::CronSchedule;
-pub use trigger::TriggerRuleEvaluator;
 pub use pool_manager::PoolManager;
+pub use scheduler::{
+    DagRunState, RunStatus, Scheduler, SchedulerCommand, SchedulerEvent, TaskState,
+};
+pub use trigger::TriggerRuleEvaluator;

@@ -30,18 +30,11 @@ pub enum ChangeKind {
     /// An existing column was removed.
     ColumnRemoved,
     /// A column's type changed.
-    TypeChanged {
-        old_type: String,
-        new_type: String,
-    },
+    TypeChanged { old_type: String, new_type: String },
     /// A column's nullability changed.
-    NullabilityChanged {
-        was_nullable: bool,
-    },
+    NullabilityChanged { was_nullable: bool },
     /// A column was renamed (heuristic: same position + type, different name).
-    ColumnRenamed {
-        old_name: String,
-    },
+    ColumnRenamed { old_name: String },
     /// Column description or tags changed (non-breaking).
     MetadataChanged,
 }
@@ -76,8 +69,7 @@ impl SchemaChangeDetector {
                 let old_pos = old.columns.iter().position(|c| c.name == old_col.name);
                 let possible_rename = old_pos.and_then(|pos| {
                     new.columns.get(pos).filter(|new_col| {
-                        new_col.column_type == old_col.column_type
-                            && !old.has_column(&new_col.name)
+                        new_col.column_type == old_col.column_type && !old.has_column(&new_col.name)
                     })
                 });
 
@@ -132,10 +124,8 @@ impl SchemaChangeDetector {
             if let Some(new_col) = new.get_column(&old_col.name) {
                 // Type change
                 if old_col.column_type != new_col.column_type {
-                    let is_breaking = !Self::is_safe_type_widening(
-                        &old_col.column_type,
-                        &new_col.column_type,
-                    );
+                    let is_breaking =
+                        !Self::is_safe_type_widening(&old_col.column_type, &new_col.column_type);
 
                     changes.push(SchemaChange {
                         kind: ChangeKind::TypeChanged {
@@ -174,10 +164,7 @@ impl SchemaChangeDetector {
                     changes.push(SchemaChange {
                         kind: ChangeKind::MetadataChanged,
                         column_name: old_col.name.clone(),
-                        description: format!(
-                            "Column '{}' metadata updated",
-                            old_col.name
-                        ),
+                        description: format!("Column '{}' metadata updated", old_col.name),
                         is_breaking: false,
                     });
                 }
@@ -269,7 +256,11 @@ impl std::fmt::Display for SchemaImpact {
             writeln!(f)?;
             writeln!(f, "  Changes:")?;
             for change in &self.changes {
-                let marker = if change.is_breaking { "BREAKING" } else { "safe" };
+                let marker = if change.is_breaking {
+                    "BREAKING"
+                } else {
+                    "safe"
+                };
                 writeln!(f, "    [{}] {}", marker, change.description)?;
             }
         }
@@ -293,17 +284,26 @@ impl std::fmt::Display for SchemaImpact {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Column, ColumnType, Schema};
     use crate::lineage_graph::{LineageGraph, TransformType};
+    use crate::schema::{Column, ColumnType, Schema};
 
     fn orders_schema_v1() -> Schema {
-        Schema::new("extract_orders", vec![
-            Column::new("id", ColumnType::Integer).not_null(),
-            Column::new("customer_id", ColumnType::Integer).not_null(),
-            Column::new("total", ColumnType::Decimal { precision: 10, scale: 2 }),
-            Column::new("order_date", ColumnType::Date),
-            Column::new("status", ColumnType::String),
-        ])
+        Schema::new(
+            "extract_orders",
+            vec![
+                Column::new("id", ColumnType::Integer).not_null(),
+                Column::new("customer_id", ColumnType::Integer).not_null(),
+                Column::new(
+                    "total",
+                    ColumnType::Decimal {
+                        precision: 10,
+                        scale: 2,
+                    },
+                ),
+                Column::new("order_date", ColumnType::Date),
+                Column::new("status", ColumnType::String),
+            ],
+        )
     }
 
     #[test]
@@ -317,7 +317,8 @@ mod tests {
     fn added_column_detected() {
         let old = orders_schema_v1();
         let mut new = old.clone();
-        new.columns.push(Column::new("shipping_address", ColumnType::String));
+        new.columns
+            .push(Column::new("shipping_address", ColumnType::String));
 
         let changes = SchemaChangeDetector::diff(&old, &new);
 
@@ -334,7 +335,10 @@ mod tests {
 
         let changes = SchemaChangeDetector::diff(&old, &new);
 
-        let removed = changes.iter().find(|c| c.kind == ChangeKind::ColumnRemoved).unwrap();
+        let removed = changes
+            .iter()
+            .find(|c| c.kind == ChangeKind::ColumnRemoved)
+            .unwrap();
         assert_eq!(removed.column_name, "status");
         assert!(removed.is_breaking);
     }
@@ -350,18 +354,17 @@ mod tests {
 
         let changes = SchemaChangeDetector::diff(&old, &new);
 
-        let type_change = changes.iter().find(|c| matches!(c.kind, ChangeKind::TypeChanged { .. })).unwrap();
+        let type_change = changes
+            .iter()
+            .find(|c| matches!(c.kind, ChangeKind::TypeChanged { .. }))
+            .unwrap();
         assert!(type_change.is_breaking);
     }
 
     #[test]
     fn safe_type_widening_is_not_breaking() {
-        let old = Schema::new("task", vec![
-            Column::new("count", ColumnType::Integer),
-        ]);
-        let new = Schema::new("task", vec![
-            Column::new("count", ColumnType::Float),
-        ]);
+        let old = Schema::new("task", vec![Column::new("count", ColumnType::Integer)]);
+        let new = Schema::new("task", vec![Column::new("count", ColumnType::Float)]);
 
         let changes = SchemaChangeDetector::diff(&old, &new);
 
@@ -371,16 +374,21 @@ mod tests {
 
     #[test]
     fn nullability_tightening_is_breaking() {
-        let old = Schema::new("task", vec![
-            Column::new("name", ColumnType::String), // nullable by default
-        ]);
-        let new = Schema::new("task", vec![
-            Column::new("name", ColumnType::String).not_null(),
-        ]);
+        let old = Schema::new(
+            "task",
+            vec![
+                Column::new("name", ColumnType::String), // nullable by default
+            ],
+        );
+        let new = Schema::new(
+            "task",
+            vec![Column::new("name", ColumnType::String).not_null()],
+        );
 
         let changes = SchemaChangeDetector::diff(&old, &new);
 
-        let null_change = changes.iter()
+        let null_change = changes
+            .iter()
             .find(|c| matches!(c.kind, ChangeKind::NullabilityChanged { .. }))
             .unwrap();
         assert!(null_change.is_breaking); // NULL → NOT NULL breaks inserts
@@ -388,16 +396,21 @@ mod tests {
 
     #[test]
     fn nullability_loosening_is_safe() {
-        let old = Schema::new("task", vec![
-            Column::new("name", ColumnType::String).not_null(),
-        ]);
-        let new = Schema::new("task", vec![
-            Column::new("name", ColumnType::String), // nullable
-        ]);
+        let old = Schema::new(
+            "task",
+            vec![Column::new("name", ColumnType::String).not_null()],
+        );
+        let new = Schema::new(
+            "task",
+            vec![
+                Column::new("name", ColumnType::String), // nullable
+            ],
+        );
 
         let changes = SchemaChangeDetector::diff(&old, &new);
 
-        let null_change = changes.iter()
+        let null_change = changes
+            .iter()
             .find(|c| matches!(c.kind, ChangeKind::NullabilityChanged { .. }))
             .unwrap();
         assert!(!null_change.is_breaking); // NOT NULL → NULL is safe
@@ -405,18 +418,25 @@ mod tests {
 
     #[test]
     fn rename_heuristic_detects_positional_match() {
-        let old = Schema::new("task", vec![
-            Column::new("user_name", ColumnType::String),
-            Column::new("age", ColumnType::Integer),
-        ]);
-        let new = Schema::new("task", vec![
-            Column::new("display_name", ColumnType::String), // same position + type
-            Column::new("age", ColumnType::Integer),
-        ]);
+        let old = Schema::new(
+            "task",
+            vec![
+                Column::new("user_name", ColumnType::String),
+                Column::new("age", ColumnType::Integer),
+            ],
+        );
+        let new = Schema::new(
+            "task",
+            vec![
+                Column::new("display_name", ColumnType::String), // same position + type
+                Column::new("age", ColumnType::Integer),
+            ],
+        );
 
         let changes = SchemaChangeDetector::diff(&old, &new);
 
-        let rename = changes.iter()
+        let rename = changes
+            .iter()
             .find(|c| matches!(&c.kind, ChangeKind::ColumnRenamed { .. }))
             .expect("should detect rename");
         assert!(rename.is_breaking);
@@ -425,12 +445,22 @@ mod tests {
 
     #[test]
     fn impact_analysis_traces_downstream() {
-        let old = Schema::new("extract_orders", vec![
-            Column::new("total", ColumnType::Decimal { precision: 10, scale: 2 }),
-        ]);
-        let new = Schema::new("extract_orders", vec![
-            // Removed "total" column
-        ]);
+        let old = Schema::new(
+            "extract_orders",
+            vec![Column::new(
+                "total",
+                ColumnType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+            )],
+        );
+        let new = Schema::new(
+            "extract_orders",
+            vec![
+                // Removed "total" column
+            ],
+        );
 
         // Build a lineage graph
         let mut lineage = LineageGraph::new();

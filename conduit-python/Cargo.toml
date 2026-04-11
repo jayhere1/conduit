@@ -17,6 +17,8 @@ conduit-lineage = { path = "../conduit-lineage" }
 conduit-state = { path = "../conduit-state" }
 pyo3 = { version = "0.22", features = ["extension-module"] }
 serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 3

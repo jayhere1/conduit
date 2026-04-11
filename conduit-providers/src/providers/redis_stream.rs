@@ -15,11 +15,11 @@
 //!   password: optional_password
 //! ```
 
-use async_trait::async_trait;
-use conduit_common::config::ConnectionConfig;
+use super::{extra_str, extra_u64};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, extra_u64};
+use async_trait::async_trait;
+use conduit_common::config::ConnectionConfig;
 
 /// Redis Streams provider
 #[allow(dead_code)]
@@ -62,17 +62,14 @@ impl Provider for RedisStreamProvider {
             provider_type: "redis".to_string(),
             display_name: format!("Redis ({}:{}/{})", self.host, self.port, self.database),
             version: None,
-            capabilities: vec![
-                Capability::StreamProduce,
-                Capability::StreamConsume,
-            ],
+            capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
         }
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
+        use std::time::Instant;
         use tokio::net::TcpStream;
         use tokio::time::{timeout, Duration};
-        use std::time::Instant;
 
         let start = Instant::now();
         let addr = format!("{}:{}", self.host, self.port);
@@ -106,12 +103,27 @@ impl Provider for RedisStreamProvider {
 
 #[async_trait]
 impl StreamProvider for RedisStreamProvider {
-    async fn produce(&self, _topic: &str, _messages: &[StreamMessage]) -> Result<StreamResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "redis".into(), operation: "produce".into() })
+    async fn produce(
+        &self,
+        _topic: &str,
+        _messages: &[StreamMessage],
+    ) -> Result<StreamResult, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "redis".into(),
+            operation: "produce".into(),
+        })
     }
 
-    async fn consume(&self, _topic: &str, _group_id: &str, _max_messages: usize) -> Result<Vec<StreamMessage>, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "redis".into(), operation: "consume".into() })
+    async fn consume(
+        &self,
+        _topic: &str,
+        _group_id: &str,
+        _max_messages: usize,
+    ) -> Result<Vec<StreamMessage>, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "redis".into(),
+            operation: "consume".into(),
+        })
     }
 
     async fn list_topics(&self) -> Result<Vec<String>, ProviderError> {

@@ -78,11 +78,7 @@ impl EnvironmentManager {
     }
 
     /// Create a new environment, optionally forked from an existing one.
-    pub fn create(
-        &self,
-        name: &str,
-        based_on: Option<&str>,
-    ) -> ConduitResult<Environment> {
+    pub fn create(&self, name: &str, based_on: Option<&str>) -> ConduitResult<Environment> {
         let mut envs = self
             .environments
             .write()
@@ -96,9 +92,9 @@ impl EnvironmentManager {
         }
 
         let env = if let Some(source) = based_on {
-            let source_env = envs.get(source).ok_or_else(|| {
-                ConduitError::EnvironmentNotFound(source.to_string())
-            })?;
+            let source_env = envs
+                .get(source)
+                .ok_or_else(|| ConduitError::EnvironmentNotFound(source.to_string()))?;
             source_env.fork(name)
         } else {
             Environment::new(name)
@@ -224,7 +220,8 @@ mod tests {
 
         let prod = mgr.get("production").unwrap();
         assert_eq!(
-            prod.snapshot_map.get(&("dag1".to_string(), "task1".to_string())),
+            prod.snapshot_map
+                .get(&("dag1".to_string(), "task1".to_string())),
             Some(&"new_snap".to_string())
         );
     }
@@ -261,7 +258,9 @@ mod tests {
         // Verify data integrity — staging has the snapshot pointer
         let staging = loaded.get("staging").unwrap();
         assert_eq!(
-            staging.snapshot_map.get(&("dag1".to_string(), "task1".to_string())),
+            staging
+                .snapshot_map
+                .get(&("dag1".to_string(), "task1".to_string())),
             Some(&"snap_abc".to_string())
         );
     }

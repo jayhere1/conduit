@@ -6,11 +6,11 @@
 use crate::protocol::ProtocolMessage;
 use chrono::{DateTime, Utc};
 use conduit_common::{
-    ConduitError, ConduitResult, Evidence,
     dag::{Task, TaskType},
+    ConduitError, ConduitResult, Evidence,
 };
-use conduit_providers::ProviderRegistry;
 use conduit_providers::registry::ProviderInstance;
+use conduit_providers::ProviderRegistry;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
@@ -84,15 +84,14 @@ impl ProcessRunner {
         // For SQL tasks, try to use a native provider first
         if let TaskType::Sql { connection, query } = &task.task_type {
             if let Some(reg) = registry {
-                if let Some(provider) = reg.get(connection) {
-                    if let ProviderInstance::Sql(sql_provider) = provider {
-                        return Self::execute_sql_native(
-                            sql_provider.as_ref(),
-                            connection,
-                            query,
-                            context,
-                        ).await;
-                    }
+                if let Some(ProviderInstance::Sql(sql_provider)) = reg.get(connection) {
+                    return Self::execute_sql_native(
+                        sql_provider.as_ref(),
+                        connection,
+                        query,
+                        context,
+                    )
+                    .await;
                 }
             }
             // Fall through to subprocess-based execution
@@ -135,10 +134,9 @@ impl ProcessRunner {
         let (stdout_str, xcom, evidence) = Self::read_stdout(stdout_reader).await?;
         let stderr_str = Self::read_stderr(stderr_reader).await?;
 
-        let status = guard.child
-            .wait()
-            .await
-            .map_err(|e| ConduitError::ExecutionError(format!("Failed to wait for process: {}", e)))?;
+        let status = guard.child.wait().await.map_err(|e| {
+            ConduitError::ExecutionError(format!("Failed to wait for process: {}", e))
+        })?;
 
         let exit_code = status.code().unwrap_or(1);
         let duration = start.elapsed();
@@ -218,7 +216,9 @@ impl ProcessRunner {
                     exit_code: 1,
                     stdout: format!(
                         "{}\nCONDUIT::LOG::ERROR::Sensor timed out after {} attempts ({:.0}s)",
-                        output.stdout, attempt, start.elapsed().as_secs_f64()
+                        output.stdout,
+                        attempt,
+                        start.elapsed().as_secs_f64()
                     ),
                     stderr: output.stderr,
                     duration: start.elapsed(),
@@ -245,14 +245,14 @@ impl ProcessRunner {
             return Duration::from_secs(30);
         }
 
-        let (num_str, unit) = if s.ends_with('s') {
-            (&s[..s.len() - 1], "s")
-        } else if s.ends_with('m') {
-            (&s[..s.len() - 1], "m")
-        } else if s.ends_with('h') {
-            (&s[..s.len() - 1], "h")
-        } else if s.ends_with('d') {
-            (&s[..s.len() - 1], "d")
+        let (num_str, unit) = if let Some(n) = s.strip_suffix('s') {
+            (n, "s")
+        } else if let Some(n) = s.strip_suffix('m') {
+            (n, "m")
+        } else if let Some(n) = s.strip_suffix('h') {
+            (n, "h")
+        } else if let Some(n) = s.strip_suffix('d') {
+            (n, "d")
         } else {
             // Assume seconds if no unit
             (s, "s")
@@ -285,7 +285,10 @@ impl ProcessRunner {
             "Executing SQL via native provider"
         );
 
-        stdout.push_str(&format!("[INFO] SQL execution started via provider '{}'\n", connection_name));
+        stdout.push_str(&format!(
+            "[INFO] SQL execution started via provider '{}'\n",
+            connection_name
+        ));
         stdout.push_str(&format!("[INFO] Executing: {}\n", query));
 
         let params: HashMap<String, String> = context.params.clone();
@@ -300,7 +303,10 @@ impl ProcessRunner {
         let row_count = result.rows_returned.unwrap_or(result.rows_affected) as usize;
         let col_count = result.columns.len();
 
-        stdout.push_str(&format!("[INFO] SQL execution completed: {} rows, {} columns\n", row_count, col_count));
+        stdout.push_str(&format!(
+            "[INFO] SQL execution completed: {} rows, {} columns\n",
+            row_count, col_count
+        ));
 
         evidence.record("row_count", row_count as f64);
 
@@ -365,7 +371,10 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
                 }
                 Ok(cmd)
             }
-            TaskType::Sensor { sensor_type, poke_interval } => {
+            TaskType::Sensor {
+                sensor_type,
+                poke_interval,
+            } => {
                 let interval = poke_interval.as_deref().unwrap_or("30s");
 
                 // Sensor scripts use environment variables instead of shell
@@ -388,19 +397,15 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
                         // configure a provider connection for native execution.
                         r#"echo 'CONDUIT::LOG::ERROR::SQL sensor requires a native provider connection. Configure the connection in conduit.yaml.' && exit 1"#.to_string()
                     }
-                    _ => {
-                        match context.params.get("command") {
-                            Some(command) => command.clone(),
-                            None => {
-                                return Err(ConduitError::ExecutionError(
-                                    format!(
-                                        "Unknown sensor type '{}' and no 'command' param provided",
-                                        sensor_type
-                                    ),
-                                ));
-                            }
+                    _ => match context.params.get("command") {
+                        Some(command) => command.clone(),
+                        None => {
+                            return Err(ConduitError::ExecutionError(format!(
+                                "Unknown sensor type '{}' and no 'command' param provided",
+                                sensor_type
+                            )));
                         }
-                    }
+                    },
                 };
 
                 let mut cmd = Command::new("bash");
@@ -449,7 +454,9 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
         let mut xcom_value: Option<serde_json::Value> = None;
         let mut evidence = Evidence::new();
 
-        while let Some(line) = lines.next_line().await
+        while let Some(line) = lines
+            .next_line()
+            .await
             .map_err(|e| ConduitError::ExecutionError(format!("Failed to read stdout: {}", e)))?
         {
             trace!(stdout_line = %line, "Received stdout line");
@@ -510,7 +517,9 @@ mod tests {
     fn make_bash_task(id: &str, command: &str) -> Task {
         Task {
             id: id.to_string(),
-            task_type: TaskType::Bash { command: command.to_string() },
+            task_type: TaskType::Bash {
+                command: command.to_string(),
+            },
             dependencies: vec![],
             retries: 0,
             retry_delay: None,

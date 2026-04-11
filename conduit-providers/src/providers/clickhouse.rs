@@ -18,9 +18,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 
+use super::extra_str;
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::extra_str;
 
 #[allow(dead_code)]
 pub struct ClickHouseProvider {
@@ -34,13 +34,26 @@ pub struct ClickHouseProvider {
 
 impl ClickHouseProvider {
     pub fn from_config(name: &str, config: &ConnectionConfig) -> Result<Self, ProviderError> {
-        let host = config.host.clone().unwrap_or_else(|| "localhost".to_string());
+        let host = config
+            .host
+            .clone()
+            .unwrap_or_else(|| "localhost".to_string());
         let port = config.port.unwrap_or(8123);
-        let database = config.database.clone().unwrap_or_else(|| "default".to_string());
+        let database = config
+            .database
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
         let user = extra_str(config, "user").unwrap_or_else(|| "default".to_string());
         let protocol = extra_str(config, "protocol").unwrap_or_else(|| "http".to_string());
 
-        Ok(Self { name: name.to_string(), host, port, database, user, protocol })
+        Ok(Self {
+            name: name.to_string(),
+            host,
+            port,
+            database,
+            user,
+            protocol,
+        })
     }
 }
 
@@ -52,16 +65,18 @@ impl Provider for ClickHouseProvider {
             display_name: format!("ClickHouse ({}:{})", self.host, self.port),
             version: None,
             capabilities: vec![
-                Capability::SqlQuery, Capability::SqlDdl, Capability::BulkLoad,
+                Capability::SqlQuery,
+                Capability::SqlDdl,
+                Capability::BulkLoad,
                 Capability::IncrementalRead,
             ],
         }
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
+        use std::time::Instant;
         use tokio::net::TcpStream;
         use tokio::time::{timeout, Duration};
-        use std::time::Instant;
 
         let start = Instant::now();
         let addr = format!("{}:{}", self.host, self.port);
@@ -88,20 +103,36 @@ impl Provider for ClickHouseProvider {
         }
     }
 
-    async fn close(&self) -> Result<(), ProviderError> { Ok(()) }
+    async fn close(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl SqlProvider for ClickHouseProvider {
-    async fn execute(&self, _query: &str, _params: &HashMap<String, String>) -> Result<SqlResult, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "clickhouse".into(), operation: "execute".into() })
+    async fn execute(
+        &self,
+        _query: &str,
+        _params: &HashMap<String, String>,
+    ) -> Result<SqlResult, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "clickhouse".into(),
+            operation: "execute".into(),
+        })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, ProviderError> {
         Ok(vec![self.database.clone(), "system".to_string()])
     }
 
-    async fn describe_table(&self, _schema: &str, _table: &str) -> Result<Vec<ColumnInfo>, ProviderError> {
-        Err(ProviderError::NotImplemented { provider_type: "clickhouse".into(), operation: "describe_table".into() })
+    async fn describe_table(
+        &self,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Vec<ColumnInfo>, ProviderError> {
+        Err(ProviderError::NotImplemented {
+            provider_type: "clickhouse".into(),
+            operation: "describe_table".into(),
+        })
     }
 }

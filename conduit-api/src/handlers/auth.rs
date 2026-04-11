@@ -47,10 +47,12 @@ pub async fn create_key(
     auth.require(Permission::ManageApiKeys)
         .map_err(|e| ApiError::Forbidden(e.0.to_string()))?;
 
-    let role = Role::from_str_loose(&body.role)
-        .ok_or_else(|| ApiError::BadRequest(format!(
-            "Invalid role '{}'. Must be one of: viewer, operator, admin", body.role
-        )))?;
+    let role = Role::from_str_loose(&body.role).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "Invalid role '{}'. Must be one of: viewer, operator, admin",
+            body.role
+        ))
+    })?;
 
     if body.name.trim().is_empty() {
         return Err(ApiError::BadRequest("Key name cannot be empty".to_string()));
@@ -175,9 +177,7 @@ pub async fn revoke_key(
 ///
 /// This is a lightweight endpoint for the UI to check authentication status
 /// and the current role.
-pub async fn whoami(
-    auth: RequireAuth,
-) -> Json<Value> {
+pub async fn whoami(auth: RequireAuth) -> Json<Value> {
     let ctx = auth.context();
     Json(json!({
         "authenticated": true,

@@ -188,9 +188,7 @@ fn parse_progress(rest: &str) -> Option<ProtocolMessage> {
 
 /// Parse METRIC message: CONDUIT::METRIC::name::value
 fn parse_metric(rest: &str) -> Option<ProtocolMessage> {
-    let mut parts = rest.splitn(2, "::");
-    let name = parts.next()?;
-    let value_str = parts.next()?;
+    let (name, value_str) = rest.split_once("::")?;
 
     match value_str.parse::<f64>() {
         Ok(value) => {

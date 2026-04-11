@@ -57,19 +57,10 @@ pub enum TaskType {
     Executable = 5,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResourceLimits {
     pub cpu_millicores: u32,
     pub memory_mb: u32,
-}
-
-impl Default for ResourceLimits {
-    fn default() -> Self {
-        Self {
-            cpu_millicores: 0,
-            memory_mb: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

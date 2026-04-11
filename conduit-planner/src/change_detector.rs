@@ -102,7 +102,8 @@ impl<'a> ChangeDetector<'a> {
 
         // Step 3: Track which tasks are in the plan
         let plan_keys: HashSet<(DagId, TaskId)> = fingerprints.keys().cloned().collect();
-        let env_keys: HashSet<(DagId, TaskId)> = self.environment.snapshot_map.keys().cloned().collect();
+        let env_keys: HashSet<(DagId, TaskId)> =
+            self.environment.snapshot_map.keys().cloned().collect();
 
         let mut changes = Vec::new();
 
@@ -119,8 +120,7 @@ impl<'a> ChangeDetector<'a> {
                 if !env_keys.contains(&key) {
                     // Task is new
                     direct_changed.insert(task_id.clone());
-                    let reusable = current_fp
-                        .and_then(|fp| self.find_reusable_snapshot(fp));
+                    let reusable = current_fp.and_then(|fp| self.find_reusable_snapshot(fp));
                     changes.push(TaskChange {
                         dag_id: dag_id.clone(),
                         task_id: task_id.clone(),
@@ -145,9 +145,9 @@ impl<'a> ChangeDetector<'a> {
                     let task = dag.tasks.get(task_id);
                     let upstream_changed = task
                         .map(|t| {
-                            t.dependencies.iter().any(|dep| {
-                                direct_changed.contains(&dep.task_id)
-                            })
+                            t.dependencies
+                                .iter()
+                                .any(|dep| direct_changed.contains(&dep.task_id))
                         })
                         .unwrap_or(false);
 
@@ -180,9 +180,9 @@ impl<'a> ChangeDetector<'a> {
                     let task = dag.tasks.get(task_id);
                     let any_upstream_changed = task
                         .map(|t| {
-                            t.dependencies.iter().any(|dep| {
-                                direct_changed.contains(&dep.task_id)
-                            })
+                            t.dependencies
+                                .iter()
+                                .any(|dep| direct_changed.contains(&dep.task_id))
                         })
                         .unwrap_or(false);
 
@@ -191,7 +191,8 @@ impl<'a> ChangeDetector<'a> {
                     // If it still differs from environment, it's a direct modification.
                     let kind = if any_upstream_changed {
                         // Check if the task's own content/config changed too
-                        let own_content_changed = self.task_own_content_changed(dag_id, task_id, &env_fingerprints);
+                        let own_content_changed =
+                            self.task_own_content_changed(dag_id, task_id, &env_fingerprints);
                         if own_content_changed {
                             ChangeKind::Modified
                         } else {
@@ -203,8 +204,7 @@ impl<'a> ChangeDetector<'a> {
 
                     direct_changed.insert(task_id.clone());
 
-                    let reusable = current_fp
-                        .and_then(|fp| self.find_reusable_snapshot(fp));
+                    let reusable = current_fp.and_then(|fp| self.find_reusable_snapshot(fp));
 
                     changes.push(TaskChange {
                         dag_id: dag_id.clone(),
@@ -333,7 +333,11 @@ impl std::fmt::Display for ChangeSet {
         writeln!(f, "  Unchanged:      {} (snapshot reuse)", s.unchanged)?;
         writeln!(f, "  Added:          {}", s.added)?;
         writeln!(f, "  Modified:       {} (direct change)", s.modified)?;
-        writeln!(f, "  Invalidated:    {} (upstream change)", s.upstream_invalidated)?;
+        writeln!(
+            f,
+            "  Invalidated:    {} (upstream change)",
+            s.upstream_invalidated
+        )?;
         writeln!(f, "  Removed:        {}", s.removed)?;
         writeln!(f)?;
         writeln!(f, "  Must execute:   {} tasks", s.must_execute)?;
@@ -373,9 +377,9 @@ impl std::fmt::Display for ChangeSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use conduit_common::dag::*;
     use conduit_common::snapshot::{Environment, Snapshot};
-    use chrono::Utc;
 
     fn make_task(id: &str, deps: Vec<&str>) -> Task {
         Task {
@@ -449,7 +453,10 @@ mod tests {
     fn all_new_tasks_are_added() {
         let plan = make_plan(
             "etl",
-            vec![make_task("extract", vec![]), make_task("load", vec!["extract"])],
+            vec![
+                make_task("extract", vec![]),
+                make_task("load", vec!["extract"]),
+            ],
             vec!["extract", "load"],
         );
         let env = Environment::new("production");
@@ -464,15 +471,13 @@ mod tests {
 
     #[test]
     fn unchanged_tasks_are_detected() {
-        let plan = make_plan(
-            "etl",
-            vec![make_task("extract", vec![])],
-            vec!["extract"],
-        );
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
 
         // Compute what the fingerprint will be
         let fps = PlanFingerprinter::fingerprint_plan(&plan);
-        let fp = fps.get(&("etl".to_string(), "extract".to_string())).unwrap();
+        let fp = fps
+            .get(&("etl".to_string(), "extract".to_string()))
+            .unwrap();
 
         // Set up environment with a matching snapshot
         let store = SnapshotStore::new();
@@ -494,11 +499,7 @@ mod tests {
 
     #[test]
     fn removed_tasks_are_detected() {
-        let plan = make_plan(
-            "etl",
-            vec![make_task("extract", vec![])],
-            vec!["extract"],
-        );
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
 
         let mut env = Environment::new("production");
         env.snapshot_map.insert(

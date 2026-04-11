@@ -8,48 +8,49 @@
 pub mod sanitize;
 
 // ── SQL Providers ─────────────────────────────────────────────────────────
-pub mod postgres;
-pub mod snowflake;
-pub mod clickhouse;
-pub mod redshift;
 pub mod bigquery;
+pub mod clickhouse;
+pub mod cockroachdb;
+#[cfg(feature = "duckdb")]
 pub mod duckdb;
 pub mod mysql;
-pub mod sqlite;
 pub mod oracle;
+pub mod postgres;
+pub mod redshift;
+pub mod snowflake;
+pub mod sqlite;
 pub mod sqlserver;
-pub mod cockroachdb;
 pub mod timescaledb;
 
 // ── Storage Providers ────────────────────────────────────────────────────
-pub mod s3;
 pub mod gcs;
+pub mod s3;
 
 // ── HTTP Providers ───────────────────────────────────────────────────────
 pub mod http;
 
 // ── Stream Providers ─────────────────────────────────────────────────────
 pub mod kafka;
-pub mod rabbitmq;
 pub mod kinesis;
 pub mod pubsub;
+pub mod rabbitmq;
 pub mod redis_stream;
 
 // ── SaaS Providers ───────────────────────────────────────────────────────
-pub mod salesforce;
-pub mod hubspot;
-pub mod stripe;
 pub mod github;
+pub mod hubspot;
 pub mod jira;
+pub mod salesforce;
 pub mod slack;
+pub mod stripe;
 
 // ── Document / NoSQL Providers ───────────────────────────────────────────
-pub mod mongodb;
-pub mod dynamodb;
 pub mod cassandra;
+pub mod dynamodb;
 pub mod elasticsearch;
-pub mod redis_doc;
+pub mod mongodb;
 pub mod neo4j;
+pub mod redis_doc;
 
 /// Helper: resolve a credential string (synchronous fallback).
 ///
@@ -66,12 +67,13 @@ pub fn resolve_credential(cred: &str) -> Result<String, crate::errors::ProviderE
             connection: String::new(),
             reason: format!("Environment variable '{}' not set", var_name),
         })
-    } else if cred.starts_with("file://") {
+    } else if let Some(path) = cred.strip_prefix("file://") {
         // File reference
-        let path = &cred[7..];
-        std::fs::read_to_string(path).map_err(|e| crate::errors::ProviderError::AuthenticationFailed {
-            connection: String::new(),
-            reason: format!("Failed to read credentials file '{}': {}", path, e),
+        std::fs::read_to_string(path).map_err(|e| {
+            crate::errors::ProviderError::AuthenticationFailed {
+                connection: String::new(),
+                reason: format!("Failed to read credentials file '{}': {}", path, e),
+            }
         })
     } else {
         // Literal value
@@ -93,7 +95,10 @@ pub async fn resolve_credential_async(
 
 /// Helper: extract a string from the extra config map.
 pub fn extra_str(config: &conduit_common::config::ConnectionConfig, key: &str) -> Option<String> {
-    config.extra.get(key).and_then(|v| v.as_str().map(String::from))
+    config
+        .extra
+        .get(key)
+        .and_then(|v| v.as_str().map(String::from))
 }
 
 /// Helper: extract a u64 from the extra config map.
@@ -133,8 +138,8 @@ pub fn extra_bool(config: &conduit_common::config::ConnectionConfig, key: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use conduit_common::config::ConnectionConfig;
+    use std::collections::HashMap;
 
     fn make_config() -> ConnectionConfig {
         let mut extra = HashMap::new();

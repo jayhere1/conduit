@@ -47,11 +47,7 @@ pub async fn trigger_run(
         .ok_or_else(|| ApiError::NotFound(format!("DAG '{}' not found", dag_id)))?;
 
     let now = Utc::now();
-    let run_id = format!(
-        "run_{}_{}",
-        dag_id,
-        now.format("%Y%m%d_%H%M%S_%3f")
-    );
+    let run_id = format!("run_{}_{}", dag_id, now.format("%Y%m%d_%H%M%S_%3f"));
 
     let logical_date = body
         .logical_date

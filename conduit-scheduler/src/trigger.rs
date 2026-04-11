@@ -150,7 +150,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn create_test_dag(tasks: Vec<(String, Vec<String>)>) -> Dag {
-        use conduit_common::dag::{Task, TaskType, ResourceLimits, DependencyType, TaskDependency};
+        use conduit_common::dag::{DependencyType, ResourceLimits, Task, TaskDependency, TaskType};
 
         let mut dag_tasks = HashMap::new();
         let mut execution_order = vec![];
@@ -320,7 +320,10 @@ mod tests {
         let dag = create_test_dag(vec![
             ("task_a".to_string(), vec![]),
             ("task_b".to_string(), vec![]),
-            ("task_c".to_string(), vec!["task_a".to_string(), "task_b".to_string()]),
+            (
+                "task_c".to_string(),
+                vec!["task_a".to_string(), "task_b".to_string()],
+            ),
         ]);
 
         let mut task_states = HashMap::new();
@@ -352,7 +355,10 @@ mod tests {
         let dag = create_test_dag(vec![
             ("task_a".to_string(), vec![]),
             ("task_b".to_string(), vec![]),
-            ("task_c".to_string(), vec!["task_a".to_string(), "task_b".to_string()]),
+            (
+                "task_c".to_string(),
+                vec!["task_a".to_string(), "task_b".to_string()],
+            ),
         ]);
 
         let mut task_states = HashMap::new();

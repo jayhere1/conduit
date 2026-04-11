@@ -25,9 +25,9 @@ use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 use tokio::sync::OnceCell;
 
+use super::extra_str;
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::extra_str;
 
 pub struct KafkaProvider {
     name: String,
@@ -47,8 +47,8 @@ impl KafkaProvider {
             .host
             .clone()
             .unwrap_or_else(|| "localhost:9092".to_string());
-        let security_protocol = extra_str(config, "security_protocol")
-            .unwrap_or_else(|| "PLAINTEXT".to_string());
+        let security_protocol =
+            extra_str(config, "security_protocol").unwrap_or_else(|| "PLAINTEXT".to_string());
         let sasl_mechanism =
             extra_str(config, "sasl_mechanism").unwrap_or_else(|| "PLAIN".to_string());
         let group_id =

@@ -24,10 +24,7 @@ pub enum ContractRule {
     },
 
     /// Column must NOT exist (e.g., PII was supposed to be removed).
-    ForbiddenColumn {
-        name: String,
-        reason: String,
-    },
+    ForbiddenColumn { name: String, reason: String },
 
     /// Schema must have at most N columns.
     MaxColumns(usize),
@@ -42,10 +39,7 @@ pub enum ContractRule {
     NoUnknownTypes,
 
     /// Specific columns must have a tag (e.g., PII columns tagged as "pii").
-    ColumnMustHaveTag {
-        column_name: String,
-        tag: String,
-    },
+    ColumnMustHaveTag { column_name: String, tag: String },
 
     /// Custom predicate with a description.
     Custom {
@@ -172,7 +166,9 @@ impl ContractValidator {
         }
 
         let rules_passed = rules_checked - violations.len();
-        let passed = violations.iter().all(|v| v.severity == ViolationSeverity::Warning);
+        let passed = violations
+            .iter()
+            .all(|v| v.severity == ViolationSeverity::Warning);
 
         ContractResult {
             task_id: contract.task_id.clone(),
@@ -190,40 +186,35 @@ impl ContractValidator {
                 name,
                 expected_type,
                 must_be_not_null,
-            } => {
-                match schema.get_column(name) {
-                    None => Some(ContractViolation {
-                        rule: rule.clone(),
-                        message: format!("Required column '{}' is missing", name),
-                        severity: ViolationSeverity::Error,
-                    }),
-                    Some(col) => {
-                        if let Some(expected) = expected_type {
-                            if &col.column_type != expected {
-                                return Some(ContractViolation {
-                                    rule: rule.clone(),
-                                    message: format!(
-                                        "Column '{}' has type {}, expected {}",
-                                        name, col.column_type, expected
-                                    ),
-                                    severity: ViolationSeverity::Error,
-                                });
-                            }
-                        }
-                        if *must_be_not_null && col.nullable {
+            } => match schema.get_column(name) {
+                None => Some(ContractViolation {
+                    rule: rule.clone(),
+                    message: format!("Required column '{}' is missing", name),
+                    severity: ViolationSeverity::Error,
+                }),
+                Some(col) => {
+                    if let Some(expected) = expected_type {
+                        if &col.column_type != expected {
                             return Some(ContractViolation {
                                 rule: rule.clone(),
                                 message: format!(
-                                    "Column '{}' must be NOT NULL but is nullable",
-                                    name
+                                    "Column '{}' has type {}, expected {}",
+                                    name, col.column_type, expected
                                 ),
                                 severity: ViolationSeverity::Error,
                             });
                         }
-                        None
                     }
+                    if *must_be_not_null && col.nullable {
+                        return Some(ContractViolation {
+                            rule: rule.clone(),
+                            message: format!("Column '{}' must be NOT NULL but is nullable", name),
+                            severity: ViolationSeverity::Error,
+                        });
+                    }
+                    None
                 }
-            }
+            },
 
             ContractRule::ForbiddenColumn { name, reason } => {
                 if schema.has_column(name) {
@@ -282,10 +273,7 @@ impl ContractValidator {
                 } else {
                     Some(ContractViolation {
                         rule: rule.clone(),
-                        message: format!(
-                            "Undocumented columns: {}",
-                            undocumented.join(", ")
-                        ),
+                        message: format!("Undocumented columns: {}", undocumented.join(", ")),
                         severity: ViolationSeverity::Warning,
                     })
                 }
@@ -304,10 +292,7 @@ impl ContractValidator {
                 } else {
                     Some(ContractViolation {
                         rule: rule.clone(),
-                        message: format!(
-                            "Columns with unknown type: {}",
-                            unknown.join(", ")
-                        ),
+                        message: format!("Columns with unknown type: {}", unknown.join(", ")),
                         severity: ViolationSeverity::Error,
                     })
                 }
@@ -389,15 +374,24 @@ mod tests {
     use crate::schema::{Column, ColumnType, Schema};
 
     fn sample_schema() -> Schema {
-        Schema::new("extract_orders", vec![
-            Column::new("id", ColumnType::Integer)
-                .not_null()
-                .with_description("Primary key"),
-            Column::new("customer_id", ColumnType::Integer).not_null(),
-            Column::new("total", ColumnType::Decimal { precision: 10, scale: 2 })
+        Schema::new(
+            "extract_orders",
+            vec![
+                Column::new("id", ColumnType::Integer)
+                    .not_null()
+                    .with_description("Primary key"),
+                Column::new("customer_id", ColumnType::Integer).not_null(),
+                Column::new(
+                    "total",
+                    ColumnType::Decimal {
+                        precision: 10,
+                        scale: 2,
+                    },
+                )
                 .with_description("Order total"),
-            Column::new("status", ColumnType::String),
-        ])
+                Column::new("status", ColumnType::String),
+            ],
+        )
     }
 
     #[test]
@@ -415,8 +409,8 @@ mod tests {
     #[test]
     fn missing_required_column_fails() {
         let schema = sample_schema();
-        let contract = SchemaContract::new("extract_orders")
-            .require_column("nonexistent", None, false);
+        let contract =
+            SchemaContract::new("extract_orders").require_column("nonexistent", None, false);
 
         let result = ContractValidator::validate(&schema, &contract);
         assert!(!result.passed);
@@ -427,8 +421,11 @@ mod tests {
     #[test]
     fn wrong_type_fails() {
         let schema = sample_schema();
-        let contract = SchemaContract::new("extract_orders")
-            .require_column("id", Some(ColumnType::String), false);
+        let contract = SchemaContract::new("extract_orders").require_column(
+            "id",
+            Some(ColumnType::String),
+            false,
+        );
 
         let result = ContractValidator::validate(&schema, &contract);
         assert!(!result.passed);
@@ -437,10 +434,13 @@ mod tests {
 
     #[test]
     fn forbidden_column_detected() {
-        let schema = Schema::new("anonymized", vec![
-            Column::new("id", ColumnType::Integer),
-            Column::new("ssn", ColumnType::String), // PII that should have been removed
-        ]);
+        let schema = Schema::new(
+            "anonymized",
+            vec![
+                Column::new("id", ColumnType::Integer),
+                Column::new("ssn", ColumnType::String), // PII that should have been removed
+            ],
+        );
 
         let contract = SchemaContract::new("anonymized")
             .forbid_column("ssn", "PII must be removed before loading");
@@ -475,10 +475,13 @@ mod tests {
 
     #[test]
     fn unknown_types_detected() {
-        let schema = Schema::new("task", vec![
-            Column::new("id", ColumnType::Integer),
-            Column::new("mystery", ColumnType::Unknown),
-        ]);
+        let schema = Schema::new(
+            "task",
+            vec![
+                Column::new("id", ColumnType::Integer),
+                Column::new("mystery", ColumnType::Unknown),
+            ],
+        );
 
         let contract = SchemaContract::new("task").no_unknown_types();
         let result = ContractValidator::validate(&schema, &contract);
@@ -489,12 +492,15 @@ mod tests {
 
     #[test]
     fn nullable_violation() {
-        let schema = Schema::new("task", vec![
-            Column::new("id", ColumnType::Integer), // nullable by default
-        ]);
+        let schema = Schema::new(
+            "task",
+            vec![
+                Column::new("id", ColumnType::Integer), // nullable by default
+            ],
+        );
 
-        let contract = SchemaContract::new("task")
-            .require_column("id", Some(ColumnType::Integer), true); // require NOT NULL
+        let contract =
+            SchemaContract::new("task").require_column("id", Some(ColumnType::Integer), true); // require NOT NULL
 
         let result = ContractValidator::validate(&schema, &contract);
         assert!(!result.passed);

@@ -68,10 +68,7 @@ impl BackfillEngine {
     /// support `max_concurrent_partitions` for parallel execution.
     ///
     /// Returns a `BackfillResult` with per-partition status and timing.
-    pub fn execute(
-        request: &BackfillRequest,
-        dag: &Dag,
-    ) -> ConduitResult<BackfillResult> {
+    pub fn execute(request: &BackfillRequest, dag: &Dag) -> ConduitResult<BackfillResult> {
         let overall_start = std::time::Instant::now();
         let mut partitions = Self::compute_partitions(request);
         let total = partitions.len();
@@ -102,12 +99,7 @@ impl BackfillEngine {
 
         for (idx, partition) in partitions.iter_mut().enumerate() {
             // Build the environment variables for this partition
-            let _env_vars = Self::partition_env_vars(
-                request,
-                partition,
-                idx,
-                total,
-            );
+            let _env_vars = Self::partition_env_vars(request, partition, idx, total);
 
             // In v0.1, we simulate execution by marking partitions as success.
             // Real execution would dispatch through the scheduler/executor.
@@ -201,14 +193,32 @@ impl BackfillEngine {
 
         vec![
             ("CONDUIT_BACKFILL_ID".to_string(), backfill_id),
-            ("CONDUIT_PARTITION_KEY".to_string(), partition.partition_key.clone()),
-            ("CONDUIT_PARTITION_START".to_string(), partition.logical_start.to_rfc3339()),
-            ("CONDUIT_PARTITION_END".to_string(), partition.logical_end.to_rfc3339()),
-            ("CONDUIT_LOGICAL_DATE".to_string(), partition.logical_start.to_rfc3339()),
+            (
+                "CONDUIT_PARTITION_KEY".to_string(),
+                partition.partition_key.clone(),
+            ),
+            (
+                "CONDUIT_PARTITION_START".to_string(),
+                partition.logical_start.to_rfc3339(),
+            ),
+            (
+                "CONDUIT_PARTITION_END".to_string(),
+                partition.logical_end.to_rfc3339(),
+            ),
+            (
+                "CONDUIT_LOGICAL_DATE".to_string(),
+                partition.logical_start.to_rfc3339(),
+            ),
             ("CONDUIT_TOTAL_PARTITIONS".to_string(), total.to_string()),
             ("CONDUIT_PARTITION_INDEX".to_string(), index.to_string()),
-            ("CONDUIT_FULL_REFRESH".to_string(), request.full_refresh.to_string()),
-            ("CONDUIT_ENVIRONMENT".to_string(), request.environment.clone()),
+            (
+                "CONDUIT_FULL_REFRESH".to_string(),
+                request.full_refresh.to_string(),
+            ),
+            (
+                "CONDUIT_ENVIRONMENT".to_string(),
+                request.environment.clone(),
+            ),
         ]
     }
 }
@@ -216,8 +226,8 @@ impl BackfillEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use conduit_common::dag::Dag;
+    use std::collections::HashMap;
 
     fn make_dummy_dag(id: &str) -> Dag {
         Dag {

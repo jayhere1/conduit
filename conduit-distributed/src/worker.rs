@@ -23,7 +23,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use sysinfo::System;
 use tokio::sync::{mpsc, RwLock, Semaphore};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::proto_types::*;
 
@@ -47,7 +47,11 @@ impl SystemMetrics {
         let cpu = self.sys.global_cpu_usage() as f64;
         let total_mem = self.sys.total_memory() as f64;
         let used_mem = self.sys.used_memory() as f64;
-        let mem = if total_mem > 0.0 { (used_mem / total_mem) * 100.0 } else { 0.0 };
+        let mem = if total_mem > 0.0 {
+            (used_mem / total_mem) * 100.0
+        } else {
+            0.0
+        };
         // Disk metrics via sysinfo::Disks
         let disks = sysinfo::Disks::new_with_refreshed_list();
         let (total_disk, avail_disk) = disks.iter().fold((0u64, 0u64), |(t, a), d| {
@@ -310,28 +314,27 @@ impl Worker {
         });
 
         // Build the execution command based on task type.
-        let (outcome, exit_code, error_msg, xcom, metrics) =
-            match assignment.spec.task_type {
-                TaskType::Bash => {
-                    Self::execute_bash(&assignment.spec, assignment_id, log_tx, worker_id).await
-                }
-                TaskType::Python => {
-                    Self::execute_python(&assignment.spec, assignment_id, log_tx, worker_id).await
-                }
-                TaskType::Sql => {
-                    Self::execute_sql(&assignment.spec, assignment_id, log_tx, worker_id).await
-                }
-                TaskType::Executable => {
-                    Self::execute_executable(&assignment.spec, assignment_id, log_tx, worker_id).await
-                }
-                _ => (
-                    TaskOutcome::Failed,
-                    -1,
-                    format!("Unsupported task type: {:?}", assignment.spec.task_type),
-                    String::new(),
-                    HashMap::new(),
-                ),
-            };
+        let (outcome, exit_code, error_msg, xcom, metrics) = match assignment.spec.task_type {
+            TaskType::Bash => {
+                Self::execute_bash(&assignment.spec, assignment_id, log_tx, worker_id).await
+            }
+            TaskType::Python => {
+                Self::execute_python(&assignment.spec, assignment_id, log_tx, worker_id).await
+            }
+            TaskType::Sql => {
+                Self::execute_sql(&assignment.spec, assignment_id, log_tx, worker_id).await
+            }
+            TaskType::Executable => {
+                Self::execute_executable(&assignment.spec, assignment_id, log_tx, worker_id).await
+            }
+            _ => (
+                TaskOutcome::Failed,
+                -1,
+                format!("Unsupported task type: {:?}", assignment.spec.task_type),
+                String::new(),
+                HashMap::new(),
+            ),
+        };
 
         let duration = started.elapsed().as_millis() as u64;
 
@@ -636,10 +639,7 @@ mod hostname {
 
     pub fn get() -> Result<OsString, std::io::Error> {
         let name = std::env::var("HOSTNAME")
-            .or_else(|_| {
-                std::fs::read_to_string("/etc/hostname")
-                    .map(|s| s.trim().to_string())
-            })
+            .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
             .unwrap_or_else(|_| "unknown".into());
         Ok(OsString::from(name))
     }
@@ -649,7 +649,11 @@ mod hostname {
 mod tests {
     use super::*;
 
-    fn make_worker() -> (Worker, mpsc::UnboundedReceiver<TaskResult>, mpsc::UnboundedReceiver<TaskLogEntry>) {
+    fn make_worker() -> (
+        Worker,
+        mpsc::UnboundedReceiver<TaskResult>,
+        mpsc::UnboundedReceiver<TaskLogEntry>,
+    ) {
         Worker::new(WorkerConfig {
             worker_id: "test-worker".to_string(),
             coordinator_addr: "localhost:9400".to_string(),

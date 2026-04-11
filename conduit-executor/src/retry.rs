@@ -116,9 +116,10 @@ pub fn parse_duration(input: &str) -> ConduitResult<Duration> {
     }
 
     // Check multi-char suffixes first
-    if input.ends_with("ms") {
-        let num_str = &input[..input.len() - 2];
-        let value = num_str.trim().parse::<f64>()
+    if let Some(num_str) = input.strip_suffix("ms") {
+        let value = num_str
+            .trim()
+            .parse::<f64>()
             .map_err(|_| ConduitError::ConfigError(format!("Invalid duration value: {}", input)))?;
         let duration = Duration::from_millis(value as u64);
         trace!(input = %input, duration_ms = duration.as_millis(), "Parsed duration");
@@ -228,10 +229,7 @@ mod tests {
 
     #[test]
     fn test_parse_duration_whitespace() {
-        assert_eq!(
-            parse_duration("  30s  ").unwrap(),
-            Duration::from_secs(30)
-        );
+        assert_eq!(parse_duration("  30s  ").unwrap(), Duration::from_secs(30));
         assert_eq!(parse_duration("5 m").unwrap(), Duration::from_secs(300));
     }
 

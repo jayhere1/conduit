@@ -16,9 +16,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use conduit_lineage::{
-    CatalogColumn, ColumnRef, ColumnType, Column, LineageGraph, Schema,
-    SchemaChangeDetector, SchemaContract, ContractValidator, SqlLineageExtractor,
-    TableCatalog, parse_sql_type,
+    parse_sql_type, CatalogColumn, Column, ColumnRef, ColumnType, ContractValidator, LineageGraph,
+    Schema, SchemaChangeDetector, SchemaContract, SqlLineageExtractor, TableCatalog,
 };
 use conduit_providers::registry::ProviderInstance;
 
@@ -257,8 +256,7 @@ pub async fn refresh_catalog(
                     let cat_columns = columns
                         .into_iter()
                         .map(|c| {
-                            let mut col =
-                                CatalogColumn::new(&c.name, parse_sql_type(&c.data_type));
+                            let mut col = CatalogColumn::new(&c.name, parse_sql_type(&c.data_type));
                             if !c.is_nullable {
                                 col = col.not_null();
                             }
@@ -269,10 +267,7 @@ pub async fn refresh_catalog(
                     tables_registered += 1;
                 }
                 Err(e) => {
-                    errors.push(format!(
-                        "{}.{}: {}",
-                        schema, table_name, e
-                    ));
+                    errors.push(format!("{}.{}: {}", schema, table_name, e));
                 }
             }
         }
@@ -480,9 +475,9 @@ async fn build_catalog_from_provider(
         let registry = guard
             .as_ref()
             .ok_or_else(|| ApiError::NotFound("Provider registry not initialized".into()))?;
-        let instance = registry.get(connection).ok_or_else(|| {
-            ApiError::NotFound(format!("Connection '{}' not found", connection))
-        })?;
+        let instance = registry
+            .get(connection)
+            .ok_or_else(|| ApiError::NotFound(format!("Connection '{}' not found", connection)))?;
         match instance {
             ProviderInstance::Sql(p) => p.clone(),
             _ => {

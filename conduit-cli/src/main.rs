@@ -1,3 +1,4 @@
+#![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 //! Conduit CLI: the main binary entry point.
 //!
 //! Usage:
@@ -368,6 +369,58 @@ enum Commands {
         #[command(subcommand)]
         action: ClusterCommands,
     },
+
+    /// Run SQL queries locally (powered by DuckDB)
+    Query {
+        /// SQL query to execute
+        sql: String,
+
+        /// Named connection from conduit.yaml (default: ephemeral in-memory DuckDB)
+        #[arg(short, long)]
+        connection: Option<String>,
+
+        /// Query a local file (Parquet, CSV, JSON) — registers it as a table
+        #[arg(short, long)]
+        file: Option<Vec<PathBuf>>,
+
+        /// Run setup SQL before the main query (e.g. CREATE TABLE statements)
+        #[arg(short, long)]
+        setup: Option<Vec<String>>,
+
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+
+        /// Maximum rows to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
+
+        /// Path to conduit.yaml (for connection resolution)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+
+    /// Preview a SQL task's output locally
+    Preview {
+        /// Task reference: dag_id.task_id
+        task_ref: String,
+
+        /// Path to DAG definitions
+        #[arg(short, long, default_value = "./dags")]
+        dags_path: PathBuf,
+
+        /// Override connection (default: ephemeral DuckDB)
+        #[arg(short, long)]
+        connection: Option<String>,
+
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+
+        /// Maximum rows to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -438,54 +491,153 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { name } => cmd_init(&name),
-        Commands::Compile { path, output, check } => cmd_compile(&path, output.as_deref(), check),
-        Commands::Run { dag_id, dags_path, date, max_tasks, full_refresh, distributed, bind } => {
+        Commands::Compile {
+            path,
+            output,
+            check,
+        } => cmd_compile(&path, output.as_deref(), check),
+        Commands::Run {
+            dag_id,
+            dags_path,
+            date,
+            max_tasks,
+            full_refresh,
+            distributed,
+            bind,
+        } => {
             if distributed {
-                println!("Starting in distributed mode (coordinator: {})", bind.as_deref().unwrap_or("0.0.0.0:9400"));
-                println!("Workers can connect with: conduit worker --coordinator {}", bind.as_deref().unwrap_or("0.0.0.0:9400"));
+                println!(
+                    "Starting in distributed mode (coordinator: {})",
+                    bind.as_deref().unwrap_or("0.0.0.0:9400")
+                );
+                println!(
+                    "Workers can connect with: conduit worker --coordinator {}",
+                    bind.as_deref().unwrap_or("0.0.0.0:9400")
+                );
             }
-            rt.block_on(cmd_run(&dag_id, &dags_path, date.as_deref(), max_tasks, full_refresh))
+            rt.block_on(cmd_run(
+                &dag_id,
+                &dags_path,
+                date.as_deref(),
+                max_tasks,
+                full_refresh,
+            ))
         }
-        Commands::Plan { environment, dags_path, output } => {
-            cmd_plan(&environment, &dags_path, output.as_deref())
-        }
-        Commands::Apply { environment, dags_path, plan_file, auto_approve, full_refresh } => {
-            rt.block_on(cmd_apply(&environment, &dags_path, plan_file.as_deref(), auto_approve, full_refresh))
-        }
-        Commands::Serve { host, port, dags_path, state_dir, auth_enabled } => {
-            rt.block_on(cmd_serve(&host, port, &dags_path, &state_dir, auth_enabled))
-        }
+        Commands::Plan {
+            environment,
+            dags_path,
+            output,
+        } => cmd_plan(&environment, &dags_path, output.as_deref()),
+        Commands::Apply {
+            environment,
+            dags_path,
+            plan_file,
+            auto_approve,
+            full_refresh,
+        } => rt.block_on(cmd_apply(
+            &environment,
+            &dags_path,
+            plan_file.as_deref(),
+            auto_approve,
+            full_refresh,
+        )),
+        Commands::Serve {
+            host,
+            port,
+            dags_path,
+            state_dir,
+            auth_enabled,
+        } => rt.block_on(cmd_serve(&host, port, &dags_path, &state_dir, auth_enabled)),
         Commands::Status { env, dags_path } => cmd_status(env.as_deref(), &dags_path),
         Commands::Env { action, dags_path } => match action {
             EnvCommands::Create { name, from } => cmd_env_create(&name, &from, &dags_path),
             EnvCommands::List => cmd_env_list(&dags_path),
-            EnvCommands::Promote { source, target } => cmd_env_promote(&source, &target, &dags_path),
-        },
-        Commands::Replay { to, from, dags_path, json, events_only } => {
-            cmd_replay(to, from, &dags_path, json, events_only)
-        }
-        Commands::Migrate { source, output, dry_run } => {
-            cmd_migrate(&source, &output, dry_run)
-        }
-
-        Commands::Backfill { dag_id, start, end, granularity, max_concurrent, full_refresh, dry_run, env, dags_path } => {
-            rt.block_on(cmd_backfill(&dag_id, &start, &end, &granularity, max_concurrent, full_refresh, dry_run, &env, &dags_path))
-        }
-
-        Commands::Worker { coordinator, capacity, pools, id, labels } => {
-            cmd_worker(&coordinator, capacity, &pools, id.as_deref(), &labels)
-        }
-
-        Commands::Cluster { action } => {
-            match action {
-                ClusterCommands::Status { coordinator, json } => {
-                    cmd_cluster_status(&coordinator, json)
-                }
-                ClusterCommands::Drain { worker_id, coordinator } => {
-                    cmd_cluster_drain(&coordinator, &worker_id)
-                }
+            EnvCommands::Promote { source, target } => {
+                cmd_env_promote(&source, &target, &dags_path)
             }
-        }
+        },
+        Commands::Replay {
+            to,
+            from,
+            dags_path,
+            json,
+            events_only,
+        } => cmd_replay(to, from, &dags_path, json, events_only),
+        Commands::Migrate {
+            source,
+            output,
+            dry_run,
+        } => cmd_migrate(&source, &output, dry_run),
+
+        Commands::Backfill {
+            dag_id,
+            start,
+            end,
+            granularity,
+            max_concurrent,
+            full_refresh,
+            dry_run,
+            env,
+            dags_path,
+        } => rt.block_on(cmd_backfill(
+            &dag_id,
+            &start,
+            &end,
+            &granularity,
+            max_concurrent,
+            full_refresh,
+            dry_run,
+            &env,
+            &dags_path,
+        )),
+
+        Commands::Worker {
+            coordinator,
+            capacity,
+            pools,
+            id,
+            labels,
+        } => cmd_worker(&coordinator, capacity, &pools, id.as_deref(), &labels),
+
+        Commands::Cluster { action } => match action {
+            ClusterCommands::Status { coordinator, json } => cmd_cluster_status(&coordinator, json),
+            ClusterCommands::Drain {
+                worker_id,
+                coordinator,
+            } => cmd_cluster_drain(&coordinator, &worker_id),
+        },
+
+        Commands::Query {
+            sql,
+            connection,
+            file,
+            setup,
+            format,
+            limit,
+            config,
+        } => rt.block_on(cmd_query(
+            &sql,
+            connection.as_deref(),
+            file,
+            setup,
+            &format,
+            limit,
+            config,
+        )),
+
+        Commands::Preview {
+            task_ref,
+            dags_path,
+            connection,
+            format,
+            limit,
+        } => rt.block_on(cmd_preview(
+            &task_ref,
+            &dags_path,
+            connection.as_deref(),
+            &format,
+            limit,
+        )),
     }
 }
 
@@ -611,7 +763,11 @@ fn cmd_compile(path: &PathBuf, output: Option<&Path>, check: bool) -> Result<()>
         );
         for task_id in &dag.execution_order {
             let task = &dag.tasks[task_id];
-            let deps: Vec<&str> = task.dependencies.iter().map(|d| d.task_id.as_str()).collect();
+            let deps: Vec<&str> = task
+                .dependencies
+                .iter()
+                .map(|d| d.task_id.as_str())
+                .collect();
             if deps.is_empty() {
                 println!("    {} (root)", task_id);
             } else {
@@ -642,12 +798,18 @@ fn cmd_compile(path: &PathBuf, output: Option<&Path>, check: bool) -> Result<()>
 // ─── conduit run ─────────────────────────────────────────────────────────────
 // Compiles DAGs, schedules one, and executes tasks via real ProcessRunner.
 
-async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tasks: usize, _full_refresh: bool) -> Result<()> {
-    use std::collections::HashMap;
+async fn cmd_run(
+    dag_id: &str,
+    dags_path: &PathBuf,
+    date: Option<&str>,
+    _max_tasks: usize,
+    _full_refresh: bool,
+) -> Result<()> {
     use chrono::Utc;
-    use conduit_scheduler::scheduler::{Scheduler, SchedulerEvent, SchedulerCommand};
-    use conduit_scheduler::pool_manager::PoolManager;
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
+    use conduit_scheduler::pool_manager::PoolManager;
+    use conduit_scheduler::scheduler::{Scheduler, SchedulerCommand, SchedulerEvent};
+    use std::collections::HashMap;
 
     let start = Instant::now();
 
@@ -663,17 +825,22 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
         std::process::exit(1);
     }
 
-    let dag = plan.dags.get(dag_id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "DAG '{}' not found. Available DAGs: {}",
-            dag_id,
-            plan.dags.keys().cloned().collect::<Vec<_>>().join(", ")
-        )
-    })?.clone();
+    let dag = plan
+        .dags
+        .get(dag_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "DAG '{}' not found. Available DAGs: {}",
+                dag_id,
+                plan.dags.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?
+        .clone();
 
     println!(
         "  Compiled {} DAGs ({} tasks) in {:.1}ms",
-        stats.dags_compiled, stats.tasks_total,
+        stats.dags_compiled,
+        stats.tasks_total,
         start.elapsed().as_secs_f64() * 1000.0
     );
     println!();
@@ -711,9 +878,7 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
     })?;
 
     // Spawn scheduler
-    let scheduler_handle = tokio::spawn(async move {
-        scheduler.run().await
-    });
+    let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
 
     // Executor loop: receives SchedulerCommands, runs real processes
     let executor_event_tx = event_tx.clone();
@@ -725,7 +890,12 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
 
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                SchedulerCommand::DispatchTask { dag_id, run_id, task_id, attempt } => {
+                SchedulerCommand::DispatchTask {
+                    dag_id,
+                    run_id,
+                    task_id,
+                    attempt,
+                } => {
                     println!("  [RUN]   {} (attempt {})", task_id, attempt);
 
                     // Look up the actual task definition
@@ -734,7 +904,9 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
                         None => {
                             eprintln!("  [ERR]   {} — task definition not found", task_id);
                             let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                dag_id, run_id, task_id,
+                                dag_id,
+                                run_id,
+                                task_id,
                                 error: "Task definition not found".to_string(),
                                 attempt,
                             });
@@ -765,7 +937,8 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
                                     "  [OK]    {} ({:.0}ms, exit 0) [{}/{}]",
                                     task_id,
                                     duration.as_secs_f64() * 1000.0,
-                                    completed, total
+                                    completed,
+                                    total
                                 );
                                 // Print captured stdout (trimmed)
                                 let trimmed = output.stdout.trim();
@@ -776,14 +949,18 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
                                 }
 
                                 let _ = executor_event_tx.send(SchedulerEvent::TaskCompleted {
-                                    dag_id, run_id, task_id,
+                                    dag_id,
+                                    run_id,
+                                    task_id,
                                     snapshot_id: None,
                                     duration_ms: duration.as_millis() as u64,
                                 });
                             } else if output.exit_code == 2 {
                                 println!("  [RETRY] {} (exit 2)", task_id);
                                 let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id, run_id, task_id,
+                                    dag_id,
+                                    run_id,
+                                    task_id,
                                     error: format!("exit code 2 (retry): {}", output.stderr.trim()),
                                     attempt,
                                 });
@@ -791,9 +968,11 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
                                 _failed = true;
                                 println!(
                                     "  [FAIL]  {} (exit {}, {:.0}ms) [{}/{}]",
-                                    task_id, output.exit_code,
+                                    task_id,
+                                    output.exit_code,
                                     duration.as_secs_f64() * 1000.0,
-                                    completed, total
+                                    completed,
+                                    total
                                 );
                                 if !output.stderr.trim().is_empty() {
                                     for line in output.stderr.trim().lines().take(5) {
@@ -801,7 +980,9 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
                                     }
                                 }
                                 let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id, run_id, task_id,
+                                    dag_id,
+                                    run_id,
+                                    task_id,
                                     error: output.stderr.trim().to_string(),
                                     attempt,
                                 });
@@ -812,23 +993,28 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
                             completed += 1;
                             println!("  [ERR]   {} — {}", task_id, e);
                             let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                dag_id, run_id, task_id,
+                                dag_id,
+                                run_id,
+                                task_id,
                                 error: e.to_string(),
                                 attempt,
                             });
                         }
                     }
                 }
-                SchedulerCommand::CompleteDagRun { dag_id, run_id, status } => {
+                SchedulerCommand::CompleteDagRun {
+                    dag_id,
+                    run_id,
+                    status,
+                } => {
                     println!();
-                    println!(
-                        "DAG '{}' run '{}' completed: {:?}",
-                        dag_id, run_id, status
-                    );
+                    println!("DAG '{}' run '{}' completed: {:?}", dag_id, run_id, status);
                     let _ = executor_event_tx.send(SchedulerEvent::Shutdown);
                     break;
                 }
-                SchedulerCommand::SkipTask { task_id, reason, .. } => {
+                SchedulerCommand::SkipTask {
+                    task_id, reason, ..
+                } => {
                     println!("  [SKIP]  {} ({})", task_id, reason);
                     completed += 1;
                 }
@@ -842,10 +1028,7 @@ async fn cmd_run(dag_id: &str, dags_path: &PathBuf, date: Option<&str>, _max_tas
     let _ = tokio::join!(scheduler_handle, executor_handle);
 
     let total_duration = start.elapsed();
-    println!(
-        "Total time: {:.1}ms",
-        total_duration.as_secs_f64() * 1000.0
-    );
+    println!("Total time: {:.1}ms", total_duration.as_secs_f64() * 1000.0);
 
     Ok(())
 }
@@ -859,7 +1042,10 @@ fn cmd_plan(environment: &str, dags_path: &PathBuf, output: Option<&Path>) -> Re
     let start = Instant::now();
     let state_dir = resolve_state_dir(dags_path);
 
-    println!("Comparing local DAGs against '{}' environment...", environment);
+    println!(
+        "Comparing local DAGs against '{}' environment...",
+        environment
+    );
     println!();
 
     let (plan, stats) = ConduitPlan::compile(dags_path)?;
@@ -880,16 +1066,21 @@ fn cmd_plan(environment: &str, dags_path: &PathBuf, output: Option<&Path>) -> Re
 
     // Load persistent state
     let state = PersistentState::open(&state_dir)?;
-    let env = state.env_manager.get(environment).unwrap_or_else(|_| {
-        conduit_common::snapshot::Environment::new(environment)
-    });
+    let env = state
+        .env_manager
+        .get(environment)
+        .unwrap_or_else(|_| conduit_common::snapshot::Environment::new(environment));
 
     let deploy = DeploymentPlan::generate(&plan, &env, &state.snapshot_store);
     println!("{}", deploy);
 
     // Show contract summary
     if deploy.has_contracts() {
-        let total_checks: usize = deploy.pending_contracts.iter().map(|c| c.checks.len()).sum();
+        let total_checks: usize = deploy
+            .pending_contracts
+            .iter()
+            .map(|c| c.checks.len())
+            .sum();
         println!(
             "  Contracts:       {} checks across {} tasks (validated during apply)",
             total_checks,
@@ -905,10 +1096,17 @@ fn cmd_plan(environment: &str, dags_path: &PathBuf, output: Option<&Path>) -> Re
         deploy.save(out_path)?;
         println!();
         println!("Plan saved to {}", out_path.display());
-        println!("Run 'conduit apply {} --plan-file {}' to execute.", environment, out_path.display());
+        println!(
+            "Run 'conduit apply {} --plan-file {}' to execute.",
+            environment,
+            out_path.display()
+        );
     } else {
         println!();
-        println!("Run 'conduit apply {}' to execute these changes.", environment);
+        println!(
+            "Run 'conduit apply {}' to execute these changes.",
+            environment
+        );
     }
 
     Ok(())
@@ -924,8 +1122,8 @@ async fn cmd_apply(
     auto_approve: bool,
     _full_refresh: bool,
 ) -> Result<()> {
-    use conduit_planner::{DeploymentPlan, ActionKind};
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
+    use conduit_planner::{ActionKind, DeploymentPlan};
     use std::collections::HashMap;
 
     let start = Instant::now();
@@ -951,9 +1149,10 @@ async fn cmd_apply(
         println!("Generating deployment plan for '{}'...", environment);
         println!();
 
-        let env = state.env_manager.get(environment).unwrap_or_else(|_| {
-            conduit_common::snapshot::Environment::new(environment)
-        });
+        let env = state
+            .env_manager
+            .get(environment)
+            .unwrap_or_else(|_| conduit_common::snapshot::Environment::new(environment));
 
         let deploy = DeploymentPlan::generate(&plan, &env, &state.snapshot_store);
         println!("{}", deploy);
@@ -961,7 +1160,10 @@ async fn cmd_apply(
     };
 
     if deploy.stats.tasks_to_execute == 0 && deploy.stats.tasks_to_remove == 0 {
-        println!("Nothing to apply. Environment '{}' is up to date.", environment);
+        println!(
+            "Nothing to apply. Environment '{}' is up to date.",
+            environment
+        );
         return Ok(());
     }
 
@@ -977,11 +1179,10 @@ async fn cmd_apply(
         // Read stdin for confirmation
         println!("Proceed? [y/N] ");
         let mut input = String::new();
-        if std::io::stdin().read_line(&mut input).is_ok() {
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Aborted.");
-                return Ok(());
-            }
+        if std::io::stdin().read_line(&mut input).is_ok() && !input.trim().eq_ignore_ascii_case("y")
+        {
+            println!("Aborted.");
+            return Ok(());
         }
     }
 
@@ -999,14 +1200,18 @@ async fn cmd_apply(
         match &action.action {
             ActionKind::Execute => {
                 // Look up the task in the compiled plan
-                let task = plan.dags
+                let task = plan
+                    .dags
                     .get(&action.dag_id)
                     .and_then(|dag| dag.tasks.get(&action.task_id));
 
                 let task = match task {
                     Some(t) => t,
                     None => {
-                        eprintln!("  [ERR]   {}.{} — task not found in plan", action.dag_id, action.task_id);
+                        eprintln!(
+                            "  [ERR]   {}.{} — task not found in plan",
+                            action.dag_id, action.task_id
+                        );
                         continue;
                     }
                 };
@@ -1049,12 +1254,13 @@ async fn cmd_apply(
                                 let _ = state.snapshot_store.put(snapshot);
                             }
 
-                            new_snapshots.insert(
-                                (action.dag_id.clone(), action.task_id.clone()),
-                                snap_id,
-                            );
+                            new_snapshots
+                                .insert((action.dag_id.clone(), action.task_id.clone()), snap_id);
                             executed += 1;
-                            println!("  [OK]    {}.{} ({:.0}ms)", action.dag_id, action.task_id, duration_ms);
+                            println!(
+                                "  [OK]    {}.{} ({:.0}ms)",
+                                action.dag_id, action.task_id, duration_ms
+                            );
                         } else {
                             eprintln!(
                                 "  [FAIL]  {}.{} (exit {}, {:.0}ms)",
@@ -1079,7 +1285,8 @@ async fn cmd_apply(
             ActionKind::ReuseSnapshot { snapshot_id } => {
                 println!(
                     "  [REUSE] {}.{} -> {}",
-                    action.dag_id, action.task_id,
+                    action.dag_id,
+                    action.task_id,
                     &snapshot_id[..snapshot_id.len().min(12)]
                 );
                 reused += 1;
@@ -1095,9 +1302,10 @@ async fn cmd_apply(
     }
 
     // Update environment with new snapshot pointers
-    let mut env = state.env_manager.get(environment).unwrap_or_else(|_| {
-        conduit_common::snapshot::Environment::new(environment)
-    });
+    let mut env = state
+        .env_manager
+        .get(environment)
+        .unwrap_or_else(|_| conduit_common::snapshot::Environment::new(environment));
 
     deploy.apply_to_environment(&mut env, &new_snapshots);
 
@@ -1114,7 +1322,8 @@ async fn cmd_apply(
     println!();
     println!(
         "Environment '{}' updated ({} snapshot pointers).",
-        environment, env.snapshot_map.len()
+        environment,
+        env.snapshot_map.len()
     );
 
     Ok(())
@@ -1122,14 +1331,23 @@ async fn cmd_apply(
 
 // ─── conduit serve ───────────────────────────────────────────────────────────
 
-async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathBuf, auth_enabled: bool) -> Result<()> {
+async fn cmd_serve(
+    host: &str,
+    port: u16,
+    dags_path: &PathBuf,
+    state_dir: &PathBuf,
+    auth_enabled: bool,
+) -> Result<()> {
     use std::net::SocketAddr;
 
     println!("Starting Conduit API server...");
     println!();
 
     if !dags_path.exists() {
-        eprintln!("Warning: DAGs path '{}' does not exist", dags_path.display());
+        eprintln!(
+            "Warning: DAGs path '{}' does not exist",
+            dags_path.display()
+        );
     }
 
     std::fs::create_dir_all(state_dir)?;
@@ -1143,9 +1361,16 @@ async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathB
     println!("  Health:      http://{}/api/v1/health", addr);
 
     // Check for UI assets directory (set via CONDUIT_UI_DIR env var)
-    let ui_dir = std::env::var("CONDUIT_UI_DIR").ok().map(PathBuf::from).filter(|p| p.exists());
+    let ui_dir = std::env::var("CONDUIT_UI_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists());
     if let Some(ref dir) = ui_dir {
-        println!("  UI:          http://{}/  (serving from {})", addr, dir.display());
+        println!(
+            "  UI:          http://{}/  (serving from {})",
+            addr,
+            dir.display()
+        );
     }
 
     // Authentication setup
@@ -1172,26 +1397,36 @@ async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathB
         println!("  │                                                     │");
         println!("  │  {}  │", bootstrap_key);
         println!("  │                                                     │");
-        println!("  │  Use: Authorization: Bearer {}  │", &bootstrap_key[..20]);
+        println!(
+            "  │  Use: Authorization: Bearer {}  │",
+            &bootstrap_key[..20]
+        );
         println!("  └─────────────────────────────────────────────────────┘");
         println!();
     }
 
     // Seed realistic demo run history so the UI has data to display immediately
     state.seed_demo_data();
-    println!("  Demo data:   seeded {} historical runs", state.get_runs(None).len());
+    println!(
+        "  Demo data:   seeded {} historical runs",
+        state.get_runs(None).len()
+    );
 
     // ── Wire up scheduler + executor so API-triggered runs actually execute ──
     {
-        use std::collections::HashMap;
-        use conduit_scheduler::{Scheduler, SchedulerEvent, SchedulerCommand, RunStatus, PoolManager};
         use conduit_executor::process_runner::{ProcessRunner, TaskContext};
+        use conduit_scheduler::{
+            PoolManager, RunStatus, Scheduler, SchedulerCommand, SchedulerEvent,
+        };
+        use std::collections::HashMap;
 
         // Compile DAGs so the scheduler knows about them
         let dag_map = match ConduitPlan::compile(dags_path) {
             Ok((plan, stats)) => {
-                println!("  Scheduler:   {} DAGs loaded ({} tasks)",
-                    stats.dags_compiled, stats.tasks_total);
+                println!(
+                    "  Scheduler:   {} DAGs loaded ({} tasks)",
+                    stats.dags_compiled, stats.tasks_total
+                );
                 plan.dags
             }
             Err(e) => {
@@ -1220,15 +1455,23 @@ async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathB
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    SchedulerCommand::DispatchTask { dag_id, run_id, task_id, attempt } => {
-                        let task = match exec_dag_map.get(&dag_id)
+                    SchedulerCommand::DispatchTask {
+                        dag_id,
+                        run_id,
+                        task_id,
+                        attempt,
+                    } => {
+                        let task = match exec_dag_map
+                            .get(&dag_id)
                             .and_then(|d| d.tasks.get(&task_id))
                         {
                             Some(t) => t.clone(),
                             None => {
                                 tracing::error!(dag = %dag_id, task = %task_id, "Task definition not found");
                                 let _ = exec_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id, run_id, task_id,
+                                    dag_id,
+                                    run_id,
+                                    task_id,
                                     error: "Task definition not found".into(),
                                     attempt,
                                 });
@@ -1238,11 +1481,14 @@ async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathB
 
                         // Mark task as running
                         update_run_task_state(&exec_state, &run_id, &task_id, "running");
-                        exec_state.broadcast_event(&serde_json::json!({
-                            "type": "task_state_changed",
-                            "dagId": dag_id, "runId": run_id,
-                            "taskId": task_id, "state": "running",
-                        }).to_string());
+                        exec_state.broadcast_event(
+                            &serde_json::json!({
+                                "type": "task_state_changed",
+                                "dagId": dag_id, "runId": run_id,
+                                "taskId": task_id, "state": "running",
+                            })
+                            .to_string(),
+                        );
 
                         let context = TaskContext {
                             dag_id: dag_id.clone(),
@@ -1264,69 +1510,118 @@ async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathB
                                 Ok(output) => {
                                     let duration = task_start.elapsed();
                                     if output.exit_code == 0 {
-                                        update_run_task_state(&spawn_state, &run_id, &task_id, "success");
-                                        spawn_state.broadcast_event(&serde_json::json!({
-                                            "type": "task_state_changed",
-                                            "dagId": dag_id, "runId": run_id,
-                                            "taskId": task_id, "state": "success",
-                                            "durationMs": duration.as_millis() as u64,
-                                        }).to_string());
-                                        let _ = spawn_event_tx.send(SchedulerEvent::TaskCompleted {
-                                            dag_id, run_id, task_id,
-                                            snapshot_id: None,
-                                            duration_ms: duration.as_millis() as u64,
-                                        });
+                                        update_run_task_state(
+                                            &spawn_state,
+                                            &run_id,
+                                            &task_id,
+                                            "success",
+                                        );
+                                        spawn_state.broadcast_event(
+                                            &serde_json::json!({
+                                                "type": "task_state_changed",
+                                                "dagId": dag_id, "runId": run_id,
+                                                "taskId": task_id, "state": "success",
+                                                "durationMs": duration.as_millis() as u64,
+                                            })
+                                            .to_string(),
+                                        );
+                                        let _ =
+                                            spawn_event_tx.send(SchedulerEvent::TaskCompleted {
+                                                dag_id,
+                                                run_id,
+                                                task_id,
+                                                snapshot_id: None,
+                                                duration_ms: duration.as_millis() as u64,
+                                            });
                                     } else {
                                         let err = output.stderr.trim().to_string();
-                                        update_run_task_state(&spawn_state, &run_id, &task_id, "failed");
-                                        spawn_state.broadcast_event(&serde_json::json!({
-                                            "type": "task_state_changed",
-                                            "dagId": dag_id, "runId": run_id,
-                                            "taskId": task_id, "state": "failed",
-                                            "error": err,
-                                        }).to_string());
+                                        update_run_task_state(
+                                            &spawn_state,
+                                            &run_id,
+                                            &task_id,
+                                            "failed",
+                                        );
+                                        spawn_state.broadcast_event(
+                                            &serde_json::json!({
+                                                "type": "task_state_changed",
+                                                "dagId": dag_id, "runId": run_id,
+                                                "taskId": task_id, "state": "failed",
+                                                "error": err,
+                                            })
+                                            .to_string(),
+                                        );
                                         let _ = spawn_event_tx.send(SchedulerEvent::TaskFailed {
-                                            dag_id, run_id, task_id, error: err, attempt,
+                                            dag_id,
+                                            run_id,
+                                            task_id,
+                                            error: err,
+                                            attempt,
                                         });
                                     }
                                 }
                                 Err(e) => {
-                                    update_run_task_state(&spawn_state, &run_id, &task_id, "failed");
-                                    spawn_state.broadcast_event(&serde_json::json!({
-                                        "type": "task_state_changed",
-                                        "dagId": dag_id, "runId": run_id,
-                                        "taskId": task_id, "state": "failed",
-                                        "error": e.to_string(),
-                                    }).to_string());
+                                    update_run_task_state(
+                                        &spawn_state,
+                                        &run_id,
+                                        &task_id,
+                                        "failed",
+                                    );
+                                    spawn_state.broadcast_event(
+                                        &serde_json::json!({
+                                            "type": "task_state_changed",
+                                            "dagId": dag_id, "runId": run_id,
+                                            "taskId": task_id, "state": "failed",
+                                            "error": e.to_string(),
+                                        })
+                                        .to_string(),
+                                    );
                                     let _ = spawn_event_tx.send(SchedulerEvent::TaskFailed {
-                                        dag_id, run_id, task_id,
-                                        error: e.to_string(), attempt,
+                                        dag_id,
+                                        run_id,
+                                        task_id,
+                                        error: e.to_string(),
+                                        attempt,
                                     });
                                 }
                             }
                         });
                     }
-                    SchedulerCommand::CompleteDagRun { dag_id, run_id, status } => {
+                    SchedulerCommand::CompleteDagRun {
+                        dag_id,
+                        run_id,
+                        status,
+                    } => {
                         let status_str = match status {
                             RunStatus::Success => "success",
                             RunStatus::Failed => "failed",
                             RunStatus::Cancelled => "cancelled",
                         };
                         update_run_status(&exec_state, &run_id, status_str);
-                        exec_state.broadcast_event(&serde_json::json!({
-                            "type": "dag_run_completed",
-                            "dagId": dag_id, "runId": run_id,
-                            "status": status_str,
-                        }).to_string());
+                        exec_state.broadcast_event(
+                            &serde_json::json!({
+                                "type": "dag_run_completed",
+                                "dagId": dag_id, "runId": run_id,
+                                "status": status_str,
+                            })
+                            .to_string(),
+                        );
                     }
-                    SchedulerCommand::SkipTask { dag_id, run_id, task_id, reason } => {
+                    SchedulerCommand::SkipTask {
+                        dag_id,
+                        run_id,
+                        task_id,
+                        reason,
+                    } => {
                         update_run_task_state(&exec_state, &run_id, &task_id, "skipped");
-                        exec_state.broadcast_event(&serde_json::json!({
-                            "type": "task_state_changed",
-                            "dagId": dag_id, "runId": run_id,
-                            "taskId": task_id, "state": "skipped",
-                            "reason": reason,
-                        }).to_string());
+                        exec_state.broadcast_event(
+                            &serde_json::json!({
+                                "type": "task_state_changed",
+                                "dagId": dag_id, "runId": run_id,
+                                "taskId": task_id, "state": "skipped",
+                                "reason": reason,
+                            })
+                            .to_string(),
+                        );
                     }
                     SchedulerCommand::RetryTask { task_id, delay, .. } => {
                         tracing::info!(task = %task_id, delay_ms = delay.num_milliseconds(), "Task retry scheduled");
@@ -1345,10 +1640,16 @@ async fn cmd_serve(host: &str, port: u16, dags_path: &PathBuf, state_dir: &PathB
 }
 
 /// Update a specific task's state within a run.
-fn update_run_task_state(state: &conduit_api::AppState, run_id: &str, task_id: &str, task_state: &str) {
+fn update_run_task_state(
+    state: &conduit_api::AppState,
+    run_id: &str,
+    task_id: &str,
+    task_state: &str,
+) {
     if let Ok(mut runs) = state.runs.write() {
         if let Some(run) = runs.iter_mut().find(|r| r.run_id == run_id) {
-            run.task_states.insert(task_id.to_string(), task_state.to_string());
+            run.task_states
+                .insert(task_id.to_string(), task_state.to_string());
             // If the run was "dispatched" or "queued", mark it as "running"
             if run.status == "dispatched" || run.status == "queued" || run.status == "pending" {
                 run.status = "running".to_string();
@@ -1379,19 +1680,28 @@ fn cmd_status(env: Option<&str>, dags_path: &PathBuf) -> Result<()> {
 
     let state = PersistentState::open(&state_dir)?;
 
-    let environment = state.env_manager.get(env_name).unwrap_or_else(|_| {
-        conduit_common::snapshot::Environment::new(env_name)
-    });
+    let environment = state
+        .env_manager
+        .get(env_name)
+        .unwrap_or_else(|_| conduit_common::snapshot::Environment::new(env_name));
 
     println!("  Environment:     {}", env_name);
     println!("  Snapshots:       {}", environment.snapshot_map.len());
-    println!("  Last updated:    {}", environment.updated_at.format("%Y-%m-%d %H:%M:%S UTC"));
+    println!(
+        "  Last updated:    {}",
+        environment.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
 
     if let Ok(envs) = state.env_manager.list() {
         println!("  Environments:    {}", envs.len());
         for e in &envs {
             let marker = if e.id == env_name { " (active)" } else { "" };
-            println!("    - {} ({} snapshots){}", e.id, e.snapshot_map.len(), marker);
+            println!(
+                "    - {} ({} snapshots){}",
+                e.id,
+                e.snapshot_map.len(),
+                marker
+            );
         }
     }
 
@@ -1411,7 +1721,9 @@ fn cmd_env_create(name: &str, from: &str, dags_path: &PathBuf) -> Result<()> {
 
     println!(
         "Created environment '{}' ({} snapshots, forked from '{}')",
-        env.id, env.snapshot_map.len(), from
+        env.id,
+        env.snapshot_map.len(),
+        from
     );
     Ok(())
 }
@@ -1440,15 +1752,24 @@ fn cmd_env_promote(source: &str, target: &str, dags_path: &PathBuf) -> Result<()
     let changes = state.env_manager.promote(source, target)?;
     state.save()?;
 
-    println!("Promoted '{}' -> '{}' ({} snapshot changes)", source, target, changes);
+    println!(
+        "Promoted '{}' -> '{}' ({} snapshot changes)",
+        source, target, changes
+    );
     Ok(())
 }
 
 // ─── conduit replay ──────────────────────────────────────────────────────────
 
-fn cmd_replay(to: Option<u64>, from: u64, dags_path: &PathBuf, json: bool, events_only: bool) -> Result<()> {
-    use conduit_state::EventStore;
+fn cmd_replay(
+    to: Option<u64>,
+    from: u64,
+    dags_path: &PathBuf,
+    json: bool,
+    events_only: bool,
+) -> Result<()> {
     use conduit_common::event::EventKind;
+    use conduit_state::EventStore;
     use std::collections::HashMap;
 
     let state_dir = resolve_state_dir(dags_path);
@@ -1471,31 +1792,42 @@ fn cmd_replay(to: Option<u64>, from: u64, dags_path: &PathBuf, json: bool, event
 
     if events_only {
         // Just print events as a table
-        println!("{:<6} {:<30} {:<20} {}", "SEQ", "TIMESTAMP", "TYPE", "SUMMARY");
+        println!("{:<6} {:<30} {:<20} SUMMARY", "SEQ", "TIMESTAMP", "TYPE");
         println!("{}", "─".repeat(100));
         for event in events {
             let event_type = match &event.kind {
                 EventKind::DagRunCreated { dag_id, .. } => format!("DagRunCreated({})", dag_id),
-                EventKind::DagRunCompleted { dag_id, status, .. } => format!("DagRunCompleted({}, {:?})", dag_id, status),
+                EventKind::DagRunCompleted { dag_id, status, .. } => {
+                    format!("DagRunCompleted({}, {:?})", dag_id, status)
+                }
                 EventKind::TaskQueued { task_id, .. } => format!("TaskQueued({})", task_id),
                 EventKind::TaskStarted { task_id, .. } => format!("TaskStarted({})", task_id),
                 EventKind::TaskCompleted { task_id, .. } => format!("TaskCompleted({})", task_id),
                 EventKind::TaskFailed { task_id, .. } => format!("TaskFailed({})", task_id),
                 EventKind::TaskRetrying { task_id, .. } => format!("TaskRetrying({})", task_id),
                 EventKind::TaskSkipped { task_id, .. } => format!("TaskSkipped({})", task_id),
-                EventKind::SnapshotCreated { snapshot_id, .. } => format!("SnapshotCreated({})", snapshot_id),
-                EventKind::EnvironmentCreated { env_name, .. } => format!("EnvironmentCreated({})", env_name),
-                EventKind::EnvironmentPromoted { source_env, target_env, .. } => format!("EnvironmentPromoted({} -> {})", source_env, target_env),
-                EventKind::EnvironmentRolledBack { env_name, .. } => format!("EnvironmentRolledBack({})", env_name),
+                EventKind::SnapshotCreated { snapshot_id, .. } => {
+                    format!("SnapshotCreated({})", snapshot_id)
+                }
+                EventKind::EnvironmentCreated { env_name, .. } => {
+                    format!("EnvironmentCreated({})", env_name)
+                }
+                EventKind::EnvironmentPromoted {
+                    source_env,
+                    target_env,
+                    ..
+                } => format!("EnvironmentPromoted({} -> {})", source_env, target_env),
+                EventKind::EnvironmentRolledBack { env_name, .. } => {
+                    format!("EnvironmentRolledBack({})", env_name)
+                }
                 EventKind::PlanCreated { plan_id, .. } => format!("PlanCreated({})", plan_id),
                 EventKind::PlanApplied { plan_id, .. } => format!("PlanApplied({})", plan_id),
             };
             println!(
-                "{:<6} {:<30} {:<20} {}",
+                "{:<6} {:<30} {:<20} ",
                 event.sequence,
                 event.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
-                event_type,
-                ""
+                event_type
             );
         }
         return Ok(());
@@ -1511,7 +1843,11 @@ fn cmd_replay(to: Option<u64>, from: u64, dags_path: &PathBuf, json: bool, event
             EventKind::EnvironmentCreated { env_name, .. } => {
                 environments.insert(env_name.clone(), Vec::new());
             }
-            EventKind::EnvironmentPromoted { source_env, target_env, .. } => {
+            EventKind::EnvironmentPromoted {
+                source_env,
+                target_env,
+                ..
+            } => {
                 if let Some(source_snapshots) = environments.get(source_env) {
                     environments.insert(target_env.clone(), source_snapshots.clone());
                 }
@@ -1523,7 +1859,12 @@ fn cmd_replay(to: Option<u64>, from: u64, dags_path: &PathBuf, json: bool, event
                     }
                 }
             }
-            EventKind::DagRunCompleted { dag_id, run_id, status, .. } => {
+            EventKind::DagRunCompleted {
+                dag_id,
+                run_id,
+                status,
+                ..
+            } => {
                 let status_str = format!("{:?}", status);
                 runs.push((dag_id.clone(), run_id.clone(), status_str));
             }
@@ -1606,8 +1947,8 @@ fn cmd_replay(to: Option<u64>, from: u64, dags_path: &PathBuf, json: bool, event
 // ─── conduit migrate ─────────────────────────────────────────────────────────
 
 fn cmd_migrate(source: &PathBuf, output: &PathBuf, dry_run: bool) -> Result<()> {
-    use std::fs;
     use regex::Regex;
+    use std::fs;
 
     println!("Scanning Airflow DAGs at {}...", source.display());
     println!();
@@ -1621,7 +1962,7 @@ fn cmd_migrate(source: &PathBuf, output: &PathBuf, dry_run: bool) -> Result<()> 
     for entry in walkdir::WalkDir::new(source)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "py"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "py"))
     {
         dag_files.push(entry.path().to_path_buf());
     }
@@ -1634,7 +1975,9 @@ fn cmd_migrate(source: &PathBuf, output: &PathBuf, dry_run: bool) -> Result<()> 
 
     // Regex patterns for Airflow DAG detection
     let dag_pattern = Regex::new(r#"DAG\(\s*['"]([^'"]+)['"]"#)?;
-    let task_pattern = Regex::new(r#"(PythonOperator|BashOperator|SQLExecuteQueryOperator)\([^)]*task_id\s*=\s*['"]([^'"]+)['"]"#)?;
+    let task_pattern = Regex::new(
+        r#"(PythonOperator|BashOperator|SQLExecuteQueryOperator)\([^)]*task_id\s*=\s*['"]([^'"]+)['"]"#,
+    )?;
 
     for file_path in &dag_files {
         match fs::read_to_string(file_path) {
@@ -1675,7 +2018,12 @@ fn cmd_migrate(source: &PathBuf, output: &PathBuf, dry_run: bool) -> Result<()> 
     if !migrated_dags.is_empty() {
         println!("Migrated DAGs:");
         for (dag_id, task_ids, source_file) in &migrated_dags {
-            println!("  {} ({} tasks) from {}", dag_id, task_ids.len(), source_file.display());
+            println!(
+                "  {} ({} tasks) from {}",
+                dag_id,
+                task_ids.len(),
+                source_file.display()
+            );
         }
         println!();
     }
@@ -1741,13 +2089,19 @@ Next Steps:
             output.display(),
             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
             migrated_dags.len(),
-            migrated_dags.iter().map(|(_, tasks, _)| tasks.len()).sum::<usize>(),
+            migrated_dags
+                .iter()
+                .map(|(_, tasks, _)| tasks.len())
+                .sum::<usize>(),
             skipped_files.len()
         );
 
         fs::write(output.join("MIGRATION_REPORT.txt"), report)?;
         println!();
-        println!("Migration report written to {}", output.join("MIGRATION_REPORT.txt").display());
+        println!(
+            "Migration report written to {}",
+            output.join("MIGRATION_REPORT.txt").display()
+        );
     } else {
         println!("Dry run completed. No files written.");
     }
@@ -1771,10 +2125,10 @@ async fn cmd_backfill(
 ) -> Result<()> {
     use conduit_common::backfill::*;
     use conduit_common::incremental::PartitionGranularity;
-    use conduit_planner::BackfillEngine;
-    use conduit_scheduler::scheduler::{Scheduler, SchedulerEvent, SchedulerCommand};
-    use conduit_scheduler::pool_manager::PoolManager;
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
+    use conduit_planner::BackfillEngine;
+    use conduit_scheduler::pool_manager::PoolManager;
+    use conduit_scheduler::scheduler::{Scheduler, SchedulerCommand, SchedulerEvent};
     use std::collections::HashMap;
 
     let overall_start = Instant::now();
@@ -1786,7 +2140,10 @@ async fn cmd_backfill(
         "week" | "weekly" => PartitionGranularity::Week,
         "month" | "monthly" => PartitionGranularity::Month,
         "year" | "yearly" => PartitionGranularity::Year,
-        other => anyhow::bail!("Unknown granularity '{}'. Use: hour, day, week, month, year", other),
+        other => anyhow::bail!(
+            "Unknown granularity '{}'. Use: hour, day, week, month, year",
+            other
+        ),
     };
 
     let start_date = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
@@ -1813,17 +2170,22 @@ async fn cmd_backfill(
         std::process::exit(1);
     }
 
-    let dag = plan.dags.get(dag_id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "DAG '{}' not found. Available DAGs: {}",
-            dag_id,
-            plan.dags.keys().cloned().collect::<Vec<_>>().join(", ")
-        )
-    })?.clone();
+    let dag = plan
+        .dags
+        .get(dag_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "DAG '{}' not found. Available DAGs: {}",
+                dag_id,
+                plan.dags.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?
+        .clone();
 
     println!(
         "  Compiled {} DAGs ({} tasks) in {:.1}ms",
-        stats.dags_compiled, stats.tasks_total,
+        stats.dags_compiled,
+        stats.tasks_total,
         overall_start.elapsed().as_secs_f64() * 1000.0
     );
     println!();
@@ -1843,7 +2205,10 @@ async fn cmd_backfill(
     let partitions = BackfillEngine::compute_partitions(&request);
     let total = partitions.len();
 
-    println!("Backfill '{}': {} -> {} ({} partitions)", dag_id, start, end, total);
+    println!(
+        "Backfill '{}': {} -> {} ({} partitions)",
+        dag_id, start, end, total
+    );
     println!("  Granularity:  {}", granularity);
     println!("  Environment:  {}", environment);
     println!("  Full refresh: {}", full_refresh);
@@ -1909,23 +2274,31 @@ async fn cmd_backfill(
             config: env_vars.into_iter().collect(),
         })?;
 
-        let scheduler_handle = tokio::spawn(async move {
-            scheduler.run().await
-        });
+        let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
 
         let executor_event_tx = event_tx.clone();
         let dag_for_exec = dag.clone();
-        let partition_env: HashMap<String, String> = BackfillEngine::partition_env_vars(&request, partition, idx, total).into_iter().collect();
+        let partition_env: HashMap<String, String> =
+            BackfillEngine::partition_env_vars(&request, partition, idx, total)
+                .into_iter()
+                .collect();
         let executor_handle = tokio::spawn(async move {
             let mut partition_failed = false;
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    SchedulerCommand::DispatchTask { dag_id, run_id, task_id, attempt } => {
+                    SchedulerCommand::DispatchTask {
+                        dag_id,
+                        run_id,
+                        task_id,
+                        attempt,
+                    } => {
                         let task = match dag_for_exec.tasks.get(&task_id) {
                             Some(t) => t,
                             None => {
                                 let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id, run_id, task_id,
+                                    dag_id,
+                                    run_id,
+                                    task_id,
                                     error: "Task not found".to_string(),
                                     attempt,
                                 });
@@ -1939,7 +2312,10 @@ async fn cmd_backfill(
                             task_id: task_id.clone(),
                             attempt,
                             logical_date,
-                            environment: partition_env.get("CONDUIT_ENVIRONMENT").cloned().unwrap_or_else(|| "production".to_string()),
+                            environment: partition_env
+                                .get("CONDUIT_ENVIRONMENT")
+                                .cloned()
+                                .unwrap_or_else(|| "production".to_string()),
                             params: partition_env.clone(),
                         };
                         // Inject backfill env vars into params
@@ -1953,14 +2329,18 @@ async fn cmd_backfill(
                                 let duration = task_start.elapsed();
                                 if output.exit_code == 0 {
                                     let _ = executor_event_tx.send(SchedulerEvent::TaskCompleted {
-                                        dag_id, run_id, task_id,
+                                        dag_id,
+                                        run_id,
+                                        task_id,
                                         snapshot_id: None,
                                         duration_ms: duration.as_millis() as u64,
                                     });
                                 } else {
                                     partition_failed = true;
                                     let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                        dag_id, run_id, task_id,
+                                        dag_id,
+                                        run_id,
+                                        task_id,
                                         error: output.stderr.trim().to_string(),
                                         attempt,
                                     });
@@ -1969,7 +2349,9 @@ async fn cmd_backfill(
                             Err(e) => {
                                 partition_failed = true;
                                 let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id, run_id, task_id,
+                                    dag_id,
+                                    run_id,
+                                    task_id,
                                     error: e.to_string(),
                                     attempt,
                                 });
@@ -2054,9 +2436,7 @@ fn cmd_worker(
     }
 
     let worker_id = id.map(String::from).unwrap_or_else(|| {
-        let hostname = gethostname::gethostname()
-            .to_string_lossy()
-            .to_string();
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
         format!("worker-{}-{}", hostname, std::process::id())
     });
 
@@ -2079,7 +2459,10 @@ fn cmd_worker(
     // 4. Run heartbeat loop
     // 5. Block until SIGTERM/SIGINT
 
-    println!("Worker '{}' registered with {} capacity", worker_id, capacity);
+    println!(
+        "Worker '{}' registered with {} capacity",
+        worker_id, capacity
+    );
     println!("Pool affinity: {:?}", pool_list);
     if !labels.is_empty() {
         println!("Labels: {:?}", labels);
@@ -2139,13 +2522,406 @@ fn cmd_cluster_status(coordinator_addr: &str, json: bool) -> Result<()> {
 }
 
 fn cmd_cluster_drain(coordinator_addr: &str, worker_id: &str) -> Result<()> {
-    println!("Draining worker '{}' via {}...", worker_id, coordinator_addr);
+    println!(
+        "Draining worker '{}' via {}...",
+        worker_id, coordinator_addr
+    );
 
     // In production: send DrainWorker directive via gRPC
     println!("Drain command sent. Worker will finish current tasks and stop.");
-    println!("Monitor with: conduit cluster status --coordinator {}", coordinator_addr);
+    println!(
+        "Monitor with: conduit cluster status --coordinator {}",
+        coordinator_addr
+    );
 
     Ok(())
+}
+
+// ─── conduit query ───────────────────────────────────────────────────────────
+
+async fn cmd_query(
+    sql: &str,
+    connection: Option<&str>,
+    files: Option<Vec<PathBuf>>,
+    setup: Option<Vec<String>>,
+    format: &str,
+    limit: usize,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    use conduit_providers::providers::duckdb::DuckDbProvider;
+    use conduit_providers::traits::SqlProvider;
+
+    let provider: DuckDbProvider = if let Some(conn_name) = connection {
+        // Load config and resolve the named connection
+        let config_file = config_path.unwrap_or_else(|| PathBuf::from("conduit.yaml"));
+        let config = conduit_common::config::ConduitConfig::load(&config_file)?;
+        let conn_config = config.connections.get(conn_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Connection '{}' not found in {}",
+                conn_name,
+                config_file.display()
+            )
+        })?;
+        if conn_config.conn_type != "duckdb" && conn_config.conn_type != "duck" {
+            anyhow::bail!(
+                "conduit query currently only supports DuckDB connections. \
+                 '{}' is type '{}'.",
+                conn_name,
+                conn_config.conn_type
+            );
+        }
+        DuckDbProvider::from_config(conn_name, conn_config)?
+    } else {
+        DuckDbProvider::ephemeral()
+    };
+
+    // Register local files as views
+    if let Some(ref file_list) = files {
+        for path in file_list {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("data");
+            let abs_path = std::fs::canonicalize(path)
+                .unwrap_or_else(|_| path.clone())
+                .display()
+                .to_string();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+            let reader_fn = match ext {
+                "parquet" | "pq" => "read_parquet",
+                "csv" | "tsv" => "read_csv",
+                "json" | "jsonl" | "ndjson" => "read_json",
+                _ => {
+                    anyhow::bail!(
+                        "Unsupported file format '.{ext}'. Supported: parquet, csv, json"
+                    )
+                }
+            };
+
+            let create_sql = format!(
+                "CREATE OR REPLACE VIEW \"{stem}\" AS SELECT * FROM {reader_fn}('{abs_path}')"
+            );
+            provider.execute_raw(&create_sql).await?;
+            eprintln!(
+                "  Registered file '{}' as table '{}'",
+                path.display(),
+                stem
+            );
+        }
+    }
+
+    // Run setup SQL (e.g. CREATE TABLE statements to prepare the environment)
+    if let Some(ref setup_stmts) = setup {
+        for stmt in setup_stmts {
+            eprintln!("  Setup: {}", truncate_str(stmt, 80));
+            provider.execute_raw(stmt).await?;
+        }
+    }
+
+    // Apply limit to SELECT queries
+    let final_sql = {
+        let trimmed = sql.trim().to_uppercase();
+        if (trimmed.starts_with("SELECT") || trimmed.starts_with("WITH"))
+            && !trimmed.contains("LIMIT")
+        {
+            format!("{} LIMIT {}", sql.trim().trim_end_matches(';'), limit)
+        } else {
+            sql.to_string()
+        }
+    };
+
+    let result = provider
+        .execute(&final_sql, &std::collections::HashMap::new())
+        .await?;
+
+    render_result(&result, format, limit);
+
+    Ok(())
+}
+
+// ─── conduit preview ─────────────────────────────────────────────────────────
+
+async fn cmd_preview(
+    task_ref: &str,
+    dags_path: &Path,
+    connection: Option<&str>,
+    format: &str,
+    limit: usize,
+) -> Result<()> {
+    use conduit_common::dag::TaskType;
+    use conduit_providers::providers::duckdb::DuckDbProvider;
+    use conduit_providers::traits::SqlProvider;
+
+    // Parse task_ref as "dag_id.task_id"
+    let (dag_id, task_id) = task_ref.split_once('.').ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid task reference '{}'. Expected format: dag_id.task_id",
+            task_ref
+        )
+    })?;
+
+    // Compile DAGs
+    let start = Instant::now();
+    let (plan, stats) = ConduitPlan::compile(dags_path)?;
+    eprintln!(
+        "  Compiled {} DAGs ({} tasks) in {:.1}ms",
+        stats.dags_compiled,
+        stats.tasks_total,
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+
+    // Look up the DAG and task
+    let dag = plan.dags.get(dag_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "DAG '{}' not found. Available: {:?}",
+            dag_id,
+            plan.dags.keys().collect::<Vec<_>>()
+        )
+    })?;
+
+    let task = dag.tasks.get(task_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Task '{}' not found in DAG '{}'. Available: {:?}",
+            task_id,
+            dag_id,
+            dag.tasks.keys().collect::<Vec<_>>()
+        )
+    })?;
+
+    match &task.task_type {
+        TaskType::Sql {
+            connection: task_conn,
+            query,
+        } => {
+            eprintln!("  Task: {}.{}", dag_id, task_id);
+            eprintln!(
+                "  Type: SQL (connection: {})",
+                connection.unwrap_or(task_conn)
+            );
+            eprintln!("  Query: {}", truncate_str(query, 120));
+
+            let provider = if let Some(conn_name) = connection {
+                let config_path =
+                    dags_path.parent().unwrap_or(Path::new(".")).join("conduit.yaml");
+                if config_path.exists() {
+                    let config = conduit_common::config::ConduitConfig::load(&config_path)?;
+                    if let Some(conn_config) = config.connections.get(conn_name) {
+                        if conn_config.conn_type == "duckdb" || conn_config.conn_type == "duck" {
+                            DuckDbProvider::from_config(conn_name, conn_config)?
+                        } else {
+                            anyhow::bail!(
+                                "Preview currently only supports DuckDB connections. \
+                                 '{}' is type '{}'.",
+                                conn_name,
+                                conn_config.conn_type
+                            );
+                        }
+                    } else {
+                        anyhow::bail!("Connection '{}' not found in config", conn_name);
+                    }
+                } else {
+                    DuckDbProvider::ephemeral()
+                }
+            } else {
+                DuckDbProvider::ephemeral()
+            };
+
+            // Walk upstream SQL dependencies in topological order and execute
+            // them first, so the target task can reference their tables.
+            let upstream = collect_upstream_sql(dag, task_id);
+            if !upstream.is_empty() {
+                eprintln!(
+                    "  Running {} upstream SQL task(s) as setup...",
+                    upstream.len()
+                );
+                for (up_id, up_sql) in &upstream {
+                    eprintln!("    [setup] {}", up_id);
+                    provider.execute_raw(up_sql).await?;
+                }
+            }
+
+            eprintln!();
+
+            let final_sql = {
+                let trimmed = query.trim().to_uppercase();
+                if (trimmed.starts_with("SELECT") || trimmed.starts_with("WITH"))
+                    && !trimmed.contains("LIMIT")
+                {
+                    format!("{} LIMIT {}", query.trim().trim_end_matches(';'), limit)
+                } else {
+                    query.clone()
+                }
+            };
+
+            match provider
+                .execute(&final_sql, &std::collections::HashMap::new())
+                .await
+            {
+                Ok(result) => render_result(&result, format, limit),
+                Err(e) => {
+                    eprintln!("  Query execution failed:");
+                    eprintln!("  Error: {}", e);
+                }
+            }
+        }
+        other => {
+            eprintln!("  Task: {}.{}", dag_id, task_id);
+            eprintln!("  Type: {:?}", task_type_name(other));
+            eprintln!(
+                "  Dependencies: {:?}",
+                task.dependencies
+                    .iter()
+                    .map(|d| &d.task_id)
+                    .collect::<Vec<_>>()
+            );
+            eprintln!();
+            eprintln!("  Preview is only available for SQL tasks.");
+        }
+    }
+
+    Ok(())
+}
+
+/// Walk the DAG's execution_order to collect upstream SQL tasks for a given target.
+/// Returns (task_id, query) pairs in topological order, excluding the target itself.
+fn collect_upstream_sql(
+    dag: &conduit_common::dag::Dag,
+    target_task_id: &str,
+) -> Vec<(String, String)> {
+    use conduit_common::dag::TaskType;
+
+    // Collect all transitive upstream task IDs via BFS
+    let mut needed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+
+    // Seed with direct dependencies of the target
+    if let Some(task) = dag.tasks.get(target_task_id) {
+        for dep in &task.dependencies {
+            queue.push_back(dep.task_id.clone());
+        }
+    }
+
+    while let Some(tid) = queue.pop_front() {
+        if needed.insert(tid.clone()) {
+            if let Some(t) = dag.tasks.get(&tid) {
+                for dep in &t.dependencies {
+                    queue.push_back(dep.task_id.clone());
+                }
+            }
+        }
+    }
+
+    // Return SQL tasks in topological order
+    dag.execution_order
+        .iter()
+        .filter(|tid| needed.contains(tid.as_str()))
+        .filter_map(|tid| {
+            dag.tasks.get(tid.as_str()).and_then(|t| match &t.task_type {
+                TaskType::Sql { query, .. } => Some((tid.clone(), query.clone())),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+// ─── shared output helpers ───────────────────────────────────────────────────
+
+fn render_result(result: &conduit_providers::traits::SqlResult, format: &str, _limit: usize) {
+    match format {
+        "json" => {
+            let output = serde_json::json!({
+                "columns": result.columns,
+                "rows": result.sample_rows,
+                "rows_returned": result.rows_returned,
+                "execution_time_ms": result.execution_time_ms,
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        }
+        "csv" => {
+            if !result.columns.is_empty() {
+                println!("{}", result.columns.join(","));
+            }
+            for row in &result.sample_rows {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => {
+                            if s.contains(',') || s.contains('"') || s.contains('\n') {
+                                format!("\"{}\"", s.replace('"', "\"\""))
+                            } else {
+                                s.clone()
+                            }
+                        }
+                        serde_json::Value::Null => String::new(),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                println!("{}", cells.join(","));
+            }
+        }
+        _ => {
+            // table format (default)
+            use comfy_table::{ContentArrangement, Table};
+
+            if result.columns.is_empty() {
+                if let Some(rows) = result.rows_returned {
+                    eprintln!("  ({} rows, no columns)", rows);
+                } else {
+                    eprintln!("  ({} rows affected)", result.rows_affected);
+                }
+                return;
+            }
+
+            let mut table = Table::new();
+            table.set_content_arrangement(ContentArrangement::Dynamic);
+            table.set_header(&result.columns);
+
+            for row in &result.sample_rows {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Null => "NULL".to_string(),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                table.add_row(cells);
+            }
+
+            println!("{table}");
+
+            if let Some(total) = result.rows_returned {
+                let shown = result.sample_rows.len() as u64;
+                if shown < total {
+                    eprintln!("  ({} of {} rows shown)", shown, total);
+                } else {
+                    eprintln!("  ({} rows)", total);
+                }
+            }
+            eprintln!("  Execution time: {}ms", result.execution_time_ms);
+        }
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.len() > max {
+        format!("{}...", &s[..max])
+    } else {
+        s
+    }
+}
+
+fn task_type_name(tt: &conduit_common::dag::TaskType) -> &'static str {
+    use conduit_common::dag::TaskType;
+    match tt {
+        TaskType::Python { .. } => "Python",
+        TaskType::Bash { .. } => "Bash",
+        TaskType::Sql { .. } => "SQL",
+        TaskType::Sensor { .. } => "Sensor",
+        TaskType::Executable { .. } => "Executable",
+    }
 }
 
 // ─── hostname helper ────────────────────────────────────────────────────────

@@ -20,9 +20,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use conduit_common::config::ConnectionConfig;
 
+use super::{extra_str, resolve_credential};
 use crate::errors::ProviderError;
 use crate::traits::*;
-use super::{extra_str, resolve_credential};
 
 pub struct BigQueryProvider {
     name: String,

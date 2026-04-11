@@ -14,16 +14,17 @@ pub mod incremental;
 pub mod metrics;
 pub mod snapshot;
 
-pub use backfill::{BackfillRequest, BackfillPartition, BackfillResult, PartitionStatus};
+pub use backfill::{BackfillPartition, BackfillRequest, BackfillResult, PartitionStatus};
 pub use config::ConduitConfig;
 pub use contracts::{
-    DataContract, ContractCheck, TaskContracts, Severity,
-    CheckResult, ValidationResult, DeploymentValidation,
-    Evidence, ContractEvaluator,
+    CheckResult, ContractCheck, ContractEvaluator, DataContract, DeploymentValidation, Evidence,
+    Severity, TaskContracts, ValidationResult,
 };
-pub use dag::{Dag, DagId, Task, TaskId, TaskDependency, Pool, TriggerRule};
+pub use dag::{Dag, DagId, Pool, Task, TaskDependency, TaskId, TriggerRule};
 pub use error::{ConduitError, ConduitResult};
 pub use event::{Event, EventId, EventKind};
 pub use fingerprint::Fingerprint;
-pub use incremental::{IncrementalConfig, IncrementalStrategy, Watermark, WatermarkValue, IncrementalContext};
-pub use snapshot::{Snapshot, SnapshotId, Environment, EnvironmentId};
+pub use incremental::{
+    IncrementalConfig, IncrementalContext, IncrementalStrategy, Watermark, WatermarkValue,
+};
+pub use snapshot::{Environment, EnvironmentId, Snapshot, SnapshotId};

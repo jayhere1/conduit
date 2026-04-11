@@ -184,9 +184,8 @@ impl EventStore {
         ));
 
         for item in iter {
-            let (key, value) = item.map_err(|e| {
-                ConduitError::EventStoreError(format!("Iterator error: {}", e))
-            })?;
+            let (key, value) =
+                item.map_err(|e| ConduitError::EventStoreError(format!("Iterator error: {}", e)))?;
 
             if key.as_ref() >= end.as_slice() {
                 break;
@@ -311,7 +310,7 @@ impl EventStore {
             count += 1;
 
             // Flush batch periodically to avoid unbounded memory usage.
-            if count % 10_000 == 0 {
+            if count.is_multiple_of(10_000) {
                 self.db.write(batch).map_err(|e| {
                     ConduitError::EventStoreError(format!("Batch delete error: {}", e))
                 })?;
@@ -319,10 +318,10 @@ impl EventStore {
             }
         }
 
-        if count % 10_000 != 0 {
-            self.db.write(batch).map_err(|e| {
-                ConduitError::EventStoreError(format!("Batch delete error: {}", e))
-            })?;
+        if !count.is_multiple_of(10_000) {
+            self.db
+                .write(batch)
+                .map_err(|e| ConduitError::EventStoreError(format!("Batch delete error: {}", e)))?;
         }
 
         Ok(count)
@@ -370,9 +369,10 @@ impl EventStore {
     /// This is O(n) and should be used sparingly.
     pub fn exact_count(&self) -> ConduitResult<u64> {
         let mut count = 0u64;
-        let iter = self
-            .db
-            .iterator(rocksdb::IteratorMode::From(&[0u8; 8], rocksdb::Direction::Forward));
+        let iter = self.db.iterator(rocksdb::IteratorMode::From(
+            &[0u8; 8],
+            rocksdb::Direction::Forward,
+        ));
 
         for item in iter {
             let _ = item.map_err(|e| {
@@ -447,8 +447,7 @@ impl EventStore {
                             ..
                         } = event.kind
                         {
-                            if id == dag_id
-                                && *status == conduit_common::event::RunStatus::Success
+                            if id == dag_id && *status == conduit_common::event::RunStatus::Success
                             {
                                 success_run_id = Some(run_id.clone());
                                 break;
@@ -501,8 +500,9 @@ impl EventStore {
 
         // Age-based cutoff
         if let Some(max_age) = &self.retention.max_age {
-            let cutoff_time = now - chrono::Duration::from_std(*max_age)
-                .unwrap_or_else(|_| chrono::Duration::seconds(0));
+            let cutoff_time = now
+                - chrono::Duration::from_std(*max_age)
+                    .unwrap_or_else(|_| chrono::Duration::seconds(0));
             let age_cutoff = self.find_sequence_at_time(cutoff_time)?;
             if age_cutoff > cutoff {
                 cutoff = age_cutoff;
@@ -537,9 +537,8 @@ impl EventStore {
         ));
 
         for item in iter {
-            let (key, value) = item.map_err(|e| {
-                ConduitError::EventStoreError(format!("Time scan error: {}", e))
-            })?;
+            let (key, value) =
+                item.map_err(|e| ConduitError::EventStoreError(format!("Time scan error: {}", e)))?;
 
             if key.len() != 8 {
                 continue;
@@ -682,7 +681,9 @@ mod tests {
         let store = EventStore::open(dir.path()).unwrap();
 
         for i in 1..=10 {
-            let event = store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            let event = store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
             assert_eq!(event.sequence, i);
         }
 
@@ -695,7 +696,9 @@ mod tests {
         let store = EventStore::open(dir.path()).unwrap();
 
         for i in 1..=5 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         let events = store.range(2, 4).unwrap();
@@ -748,7 +751,9 @@ mod tests {
         let store = EventStore::open(dir.path()).unwrap();
 
         for i in 0..50 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         let result = store.compact().unwrap();
@@ -768,7 +773,9 @@ mod tests {
 
         // Insert 25 events
         for i in 0..25 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         assert_eq!(store.current_sequence(), 25);
@@ -799,7 +806,9 @@ mod tests {
         let store = EventStore::open_with_retention(dir.path(), policy).unwrap();
 
         for i in 0..10 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         let result = store.compact().unwrap();
@@ -827,7 +836,9 @@ mod tests {
         let store = EventStore::open(dir.path()).unwrap();
 
         for i in 0..20 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         let deleted = store.delete_range(5, 15).unwrap();
@@ -852,7 +863,9 @@ mod tests {
 
         // Insert some events
         for i in 0..10 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         // Sleep to let events age past the 1-second TTL
@@ -882,7 +895,9 @@ mod tests {
         let store = EventStore::open_with_retention(dir.path(), policy).unwrap();
 
         for i in 0..20 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         store.compact().unwrap();
@@ -898,7 +913,9 @@ mod tests {
         let store = EventStore::open(dir.path()).unwrap();
 
         for i in 0..15 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         assert_eq!(store.exact_count().unwrap(), 15);
@@ -918,7 +935,9 @@ mod tests {
         let store = EventStore::open_with_retention(dir.path(), policy).unwrap();
 
         for i in 0..20 {
-            store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+            store
+                .append(make_event_kind(&format!("dag_{}", i)))
+                .unwrap();
         }
 
         let r1 = store.compact().unwrap();
@@ -937,21 +956,25 @@ mod tests {
         let date1 = chrono::Utc::now() - chrono::Duration::hours(2);
         let date2 = chrono::Utc::now() - chrono::Duration::hours(1);
 
-        store.append(EventKind::DagRunCreated {
-            dag_id: "my_dag".to_string(),
-            run_id: "run_1".to_string(),
-            logical_date: date1,
-            environment: "production".to_string(),
-            triggered_by: "scheduler".to_string(),
-        }).unwrap();
+        store
+            .append(EventKind::DagRunCreated {
+                dag_id: "my_dag".to_string(),
+                run_id: "run_1".to_string(),
+                logical_date: date1,
+                environment: "production".to_string(),
+                triggered_by: "scheduler".to_string(),
+            })
+            .unwrap();
 
-        store.append(EventKind::DagRunCreated {
-            dag_id: "my_dag".to_string(),
-            run_id: "run_2".to_string(),
-            logical_date: date2,
-            environment: "production".to_string(),
-            triggered_by: "scheduler".to_string(),
-        }).unwrap();
+        store
+            .append(EventKind::DagRunCreated {
+                dag_id: "my_dag".to_string(),
+                run_id: "run_2".to_string(),
+                logical_date: date2,
+                environment: "production".to_string(),
+                triggered_by: "scheduler".to_string(),
+            })
+            .unwrap();
 
         // Should return the most recent (date2)
         let result = store.last_run_logical_date("my_dag").unwrap();
@@ -979,34 +1002,42 @@ mod tests {
         let date2 = chrono::Utc::now() - chrono::Duration::hours(2);
 
         // First run: success
-        store.append(EventKind::DagRunCreated {
-            dag_id: "my_dag".to_string(),
-            run_id: "run_1".to_string(),
-            logical_date: date1,
-            environment: "production".to_string(),
-            triggered_by: "scheduler".to_string(),
-        }).unwrap();
-        store.append(EventKind::DagRunCompleted {
-            dag_id: "my_dag".to_string(),
-            run_id: "run_1".to_string(),
-            status: conduit_common::event::RunStatus::Success,
-            duration_ms: 1000,
-        }).unwrap();
+        store
+            .append(EventKind::DagRunCreated {
+                dag_id: "my_dag".to_string(),
+                run_id: "run_1".to_string(),
+                logical_date: date1,
+                environment: "production".to_string(),
+                triggered_by: "scheduler".to_string(),
+            })
+            .unwrap();
+        store
+            .append(EventKind::DagRunCompleted {
+                dag_id: "my_dag".to_string(),
+                run_id: "run_1".to_string(),
+                status: conduit_common::event::RunStatus::Success,
+                duration_ms: 1000,
+            })
+            .unwrap();
 
         // Second run: failed
-        store.append(EventKind::DagRunCreated {
-            dag_id: "my_dag".to_string(),
-            run_id: "run_2".to_string(),
-            logical_date: date2,
-            environment: "production".to_string(),
-            triggered_by: "scheduler".to_string(),
-        }).unwrap();
-        store.append(EventKind::DagRunCompleted {
-            dag_id: "my_dag".to_string(),
-            run_id: "run_2".to_string(),
-            status: conduit_common::event::RunStatus::Failed,
-            duration_ms: 500,
-        }).unwrap();
+        store
+            .append(EventKind::DagRunCreated {
+                dag_id: "my_dag".to_string(),
+                run_id: "run_2".to_string(),
+                logical_date: date2,
+                environment: "production".to_string(),
+                triggered_by: "scheduler".to_string(),
+            })
+            .unwrap();
+        store
+            .append(EventKind::DagRunCompleted {
+                dag_id: "my_dag".to_string(),
+                run_id: "run_2".to_string(),
+                status: conduit_common::event::RunStatus::Failed,
+                duration_ms: 500,
+            })
+            .unwrap();
 
         // Should return date1 (last successful), not date2 (failed)
         let result = store.last_successful_run_date("my_dag").unwrap();
@@ -1022,7 +1053,9 @@ mod tests {
         {
             let store = EventStore::open(dir.path()).unwrap();
             for i in 0..10 {
-                store.append(make_event_kind(&format!("dag_{}", i))).unwrap();
+                store
+                    .append(make_event_kind(&format!("dag_{}", i)))
+                    .unwrap();
             }
         }
 

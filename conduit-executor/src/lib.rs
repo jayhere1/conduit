@@ -12,7 +12,7 @@ pub mod protocol;
 pub mod retry;
 
 pub use conduit_providers::ProviderRegistry;
-pub use executor::{TaskExecutor, ExecutorCommand, ExecutorEvent, TaskOutcome};
+pub use executor::{ExecutorCommand, ExecutorEvent, TaskExecutor, TaskOutcome};
 pub use process_runner::{ProcessOutput, ProcessRunner, TaskContext};
 pub use protocol::{parse_stdout_line, ProtocolMessage};
 pub use retry::{parse_duration, RetryPolicy};

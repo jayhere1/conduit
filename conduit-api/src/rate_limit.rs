@@ -12,11 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use governor::{
-    Quota, RateLimiter,
-    clock::DefaultClock,
-    state::keyed::DefaultKeyedStateStore,
-};
+use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
@@ -30,8 +26,7 @@ pub type KeyedRateLimiter = RateLimiter<String, DefaultKeyedStateStore<String>, 
 /// Allows 10 requests per second per IP, with a burst capacity of 50.
 pub fn create_rate_limiter() -> Arc<KeyedRateLimiter> {
     Arc::new(RateLimiter::keyed(
-        Quota::per_second(NonZeroU32::new(10).unwrap())
-            .allow_burst(NonZeroU32::new(50).unwrap()),
+        Quota::per_second(NonZeroU32::new(10).unwrap()).allow_burst(NonZeroU32::new(50).unwrap()),
     ))
 }
 

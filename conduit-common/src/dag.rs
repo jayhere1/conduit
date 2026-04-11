@@ -129,29 +129,18 @@ pub enum DependencyType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskType {
     /// Execute a Python function.
-    Python {
-        module: String,
-        function: String,
-    },
+    Python { module: String, function: String },
     /// Execute a bash command.
-    Bash {
-        command: String,
-    },
+    Bash { command: String },
     /// Execute a SQL query.
-    Sql {
-        connection: String,
-        query: String,
-    },
+    Sql { connection: String, query: String },
     /// An external sensor that polls for a condition.
     Sensor {
         sensor_type: String,
         poke_interval: Option<String>,
     },
     /// A generic executable (stdin/stdout protocol).
-    Executable {
-        command: String,
-        args: Vec<String>,
-    },
+    Executable { command: String, args: Vec<String> },
 }
 
 /// Resource limits for a task's cgroup.

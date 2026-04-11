@@ -49,23 +49,25 @@ impl ImpactAnalyzer {
     /// 1. Build a reverse dependency graph (task -> downstream dependents)
     /// 2. BFS from each changed task to find all reachable downstream tasks
     /// 3. Intersect with execution order to produce a valid execution sequence
-    pub fn analyze(
-        plan: &ConduitPlan,
-        changed_tasks: &[(DagId, TaskId)],
-    ) -> ImpactReport {
+    pub fn analyze(plan: &ConduitPlan, changed_tasks: &[(DagId, TaskId)]) -> ImpactReport {
         let mut directly_changed_set: HashSet<(DagId, TaskId)> = HashSet::new();
         let mut transitively_affected: Vec<(DagId, TaskId)> = Vec::new();
         let mut per_dag: HashMap<DagId, DagImpact> = HashMap::new();
         let mut total_tasks = 0usize;
 
         for (dag_id, _) in changed_tasks {
-            directly_changed_set.insert((dag_id.clone(), changed_tasks.iter()
-                .find(|(d, _)| d == dag_id)
-                .map(|(_, t)| t.clone())
-                .unwrap_or_default()));
+            directly_changed_set.insert((
+                dag_id.clone(),
+                changed_tasks
+                    .iter()
+                    .find(|(d, _)| d == dag_id)
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_default(),
+            ));
         }
         // Re-collect properly
-        let directly_changed_set: HashSet<(DagId, TaskId)> = changed_tasks.iter().cloned().collect();
+        let directly_changed_set: HashSet<(DagId, TaskId)> =
+            changed_tasks.iter().cloned().collect();
 
         for (dag_id, dag) in &plan.dags {
             total_tasks += dag.tasks.len();
@@ -215,8 +217,16 @@ impl ImpactAnalyzer {
 impl std::fmt::Display for ImpactReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Impact Analysis")?;
-        writeln!(f, "  Directly changed:        {}", self.directly_changed.len())?;
-        writeln!(f, "  Transitively affected:   {}", self.transitively_affected.len())?;
+        writeln!(
+            f,
+            "  Directly changed:        {}",
+            self.directly_changed.len()
+        )?;
+        writeln!(
+            f,
+            "  Transitively affected:   {}",
+            self.transitively_affected.len()
+        )?;
         writeln!(f, "  Total blast radius:      {}", self.total_affected)?;
         writeln!(f, "  Unaffected:              {}", self.unaffected)?;
 
@@ -230,11 +240,7 @@ impl std::fmt::Display for ImpactReport {
                 "  DAG '{}': {}/{} tasks affected",
                 dag_id, impact.affected_tasks, impact.total_tasks
             )?;
-            writeln!(
-                f,
-                "    Root causes: {}",
-                impact.root_causes.join(", ")
-            )?;
+            writeln!(f, "    Root causes: {}", impact.root_causes.join(", "))?;
             writeln!(
                 f,
                 "    Execution order: {}",
@@ -249,8 +255,8 @@ impl std::fmt::Display for ImpactReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conduit_common::dag::*;
     use chrono::Utc;
+    use conduit_common::dag::*;
 
     fn make_task(id: &str, deps: Vec<&str>) -> Task {
         Task {
@@ -321,10 +327,7 @@ mod tests {
             vec!["extract", "transform", "load"],
         );
 
-        let report = ImpactAnalyzer::analyze(
-            &plan,
-            &[("etl".to_string(), "extract".to_string())],
-        );
+        let report = ImpactAnalyzer::analyze(&plan, &[("etl".to_string(), "extract".to_string())]);
 
         assert_eq!(report.total_affected, 3); // extract + transform + load
         assert_eq!(report.transitively_affected.len(), 2); // transform + load
@@ -343,10 +346,7 @@ mod tests {
             vec!["extract", "transform", "load"],
         );
 
-        let report = ImpactAnalyzer::analyze(
-            &plan,
-            &[("etl".to_string(), "load".to_string())],
-        );
+        let report = ImpactAnalyzer::analyze(&plan, &[("etl".to_string(), "load".to_string())]);
 
         assert_eq!(report.total_affected, 1); // only load
         assert_eq!(report.transitively_affected.len(), 0);
@@ -370,13 +370,10 @@ mod tests {
             vec!["a", "b", "c", "d"],
         );
 
-        let report = ImpactAnalyzer::analyze(
-            &plan,
-            &[("diamond".to_string(), "a".to_string())],
-        );
+        let report = ImpactAnalyzer::analyze(&plan, &[("diamond".to_string(), "a".to_string())]);
 
         assert_eq!(report.total_affected, 4); // all tasks
-        // d is only counted once despite two paths from a
+                                              // d is only counted once despite two paths from a
         let dag_impact = report.per_dag.get("diamond").unwrap();
         assert_eq!(dag_impact.affected_tasks, 4);
     }
@@ -396,10 +393,7 @@ mod tests {
             vec!["a", "c", "b", "d"],
         );
 
-        let report = ImpactAnalyzer::analyze(
-            &plan,
-            &[("parallel".to_string(), "a".to_string())],
-        );
+        let report = ImpactAnalyzer::analyze(&plan, &[("parallel".to_string(), "a".to_string())]);
 
         assert_eq!(report.total_affected, 2); // a + b
         assert_eq!(report.unaffected, 2); // c + d
@@ -430,7 +424,10 @@ mod tests {
             max_active_runs: 1,
             on_failure: None,
             tasks: task_map,
-            execution_order: vec!["a", "b", "c", "d"].into_iter().map(String::from).collect(),
+            execution_order: vec!["a", "b", "c", "d"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
             source_file: "test.py".to_string(),
             compiled_at: Utc::now(),
             catchup: true,

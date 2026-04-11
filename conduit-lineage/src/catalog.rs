@@ -151,48 +151,50 @@ pub fn parse_sql_type(type_str: &str) -> ColumnType {
 
     match base {
         // Integer types
-        "INT" | "INTEGER" | "INT2" | "INT4" | "INT8" | "INT16" | "INT32" | "INT64"
-        | "SMALLINT" | "BIGINT" | "TINYINT" | "MEDIUMINT" | "SERIAL" | "BIGSERIAL"
-        | "SMALLSERIAL" | "UINT8" | "UINT16" | "UINT32" | "UINT64"
-        | "NUMBER" => ColumnType::Integer,
+        "INT" | "INTEGER" | "INT2" | "INT4" | "INT8" | "INT16" | "INT32" | "INT64" | "SMALLINT"
+        | "BIGINT" | "TINYINT" | "MEDIUMINT" | "SERIAL" | "BIGSERIAL" | "SMALLSERIAL" | "UINT8"
+        | "UINT16" | "UINT32" | "UINT64" | "NUMBER" => ColumnType::Integer,
 
         // Float types
-        "FLOAT" | "FLOAT4" | "FLOAT8" | "FLOAT32" | "FLOAT64" | "DOUBLE"
-        | "DOUBLE PRECISION" | "REAL" => ColumnType::Float,
+        "FLOAT" | "FLOAT4" | "FLOAT8" | "FLOAT32" | "FLOAT64" | "DOUBLE" | "DOUBLE PRECISION"
+        | "REAL" => ColumnType::Float,
 
         // Decimal types (precision lost in this mapping)
-        "NUMERIC" | "DECIMAL" | "MONEY" => {
-            ColumnType::Decimal {
-                precision: 38,
-                scale: 9,
-            }
-        }
+        "NUMERIC" | "DECIMAL" | "MONEY" => ColumnType::Decimal {
+            precision: 38,
+            scale: 9,
+        },
 
         // String types
-        "VARCHAR" | "TEXT" | "CHAR" | "CHARACTER" | "CHARACTER VARYING" | "BPCHAR"
-        | "NVARCHAR" | "NCHAR" | "NTEXT" | "CLOB" | "LONGTEXT" | "MEDIUMTEXT"
-        | "TINYTEXT" | "STRING" | "FIXEDSTRING" | "ENUM" | "SET"
-        | "NAME" | "UUID" | "CITEXT" => ColumnType::String,
+        "VARCHAR" | "TEXT" | "CHAR" | "CHARACTER" | "CHARACTER VARYING" | "BPCHAR" | "NVARCHAR"
+        | "NCHAR" | "NTEXT" | "CLOB" | "LONGTEXT" | "MEDIUMTEXT" | "TINYTEXT" | "STRING"
+        | "FIXEDSTRING" | "ENUM" | "SET" | "NAME" | "UUID" | "CITEXT" => ColumnType::String,
 
         // Boolean types
         "BOOL" | "BOOLEAN" | "BIT" => ColumnType::Boolean,
 
         // Date/time types
         "DATE" => ColumnType::Date,
-        "TIMESTAMP" | "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE"
-        | "TIMESTAMP WITHOUT TIME ZONE" | "DATETIME" | "DATETIME2"
-        | "SMALLDATETIME" | "TIMESTAMP_NTZ" | "TIMESTAMP_LTZ" | "TIMESTAMP_TZ" => {
+        "TIMESTAMP"
+        | "TIMESTAMPTZ"
+        | "TIMESTAMP WITH TIME ZONE"
+        | "TIMESTAMP WITHOUT TIME ZONE"
+        | "DATETIME"
+        | "DATETIME2"
+        | "SMALLDATETIME"
+        | "TIMESTAMP_NTZ"
+        | "TIMESTAMP_LTZ"
+        | "TIMESTAMP_TZ" => ColumnType::Timestamp,
+        "TIME" | "TIMETZ" | "TIME WITH TIME ZONE" | "TIME WITHOUT TIME ZONE" | "INTERVAL" => {
             ColumnType::Timestamp
         }
-        "TIME" | "TIMETZ" | "TIME WITH TIME ZONE" | "TIME WITHOUT TIME ZONE"
-        | "INTERVAL" => ColumnType::Timestamp,
 
         // JSON types
         "JSON" | "JSONB" | "VARIANT" | "OBJECT" | "MAP" => ColumnType::Json,
 
         // Binary types
-        "BYTEA" | "BLOB" | "BINARY" | "VARBINARY" | "LONGBLOB" | "MEDIUMBLOB"
-        | "TINYBLOB" | "RAW" | "IMAGE" | "BYTES" => ColumnType::Binary,
+        "BYTEA" | "BLOB" | "BINARY" | "VARBINARY" | "LONGBLOB" | "MEDIUMBLOB" | "TINYBLOB"
+        | "RAW" | "IMAGE" | "BYTES" => ColumnType::Binary,
 
         // Array (can't know inner type from just the base name)
         "ARRAY" => ColumnType::Array(Box::new(ColumnType::Unknown)),
@@ -351,7 +353,10 @@ mod tests {
         assert_eq!(parse_sql_type("boolean"), ColumnType::Boolean);
         assert_eq!(parse_sql_type("date"), ColumnType::Date);
         assert_eq!(parse_sql_type("timestamptz"), ColumnType::Timestamp);
-        assert_eq!(parse_sql_type("timestamp without time zone"), ColumnType::Timestamp);
+        assert_eq!(
+            parse_sql_type("timestamp without time zone"),
+            ColumnType::Timestamp
+        );
         assert_eq!(parse_sql_type("jsonb"), ColumnType::Json);
         assert_eq!(parse_sql_type("bytea"), ColumnType::Binary);
         assert_eq!(parse_sql_type("float8"), ColumnType::Float);

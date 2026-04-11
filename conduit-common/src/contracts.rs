@@ -45,8 +45,8 @@
 //! Escape hatch (still runs logic outside the metric system):
 //! - `Custom` → a named assertion; the task emits `pass.{name}::1` or `pass.{name}::0`
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ─── Evidence ───────────────────────────────────────────────────────────────
 
@@ -98,18 +98,13 @@ impl Evidence {
 // ─── Core Types ─────────────────────────────────────────────────────────────
 
 /// Severity of a contract: errors block deployment, warnings don't.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Severity {
     /// Blocks deployment. The pipeline cannot proceed.
+    #[default]
     Error,
     /// Reported in plan output but does not block deployment.
     Warning,
-}
-
-impl Default for Severity {
-    fn default() -> Self {
-        Severity::Error
-    }
 }
 
 /// A single data quality assertion.
@@ -266,11 +261,7 @@ impl ContractEvaluator {
             .map(|contract| Self::evaluate_one(contract, evidence))
             .collect();
 
-        ValidationResult::from_checks(
-            &contracts.task_id,
-            contracts.dag_id.clone(),
-            checks,
-        )
+        ValidationResult::from_checks(&contracts.task_id, contracts.dag_id.clone(), checks)
     }
 
     /// Evaluate a single contract against evidence.
@@ -280,9 +271,7 @@ impl ContractEvaluator {
                 Self::eval_row_count(evidence, *min, *max, *exact)
             }
 
-            ContractCheck::Freshness { max_age } => {
-                Self::eval_freshness(evidence, max_age)
-            }
+            ContractCheck::Freshness { max_age } => Self::eval_freshness(evidence, max_age),
 
             ContractCheck::Unique { .. } => {
                 Self::eval_zero_metric(evidence, "duplicate_count", "duplicates")
@@ -323,8 +312,16 @@ impl ContractEvaluator {
                 let metric = format!("pass.{}", assertion_name);
                 match evidence.get(&metric) {
                     Some(v) if v >= 1.0 => (true, "PASS".to_string(), Some(v)),
-                    Some(v) => (false, format!("Custom assertion '{}' failed", assertion_name), Some(v)),
-                    None => (false, format!("Missing evidence: metric '{}' not emitted", metric), None),
+                    Some(v) => (
+                        false,
+                        format!("Custom assertion '{}' failed", assertion_name),
+                        Some(v),
+                    ),
+                    None => (
+                        false,
+                        format!("Missing evidence: metric '{}' not emitted", metric),
+                        None,
+                    ),
                 }
             }
         };
@@ -350,17 +347,29 @@ impl ContractEvaluator {
                 let count_u64 = count as u64;
                 if let Some(exact) = exact {
                     if count_u64 != exact {
-                        return (false, format!("{} rows, expected exactly {}", count_u64, exact), Some(count));
+                        return (
+                            false,
+                            format!("{} rows, expected exactly {}", count_u64, exact),
+                            Some(count),
+                        );
                     }
                 }
                 if let Some(min) = min {
                     if count_u64 < min {
-                        return (false, format!("{} rows, expected at least {}", count_u64, min), Some(count));
+                        return (
+                            false,
+                            format!("{} rows, expected at least {}", count_u64, min),
+                            Some(count),
+                        );
                     }
                 }
                 if let Some(max) = max {
                     if count_u64 > max {
-                        return (false, format!("{} rows, expected at most {}", count_u64, max), Some(count));
+                        return (
+                            false,
+                            format!("{} rows, expected at most {}", count_u64, max),
+                            Some(count),
+                        );
                     }
                 }
                 (true, format!("row_count={}", count_u64), Some(count))
@@ -376,13 +385,23 @@ impl ContractEvaluator {
     fn eval_freshness(evidence: &Evidence, max_age: &str) -> (bool, String, Option<f64>) {
         let max_seconds = match parse_duration_to_seconds(max_age) {
             Some(s) => s,
-            None => return (false, format!("Invalid max_age format: '{}'", max_age), None),
+            None => {
+                return (
+                    false,
+                    format!("Invalid max_age format: '{}'", max_age),
+                    None,
+                )
+            }
         };
 
         match evidence.get("data_age_seconds") {
             Some(age) => {
                 if age <= max_seconds {
-                    (true, format!("data_age={}s (max {}s)", age as u64, max_seconds as u64), Some(age))
+                    (
+                        true,
+                        format!("data_age={}s (max {}s)", age as u64, max_seconds as u64),
+                        Some(age),
+                    )
                 } else {
                     (
                         false,
@@ -408,15 +427,18 @@ impl ContractEvaluator {
         label: &str,
     ) -> (bool, String, Option<f64>) {
         match evidence.get(metric_name) {
-            Some(count) if count == 0.0 => {
-                (true, format!("0 {}", label), Some(0.0))
-            }
-            Some(count) => {
-                (false, format!("{} {} found", count as u64, label), Some(count))
-            }
+            Some(0.0) => (true, format!("0 {}", label), Some(0.0)),
+            Some(count) => (
+                false,
+                format!("{} {} found", count as u64, label),
+                Some(count),
+            ),
             None => (
                 false,
-                format!("Missing evidence: metric '{}' not emitted by task", metric_name),
+                format!(
+                    "Missing evidence: metric '{}' not emitted by task",
+                    metric_name
+                ),
                 None,
             ),
         }
@@ -432,7 +454,11 @@ impl ContractEvaluator {
             Some(null_rate) => {
                 let non_null_rate = 1.0 - null_rate;
                 if non_null_rate >= min_rate {
-                    (true, format!("non_null_rate={:.2}%", non_null_rate * 100.0), Some(non_null_rate))
+                    (
+                        true,
+                        format!("non_null_rate={:.2}%", non_null_rate * 100.0),
+                        Some(non_null_rate),
+                    )
                 } else {
                     (
                         false,
@@ -463,7 +489,10 @@ impl ContractEvaluator {
                 if !allow_decrease && delta < 0.0 {
                     return (
                         false,
-                        format!("Row count decreased by {:.1}% (decreases not allowed)", delta.abs() * 100.0),
+                        format!(
+                            "Row count decreased by {:.1}% (decreases not allowed)",
+                            delta.abs() * 100.0
+                        ),
                         Some(delta),
                     );
                 }
@@ -478,7 +507,11 @@ impl ContractEvaluator {
                         Some(delta),
                     )
                 } else {
-                    (true, format!("delta={:.1}%", delta.abs() * 100.0), Some(delta))
+                    (
+                        true,
+                        format!("delta={:.1}%", delta.abs() * 100.0),
+                        Some(delta),
+                    )
                 }
             }
             None => (
@@ -500,24 +533,39 @@ impl ContractEvaluator {
             Some(value) => {
                 if let Some(exact) = exact {
                     if (value - exact).abs() > f64::EPSILON {
-                        return (false, format!("{}={}, expected exactly {}", metric_name, value, exact), Some(value));
+                        return (
+                            false,
+                            format!("{}={}, expected exactly {}", metric_name, value, exact),
+                            Some(value),
+                        );
                     }
                 }
                 if let Some(min) = min {
                     if value < min {
-                        return (false, format!("{}={}, expected at least {}", metric_name, value, min), Some(value));
+                        return (
+                            false,
+                            format!("{}={}, expected at least {}", metric_name, value, min),
+                            Some(value),
+                        );
                     }
                 }
                 if let Some(max) = max {
                     if value > max {
-                        return (false, format!("{}={}, expected at most {}", metric_name, value, max), Some(value));
+                        return (
+                            false,
+                            format!("{}={}, expected at most {}", metric_name, value, max),
+                            Some(value),
+                        );
                     }
                 }
                 (true, format!("{}={}", metric_name, value), Some(value))
             }
             None => (
                 false,
-                format!("Missing evidence: metric '{}' not emitted by task", metric_name),
+                format!(
+                    "Missing evidence: metric '{}' not emitted by task",
+                    metric_name
+                ),
                 None,
             ),
         }
@@ -527,9 +575,15 @@ impl ContractEvaluator {
         match check {
             ContractCheck::RowCount { min, max, exact } => {
                 let mut parts = vec![];
-                if let Some(v) = exact { parts.push(format!("exactly {}", v)); }
-                if let Some(v) = min { parts.push(format!("min={}", v)); }
-                if let Some(v) = max { parts.push(format!("max={}", v)); }
+                if let Some(v) = exact {
+                    parts.push(format!("exactly {}", v));
+                }
+                if let Some(v) = min {
+                    parts.push(format!("min={}", v));
+                }
+                if let Some(v) = max {
+                    parts.push(format!("max={}", v));
+                }
                 Some(parts.join(", "))
             }
             ContractCheck::Freshness { max_age } => Some(format!("max_age={}", max_age)),
@@ -537,11 +591,22 @@ impl ContractEvaluator {
             ContractCheck::NotNullRate { column, min_rate } => {
                 Some(format!("not_null({}, {:.0}%)", column, min_rate * 100.0))
             }
-            ContractCheck::Metric { metric_name, min, max, exact } => {
+            ContractCheck::Metric {
+                metric_name,
+                min,
+                max,
+                exact,
+            } => {
                 let mut parts = vec![metric_name.clone()];
-                if let Some(v) = exact { parts.push(format!("exactly {}", v)); }
-                if let Some(v) = min { parts.push(format!("min={}", v)); }
-                if let Some(v) = max { parts.push(format!("max={}", v)); }
+                if let Some(v) = exact {
+                    parts.push(format!("exactly {}", v));
+                }
+                if let Some(v) = min {
+                    parts.push(format!("min={}", v));
+                }
+                if let Some(v) = max {
+                    parts.push(format!("max={}", v));
+                }
                 Some(parts.join(", "))
             }
             _ => None,
@@ -663,11 +728,7 @@ impl TaskContracts {
     }
 
     /// Builder: add an accepted values check.
-    pub fn accepted_values(
-        mut self,
-        column: impl Into<String>,
-        values: Vec<String>,
-    ) -> Self {
+    pub fn accepted_values(mut self, column: impl Into<String>, values: Vec<String>) -> Self {
         let col = column.into();
         self.checks.push(DataContract {
             name: format!("accepted_values({}, [{}])", col, values.join(",")),
@@ -869,8 +930,12 @@ impl std::fmt::Display for ValidationResult {
         writeln!(
             f,
             "Contracts for '{}': {} ({}/{} checks passed, {} errors, {} warnings)",
-            scope, status, self.passed_checks, self.total_checks,
-            self.error_count, self.warning_count
+            scope,
+            status,
+            self.passed_checks,
+            self.total_checks,
+            self.error_count,
+            self.warning_count
         )?;
 
         for check in &self.checks {
@@ -1088,8 +1153,7 @@ mod tests {
 
     #[test]
     fn eval_generic_metric() {
-        let tc = TaskContracts::new("task")
-            .metric("accuracy", Some(0.95), None);
+        let tc = TaskContracts::new("task").metric("accuracy", Some(0.95), None);
         let mut ev = Evidence::new();
         ev.record("accuracy", 0.98);
 
@@ -1099,8 +1163,7 @@ mod tests {
 
     #[test]
     fn eval_generic_metric_fails() {
-        let tc = TaskContracts::new("task")
-            .metric("accuracy", Some(0.95), None);
+        let tc = TaskContracts::new("task").metric("accuracy", Some(0.95), None);
         let mut ev = Evidence::new();
         ev.record("accuracy", 0.80);
 

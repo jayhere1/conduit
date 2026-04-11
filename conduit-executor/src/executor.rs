@@ -4,11 +4,7 @@
 //! and manages their execution as isolated child processes.
 
 use crate::process_runner::{ProcessRunner, TaskContext};
-use conduit_common::{
-    ConduitError, ConduitResult,
-    dag::Task,
-    metrics,
-};
+use conduit_common::{dag::Task, metrics, ConduitError, ConduitResult};
 use conduit_providers::ProviderRegistry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -28,6 +24,7 @@ pub enum TaskOutcome {
 
 /// Commands the executor receives from the scheduler.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ExecutorCommand {
     /// Dispatch a task for execution.
     DispatchTask {
@@ -172,6 +169,7 @@ impl TaskExecutor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_dispatch_task(
         &mut self,
         task: Task,
@@ -198,22 +196,32 @@ impl TaskExecutor {
             }
 
             // Queue instead of silently dropping
-            self.deferred_queue.push_back(ExecutorCommand::DispatchTask {
-                task,
-                dag_id,
-                run_id,
-                attempt,
-                logical_date,
-                environment,
-                params,
-            });
+            self.deferred_queue
+                .push_back(ExecutorCommand::DispatchTask {
+                    task,
+                    dag_id,
+                    run_id,
+                    attempt,
+                    logical_date,
+                    environment,
+                    params,
+                });
             return Ok(());
         }
 
-        self.spawn_task(task, dag_id, run_id, attempt, logical_date, environment, params);
+        self.spawn_task(
+            task,
+            dag_id,
+            run_id,
+            attempt,
+            logical_date,
+            environment,
+            params,
+        );
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_task(
         &mut self,
         task: Task,
@@ -353,7 +361,10 @@ impl TaskExecutor {
             // Aborting the tokio task will drop the future, which triggers
             // ChildGuard::drop → start_kill on the child process.
             handle.abort();
-            debug!(task_id = task_id, "Task handle aborted, child process will be killed");
+            debug!(
+                task_id = task_id,
+                "Task handle aborted, child process will be killed"
+            );
         }
 
         Ok(())
@@ -377,7 +388,15 @@ impl TaskExecutor {
                         remaining_queued = self.deferred_queue.len(),
                         "Dispatching deferred task"
                     );
-                    self.spawn_task(task, dag_id, run_id, attempt, logical_date, environment, params);
+                    self.spawn_task(
+                        task,
+                        dag_id,
+                        run_id,
+                        attempt,
+                        logical_date,
+                        environment,
+                        params,
+                    );
                 }
                 _ => break,
             }

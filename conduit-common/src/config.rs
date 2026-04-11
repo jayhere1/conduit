@@ -92,9 +92,15 @@ pub struct VaultSecretsConfig {
     pub timeout_secs: u64,
 }
 
-fn default_vault_auth() -> String { "token".to_string() }
-fn default_vault_mount() -> String { "secret".to_string() }
-fn default_timeout_secs() -> u64 { 5 }
+fn default_vault_auth() -> String {
+    "token".to_string()
+}
+fn default_vault_mount() -> String {
+    "secret".to_string()
+}
+fn default_timeout_secs() -> u64 {
+    5
+}
 
 /// AWS secrets backend config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,8 +186,7 @@ impl ConduitConfig {
             return Err(ConduitError::FileNotFound(path.display().to_string()));
         }
         let content = std::fs::read_to_string(path)?;
-        // Use serde_json for now; swap to serde_yaml when added as dependency
-        serde_json::from_str(&content).map_err(|e| {
+        serde_yaml::from_str(&content).map_err(|e| {
             ConduitError::ConfigError(format!("Failed to parse {}: {}", path.display(), e))
         })
     }

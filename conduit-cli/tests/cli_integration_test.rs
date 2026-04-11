@@ -338,9 +338,9 @@ fn status_fresh_state() {
     let snapshot_store = conduit_state::SnapshotStore::new();
 
     // Should be able to get production env (default)
-    let env = env_mgr.get("production").unwrap_or_else(|_| {
-        conduit_common::snapshot::Environment::new("production")
-    });
+    let env = env_mgr
+        .get("production")
+        .unwrap_or_else(|_| conduit_common::snapshot::Environment::new("production"));
 
     assert_eq!(env.id, "production");
     assert_eq!(env.snapshot_map.len(), 0);
@@ -490,12 +490,7 @@ fn compile_check_mode_does_not_write() {
     let dags_path = dir.path().join("dags");
     fs::create_dir_all(&dags_path).unwrap();
 
-    write_yaml_dag(
-        &dags_path,
-        "check_dag",
-        &[("step1", "shell", &[])],
-    )
-    .unwrap();
+    write_yaml_dag(&dags_path, "check_dag", &[("step1", "shell", &[])]).unwrap();
 
     let output_path = dir.path().join("should_not_exist.json");
 

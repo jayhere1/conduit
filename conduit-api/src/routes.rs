@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use axum::routing::{get, post, delete};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use axum::http::{header, Method};
 use tower_http::cors::CorsLayer;
@@ -34,76 +34,105 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // ── Health & Info (public) ───────────────────────────
         .route("/health", get(handlers::health_check))
         .route("/info", get(handlers::system_info))
-
         // ── Documentation (public) ──────────────────────────
         .route("/docs/openapi.json", get(handlers::docs::openapi_spec))
         .route("/docs", get(handlers::docs::swagger_ui))
         .route("/docs/redoc", get(handlers::docs::redoc_ui))
-
         // ── Authentication ───────────────────────────────────
         .route("/auth/keys", post(handlers::auth::create_key))
         .route("/auth/keys", get(handlers::auth::list_keys))
         .route("/auth/keys/:key_id", get(handlers::auth::get_key))
         .route("/auth/keys/:key_id", delete(handlers::auth::revoke_key))
         .route("/auth/me", get(handlers::auth::whoami))
-
         // ── DAGs ─────────────────────────────────────────────
         .route("/dags", get(handlers::dags::list_dags))
         .route("/dags/:dag_id", get(handlers::dags::get_dag))
         .route("/dags/:dag_id/graph", get(handlers::dags::get_dag_graph))
         .route("/dags/compile", post(handlers::dags::compile_dags))
-
         // ── DAG Runs ─────────────────────────────────────────
         .route("/dags/:dag_id/runs", get(handlers::runs::list_runs))
         .route("/dags/:dag_id/runs", post(handlers::runs::trigger_run))
         .route("/runs/:run_id", get(handlers::runs::get_run))
         .route("/runs", get(handlers::runs::list_all_runs))
-
         // ── Environments ─────────────────────────────────────
         .route("/environments", get(handlers::envs::list_environments))
         .route("/environments", post(handlers::envs::create_environment))
-        .route("/environments/:env_name", get(handlers::envs::get_environment))
-        .route("/environments/:env_name", delete(handlers::envs::delete_environment))
-        .route("/environments/promote", post(handlers::envs::promote_environment))
-        .route("/environments/:env_name/diff/:other_env", get(handlers::envs::diff_environments))
-
+        .route(
+            "/environments/:env_name",
+            get(handlers::envs::get_environment),
+        )
+        .route(
+            "/environments/:env_name",
+            delete(handlers::envs::delete_environment),
+        )
+        .route(
+            "/environments/promote",
+            post(handlers::envs::promote_environment),
+        )
+        .route(
+            "/environments/:env_name/diff/:other_env",
+            get(handlers::envs::diff_environments),
+        )
         // ── Plan/Apply ───────────────────────────────────────
         .route("/plan", post(handlers::plan::generate_plan))
         .route("/apply", post(handlers::plan::apply_plan))
-
         // ── Events / History ─────────────────────────────────
         .route("/events", get(handlers::events::list_events))
         .route("/events/:sequence", get(handlers::events::get_event))
-
         // ── Lineage ────────────────────────────────────────────
         .route("/lineage/sql", post(handlers::lineage::extract_sql_lineage))
-        .route("/lineage/trace/upstream", post(handlers::lineage::trace_upstream))
-        .route("/lineage/trace/downstream", post(handlers::lineage::trace_downstream))
+        .route(
+            "/lineage/trace/upstream",
+            post(handlers::lineage::trace_upstream),
+        )
+        .route(
+            "/lineage/trace/downstream",
+            post(handlers::lineage::trace_downstream),
+        )
         .route("/lineage/graph", post(handlers::lineage::lineage_graph))
         .route("/lineage/schema/diff", post(handlers::lineage::schema_diff))
-        .route("/lineage/contracts/validate", post(handlers::lineage::validate_contract))
-        .route("/lineage/catalog/refresh", post(handlers::lineage::refresh_catalog))
-
+        .route(
+            "/lineage/contracts/validate",
+            post(handlers::lineage::validate_contract),
+        )
+        .route(
+            "/lineage/catalog/refresh",
+            post(handlers::lineage::refresh_catalog),
+        )
         // ── Contracts ────────────────────────────────────────────
         .route("/contracts", get(handlers::contracts::list_contracts))
-        .route("/contracts/:dag_id", get(handlers::contracts::dag_contracts))
-        .route("/contracts/:dag_id/:task_id", get(handlers::contracts::task_contracts))
-
+        .route(
+            "/contracts/:dag_id",
+            get(handlers::contracts::dag_contracts),
+        )
+        .route(
+            "/contracts/:dag_id/:task_id",
+            get(handlers::contracts::task_contracts),
+        )
         // ── Metrics ─────────────────────────────────────────────
         .route("/metrics", get(handlers::metrics::list_metrics))
-        .route("/metrics/:dag_id/:task_id", get(handlers::metrics::get_task_metrics))
-
+        .route(
+            "/metrics/:dag_id/:task_id",
+            get(handlers::metrics::get_task_metrics),
+        )
         // ── Connections ────────────────────────────────────────
         .route("/connections", get(handlers::connections::list_connections))
-        .route("/connections/providers", get(handlers::connections::list_providers))
-        .route("/connections/:name", get(handlers::connections::get_connection))
-
+        .route(
+            "/connections/providers",
+            get(handlers::connections::list_providers),
+        )
+        .route(
+            "/connections/:name",
+            get(handlers::connections::get_connection),
+        )
         // ── Backfill ────────────────────────────────────────────
         .route("/backfill", post(handlers::backfill::create_backfill))
-
         // ── Cluster ────────────────────────────────────────────
         .route("/cluster/status", get(handlers::cluster::cluster_status))
-        .route("/cluster/workers/:id/drain", post(handlers::cluster::drain_worker));
+        .route(
+            "/cluster/workers/:id/drain",
+            post(handlers::cluster::drain_worker),
+        );
 
     // Apply per-IP rate limiting to API and WebSocket routes.
     // The Extension layer must be outermost so the limiter is available
@@ -134,9 +163,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     if let Some(ui_dir) = &state.ui_dir {
         if ui_dir.exists() {
             let index_html = ui_dir.join("index.html");
-            router = router.fallback_service(
-                ServeDir::new(ui_dir).fallback(ServeFile::new(index_html)),
-            );
+            router =
+                router.fallback_service(ServeDir::new(ui_dir).fallback(ServeFile::new(index_html)));
             tracing::info!(path = %ui_dir.display(), "Serving UI from static assets");
         }
     }

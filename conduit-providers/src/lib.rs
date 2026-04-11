@@ -24,17 +24,17 @@
 //! - [`HttpProvider`] — REST APIs and webhooks
 //! - [`StreamProvider`] — Message queues (Kafka, Kinesis, Pub/Sub)
 
+pub mod errors;
+pub mod plugin;
+pub mod providers;
+pub mod registry;
+pub mod secrets;
 pub mod traits;
 pub mod traits_saas;
-pub mod registry;
-pub mod errors;
-pub mod providers;
-pub mod secrets;
-pub mod plugin;
 
-pub use traits::*;
-pub use traits_saas::{SaasProvider, SaasResult, RateLimitInfo, DocumentProvider, DocumentResult};
-pub use registry::ProviderRegistry;
 pub use errors::ProviderError;
-pub use secrets::{SecretsChain, SecretsConfig, SecretsBackend, SecretsError};
 pub use plugin::{PluginManager, PluginManifest};
+pub use registry::ProviderRegistry;
+pub use secrets::{SecretsBackend, SecretsChain, SecretsConfig, SecretsError};
+pub use traits::*;
+pub use traits_saas::{DocumentProvider, DocumentResult, RateLimitInfo, SaasProvider, SaasResult};

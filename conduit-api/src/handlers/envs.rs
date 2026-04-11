@@ -111,7 +111,10 @@ pub async fn delete_environment(
     State(state): State<Arc<AppState>>,
     Path(env_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    state.env_manager.delete(&env_name).map_err(ApiError::from)?;
+    state
+        .env_manager
+        .delete(&env_name)
+        .map_err(ApiError::from)?;
 
     Ok(Json(json!({
         "message": format!("Environment '{}' deleted", env_name),
@@ -170,7 +173,8 @@ pub async fn diff_environments(
     for (key, snap_id) in &env1.snapshot_map {
         match env2.snapshot_map.get(key) {
             None => {
-                only_in_first.push(json!({ "dagId": key.0, "taskId": key.1, "snapshotId": snap_id }));
+                only_in_first
+                    .push(json!({ "dagId": key.0, "taskId": key.1, "snapshotId": snap_id }));
                 items.push(json!({
                     "task": format!("{}.{}", key.0, key.1),
                     "sourceSnapshot": snap_id,

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Provider plugin system: connection registry and data source adapters"
 
+[features]
+default = ["duckdb"]
+duckdb = ["dep:duckdb"]
+
 [dependencies]
 conduit-common = { path = "../conduit-common" }
 tokio = { workspace = true }
@@ -22,7 +26,7 @@ reqwest = { workspace = true }
 percent-encoding = { workspace = true }
 jsonwebtoken = "9"
 base64 = "0.22"
-duckdb = { version = "1", features = ["bundled"] }
+duckdb = { workspace = true, optional = true }
 rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"] }
 rskafka = "0.6"
 

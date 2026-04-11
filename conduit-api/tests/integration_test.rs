@@ -48,9 +48,7 @@ async fn get_with_auth(
     path: &str,
     token: Option<&str>,
 ) -> (StatusCode, String) {
-    let mut req = Request::builder()
-        .method("GET")
-        .uri(path);
+    let mut req = Request::builder().method("GET").uri(path);
 
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {}", t));
@@ -96,9 +94,7 @@ async fn delete_with_auth(
     path: &str,
     token: Option<&str>,
 ) -> (StatusCode, String) {
-    let mut req = Request::builder()
-        .method("DELETE")
-        .uri(path);
+    let mut req = Request::builder().method("DELETE").uri(path);
 
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {}", t));
@@ -186,7 +182,9 @@ async fn list_environments_has_production() {
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     // Handler returns { "environments": [...], "total": N }
     let envs = resp["environments"].as_array().unwrap();
-    assert!(envs.iter().any(|e| e.get("name").and_then(|n| n.as_str()) == Some("production")));
+    assert!(envs
+        .iter()
+        .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("production")));
 }
 
 #[tokio::test]
@@ -199,7 +197,8 @@ async fn create_and_get_environment() {
         "/api/v1/environments",
         r#"{"name": "staging", "based_on": "production"}"#,
         None,
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "Create env failed: {}", body);
 
     // Retrieve it
@@ -227,7 +226,11 @@ async fn list_connections_returns_array() {
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     // Handler returns { "connections": [...], "total": N }
     let conns = &resp["connections"];
-    assert!(conns.is_array(), "Expected connections array, got: {}", body);
+    assert!(
+        conns.is_array(),
+        "Expected connections array, got: {}",
+        body
+    );
 }
 
 #[tokio::test]
@@ -238,7 +241,11 @@ async fn list_providers_returns_array() {
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     // Handler returns { "providers": [...], "total": N }
     let providers = &resp["providers"];
-    assert!(providers.is_array(), "Expected providers array, got: {}", body);
+    assert!(
+        providers.is_array(),
+        "Expected providers array, got: {}",
+        body
+    );
 }
 
 // ─── Lineage Endpoints (no auth) ─────────────────────────────────────────
@@ -252,8 +259,14 @@ async fn extract_sql_lineage() {
         "/api/v1/lineage/sql",
         r#"{"sql": "SELECT a, b FROM source_table WHERE a > 1", "source_task_id": "extract_task"}"#,
         None,
-    ).await;
-    assert_eq!(status, StatusCode::OK, "Lineage extraction failed: {}", body);
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Lineage extraction failed: {}",
+        body
+    );
     let result: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(result.is_object());
 }
@@ -268,7 +281,11 @@ async fn list_contracts_returns_array() {
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     // Handler returns { "contracts": [...], ... }
     let contracts = &resp["contracts"];
-    assert!(contracts.is_array(), "Expected contracts array, got: {}", body);
+    assert!(
+        contracts.is_array(),
+        "Expected contracts array, got: {}",
+        body
+    );
 }
 
 // ─── Metrics Endpoints (no auth) ─────────────────────────────────────────
@@ -329,13 +346,16 @@ async fn auth_full_lifecycle() {
     let (router, state) = app(true);
 
     // Step 1: Create a bootstrap admin key directly on the store
-    let (raw_key, _) = state.auth_store.create_key(
-        "integration-test-admin",
-        conduit_api::auth::Role::Admin,
-        "test",
-        Some("Integration test key".to_string()),
-        None,
-    ).unwrap();
+    let (raw_key, _) = state
+        .auth_store
+        .create_key(
+            "integration-test-admin",
+            conduit_api::auth::Role::Admin,
+            "test",
+            Some("Integration test key".to_string()),
+            None,
+        )
+        .unwrap();
 
     // Step 2: Authenticate and access protected endpoint
     let (status, body) = get_with_auth(&router, "/api/v1/auth/me", Some(&raw_key)).await;
@@ -351,7 +371,8 @@ async fn auth_full_lifecycle() {
         "/api/v1/auth/keys",
         r#"{"name": "viewer-key", "role": "viewer", "description": "Read-only"}"#,
         Some(&raw_key),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "Create viewer key failed: {}", body);
     let created: serde_json::Value = serde_json::from_str(&body).unwrap();
     let viewer_key = created.get("key").and_then(|k| k.as_str()).unwrap();
@@ -366,14 +387,18 @@ async fn auth_full_lifecycle() {
         "/api/v1/auth/keys",
         r#"{"name": "hack", "role": "admin"}"#,
         Some(viewer_key),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     // Step 7: List keys shows both
     let (status, body) = get_with_auth(&router, "/api/v1/auth/keys", Some(&raw_key)).await;
     assert_eq!(status, StatusCode::OK);
     let keys_resp: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let keys = keys_resp.get("keys").and_then(|k| k.as_array()).or_else(|| keys_resp.as_array());
+    let keys = keys_resp
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .or_else(|| keys_resp.as_array());
     assert!(keys.unwrap().len() >= 2);
 
     // Step 8: Revoke the viewer key
@@ -382,7 +407,8 @@ async fn auth_full_lifecycle() {
         &router,
         &format!("/api/v1/auth/keys/{}", viewer_id),
         Some(&raw_key),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // Step 9: Revoked key can no longer access
@@ -394,7 +420,12 @@ async fn auth_full_lifecycle() {
 async fn auth_invalid_token_returns_401() {
     let (router, _) = app(true);
     // Use auth/me which enforces RequireAuth
-    let (status, _) = get_with_auth(&router, "/api/v1/auth/me", Some("cdt_invalid_garbage_token_12345")).await;
+    let (status, _) = get_with_auth(
+        &router,
+        "/api/v1/auth/me",
+        Some("cdt_invalid_garbage_token_12345"),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -403,13 +434,16 @@ async fn auth_operator_can_trigger_run() {
     let (router, state) = app(true);
 
     // Create an operator key
-    let (op_key, _) = state.auth_store.create_key(
-        "operator-key",
-        conduit_api::auth::Role::Operator,
-        "test",
-        None,
-        None,
-    ).unwrap();
+    let (op_key, _) = state
+        .auth_store
+        .create_key(
+            "operator-key",
+            conduit_api::auth::Role::Operator,
+            "test",
+            None,
+            None,
+        )
+        .unwrap();
 
     // Operators should be able to POST (trigger runs, etc.)
     let (status, _) = post_json(
@@ -417,10 +451,14 @@ async fn auth_operator_can_trigger_run() {
         "/api/v1/dags/test_dag/runs",
         r#"{"triggered_by": "test"}"#,
         Some(&op_key),
-    ).await;
+    )
+    .await;
     // May return 404 (no such dag) or 200, but not 401/403
-    assert!(status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN,
-        "Operator should have permission, got: {}", status);
+    assert!(
+        status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN,
+        "Operator should have permission, got: {}",
+        status
+    );
 }
 
 // ─── Events Endpoints (no auth) ──────────────────────────────────────────
@@ -446,10 +484,15 @@ async fn plan_endpoint_accepts_json() {
         "/api/v1/plan",
         r#"{"environment": "production"}"#,
         None,
-    ).await;
+    )
+    .await;
     // Plan may return 200 or a specific status depending on state
-    assert!(status.is_success() || status == StatusCode::BAD_REQUEST,
-        "Plan returned unexpected status {}: {}", status, body);
+    assert!(
+        status.is_success() || status == StatusCode::BAD_REQUEST,
+        "Plan returned unexpected status {}: {}",
+        status,
+        body
+    );
 }
 
 // ─── Unknown Routes ──────────────────────────────────────────────────────
@@ -466,13 +509,10 @@ async fn unknown_api_route_returns_404() {
 #[tokio::test]
 async fn backfill_requires_body() {
     let (router, _) = app(false);
-    let (status, _) = post_json(
-        &router,
-        "/api/v1/backfill",
-        r#"{}"#,
-        None,
-    ).await;
+    let (status, _) = post_json(&router, "/api/v1/backfill", r#"{}"#, None).await;
     // Should fail with 400 (missing fields) or 422, not 500
-    assert!(status != StatusCode::INTERNAL_SERVER_ERROR,
-        "Backfill with empty body returned 500");
+    assert!(
+        status != StatusCode::INTERNAL_SERVER_ERROR,
+        "Backfill with empty body returned 500"
+    );
 }

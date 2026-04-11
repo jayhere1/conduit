@@ -102,15 +102,9 @@ impl LineageGraph {
             transform_type,
         };
 
-        self.forward
-            .entry(source)
-            .or_default()
-            .push(edge.clone());
+        self.forward.entry(source).or_default().push(edge.clone());
 
-        self.reverse
-            .entry(target)
-            .or_default()
-            .push(edge);
+        self.reverse.entry(target).or_default().push(edge);
     }
 
     /// Trace upstream: "Where does this column come from?"
@@ -136,10 +130,7 @@ impl LineageGraph {
             }
         }
 
-        let sources: Vec<ColumnRef> = visited
-            .into_iter()
-            .filter(|c| c != column)
-            .collect();
+        let sources: Vec<ColumnRef> = visited.into_iter().filter(|c| c != column).collect();
 
         LineageTrace {
             origin: column.clone(),
@@ -171,10 +162,7 @@ impl LineageGraph {
             }
         }
 
-        let dependents: Vec<ColumnRef> = visited
-            .into_iter()
-            .filter(|c| c != column)
-            .collect();
+        let dependents: Vec<ColumnRef> = visited.into_iter().filter(|c| c != column).collect();
 
         LineageTrace {
             origin: column.clone(),
@@ -214,7 +202,8 @@ impl LineageGraph {
 
     /// Export the graph as a serializable structure for visualization.
     pub fn to_visualization_data(&self) -> serde_json::Value {
-        let nodes: Vec<serde_json::Value> = self.columns
+        let nodes: Vec<serde_json::Value> = self
+            .columns
             .iter()
             .map(|col| {
                 serde_json::json!({
@@ -225,7 +214,8 @@ impl LineageGraph {
             })
             .collect();
 
-        let edges: Vec<serde_json::Value> = self.all_edges()
+        let edges: Vec<serde_json::Value> = self
+            .all_edges()
             .iter()
             .map(|edge| {
                 serde_json::json!({
@@ -284,7 +274,11 @@ impl std::fmt::Display for LineageTrace {
         }
         writeln!(f, "  {} edges traversed:", self.edges.len())?;
         for edge in &self.edges {
-            writeln!(f, "    {} -> {} ({:?})", edge.source, edge.target, edge.transform_type)?;
+            writeln!(
+                f,
+                "    {} -> {} ({:?})",
+                edge.source, edge.target, edge.transform_type
+            )?;
         }
         Ok(())
     }
@@ -348,8 +342,14 @@ mod tests {
         let trace = g.trace_upstream(&ColumnRef::new("aggregate", "daily_total"));
 
         // daily_total ← transform.total_amount ← extract_orders.total
-        assert!(trace.columns.iter().any(|c| c.task_id == "transform" && c.column_name == "total_amount"));
-        assert!(trace.columns.iter().any(|c| c.task_id == "extract_orders" && c.column_name == "total"));
+        assert!(trace
+            .columns
+            .iter()
+            .any(|c| c.task_id == "transform" && c.column_name == "total_amount"));
+        assert!(trace
+            .columns
+            .iter()
+            .any(|c| c.task_id == "extract_orders" && c.column_name == "total"));
         assert_eq!(trace.edges.len(), 2);
     }
 
@@ -360,8 +360,14 @@ mod tests {
         let trace = g.trace_downstream(&ColumnRef::new("extract_orders", "total"));
 
         // total → transform.total_amount → aggregate.daily_total
-        assert!(trace.columns.iter().any(|c| c.task_id == "transform" && c.column_name == "total_amount"));
-        assert!(trace.columns.iter().any(|c| c.task_id == "aggregate" && c.column_name == "daily_total"));
+        assert!(trace
+            .columns
+            .iter()
+            .any(|c| c.task_id == "transform" && c.column_name == "total_amount"));
+        assert!(trace
+            .columns
+            .iter()
+            .any(|c| c.task_id == "aggregate" && c.column_name == "daily_total"));
     }
 
     #[test]

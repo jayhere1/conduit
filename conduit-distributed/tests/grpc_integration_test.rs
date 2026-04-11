@@ -45,7 +45,11 @@ use proto::coordinator_client::CoordinatorClient;
 
 /// Start a coordinator gRPC server on an ephemeral port and return the
 /// address plus a handle to the coordinator so tests can inspect state.
-async fn start_server() -> (SocketAddr, Arc<Coordinator>, mpsc::UnboundedReceiver<TaskResult>) {
+async fn start_server() -> (
+    SocketAddr,
+    Arc<Coordinator>,
+    mpsc::UnboundedReceiver<TaskResult>,
+) {
     let config = CoordinatorConfig {
         bind_addr: "127.0.0.1:0".into(),
         health_check_interval_secs: 60, // disable auto-checks during tests
@@ -78,9 +82,7 @@ async fn start_server() -> (SocketAddr, Arc<Coordinator>, mpsc::UnboundedReceive
 }
 
 /// Connect a tonic client to the server.
-async fn connect_client(
-    addr: SocketAddr,
-) -> CoordinatorClient<tonic::transport::Channel> {
+async fn connect_client(addr: SocketAddr) -> CoordinatorClient<tonic::transport::Channel> {
     let endpoint = format!("http://{}", addr);
     CoordinatorClient::connect(endpoint)
         .await
@@ -225,7 +227,8 @@ async fn full_task_lifecycle() {
         environment: "test".into(),
         params: HashMap::new(),
     };
-    let assignment = coordinator.create_assignment("dag1", "run1", "lifecycle-task", 0, spec, ctx, 300);
+    let assignment =
+        coordinator.create_assignment("dag1", "run1", "lifecycle-task", 0, spec, ctx, 300);
     let assignment_id = assignment.assignment_id.clone();
 
     coordinator.submit_task(assignment, "default").await;
@@ -535,7 +538,8 @@ async fn queued_task_dispatched_on_worker_arrival() {
         environment: "test".into(),
         params: HashMap::new(),
     };
-    let assignment = coordinator.create_assignment("dag1", "run1", "queued-task", 0, spec, ctx, 300);
+    let assignment =
+        coordinator.create_assignment("dag1", "run1", "queued-task", 0, spec, ctx, 300);
     coordinator.submit_task(assignment, "default").await;
 
     assert_eq!(coordinator.pending_count().await, 1);

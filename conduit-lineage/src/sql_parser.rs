@@ -27,8 +27,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Query, Select,
-    SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, WindowSpec, WindowType,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Query, Select, SelectItem, SetExpr,
+    Statement, TableFactor, TableWithJoins, WindowSpec, WindowType,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -208,9 +208,7 @@ impl SqlLineageExtractor {
     ) -> SqlLineage {
         match body {
             SetExpr::Select(select) => Self::extract_from_select(select, cte_map, catalog),
-            SetExpr::Query(inner_query) => {
-                Self::extract_from_query(inner_query, cte_map, catalog)
-            }
+            SetExpr::Query(inner_query) => Self::extract_from_query(inner_query, cte_map, catalog),
             SetExpr::SetOperation { left, right, .. } => {
                 // UNION / INTERSECT / EXCEPT — merge lineage from both branches
                 let left_lineage = Self::extract_from_set_expr(left, cte_map, catalog);
@@ -272,33 +270,24 @@ impl SqlLineageExtractor {
 
         let alias_map: HashMap<String, String> = source_tables
             .iter()
-            .filter_map(|t| {
-                t.alias
-                    .as_ref()
-                    .map(|a| (a.to_lowercase(), t.name.clone()))
-            })
+            .filter_map(|t| t.alias.as_ref().map(|a| (a.to_lowercase(), t.name.clone())))
             .collect();
 
         // Build a combined alias map that includes CTE-resolved tables
         // If a source table name matches a CTE, its columns trace through the CTE
         let _ = cte_map; // CTE resolution is via source_tables names matching cte_map keys
 
-        let (mut output_columns, mut column_mappings) =
-            Self::extract_columns_from_projection(
-                &select.projection,
-                &source_tables,
-                &alias_map,
-                catalog,
-            );
+        let (mut output_columns, mut column_mappings) = Self::extract_columns_from_projection(
+            &select.projection,
+            &source_tables,
+            &alias_map,
+            catalog,
+        );
 
         // Track WHERE clause column dependencies
         if let Some(ref selection) = select.selection {
-            let where_refs = Self::extract_column_refs_from_expr(
-                selection,
-                &alias_map,
-                &source_tables,
-                catalog,
-            );
+            let where_refs =
+                Self::extract_column_refs_from_expr(selection, &alias_map, &source_tables, catalog);
             if !where_refs.is_empty() {
                 column_mappings.push(ColumnMapping {
                     output: "__where__".to_string(),
@@ -386,8 +375,7 @@ impl SqlLineageExtractor {
 
                 // Also extract tables from the subquery so we can trace
                 // columns back to their ultimate source
-                let sub_lineage =
-                    Self::extract_from_query(subquery, &HashMap::new(), catalog);
+                let sub_lineage = Self::extract_from_query(subquery, &HashMap::new(), catalog);
                 for t in sub_lineage.source_tables {
                     if !tables.iter().any(|existing| existing.name == t.name) {
                         tables.push(t);
@@ -619,12 +607,13 @@ impl SqlLineageExtractor {
                         .iter()
                         .map(|t| (t.schema.as_deref(), t.name.as_str()))
                         .collect();
-                    cat.find_column_owner(&col_name, &candidates).unwrap_or_else(|| {
-                        tables
-                            .first()
-                            .map(|t| t.name.clone())
-                            .unwrap_or_else(|| "unknown".to_string())
-                    })
+                    cat.find_column_owner(&col_name, &candidates)
+                        .unwrap_or_else(|| {
+                            tables
+                                .first()
+                                .map(|t| t.name.clone())
+                                .unwrap_or_else(|| "unknown".to_string())
+                        })
                 } else {
                     tables
                         .first()
@@ -640,10 +629,7 @@ impl SqlLineageExtractor {
                 if parts.len() >= 2 {
                     let table_part = parts[parts.len() - 2].value.to_lowercase();
                     let col_part = parts[parts.len() - 1].value.to_lowercase();
-                    let resolved = alias_map
-                        .get(&table_part)
-                        .cloned()
-                        .unwrap_or(table_part);
+                    let resolved = alias_map.get(&table_part).cloned().unwrap_or(table_part);
                     refs.push(ColumnRef {
                         task_id: resolved,
                         column_name: col_part,
@@ -655,12 +641,13 @@ impl SqlLineageExtractor {
                             .iter()
                             .map(|t| (t.schema.as_deref(), t.name.as_str()))
                             .collect();
-                        cat.find_column_owner(&col_name, &candidates).unwrap_or_else(|| {
-                            tables
-                                .first()
-                                .map(|t| t.name.clone())
-                                .unwrap_or_else(|| "unknown".to_string())
-                        })
+                        cat.find_column_owner(&col_name, &candidates)
+                            .unwrap_or_else(|| {
+                                tables
+                                    .first()
+                                    .map(|t| t.name.clone())
+                                    .unwrap_or_else(|| "unknown".to_string())
+                            })
                     } else {
                         tables
                             .first()
@@ -1206,19 +1193,13 @@ mod tests {
             .expect("should have mapping for active");
 
         // Without catalog, defaults to first table
-        assert!(active_mapping
-            .inputs
-            .iter()
-            .any(|r| r.task_id == "orders"));
+        assert!(active_mapping.inputs.iter().any(|r| r.task_id == "orders"));
     }
 
     #[test]
     fn catalog_wildcard_expansion() {
         let cat = build_test_catalog();
-        let lineage = SqlLineageExtractor::extract_with_catalog(
-            "SELECT * FROM customers",
-            &cat,
-        );
+        let lineage = SqlLineageExtractor::extract_with_catalog("SELECT * FROM customers", &cat);
 
         // Should expand to actual column names instead of "*"
         let col_names: Vec<&str> = lineage
@@ -1308,10 +1289,7 @@ mod tests {
             .find(|m| m.output == "name")
             .expect("should have mapping for name");
         assert!(
-            name_mapping
-                .inputs
-                .iter()
-                .any(|r| r.task_id == "customers"),
+            name_mapping.inputs.iter().any(|r| r.task_id == "customers"),
             "name should resolve to customers, got: {:?}",
             name_mapping.inputs
         );
