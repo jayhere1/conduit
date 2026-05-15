@@ -68,7 +68,17 @@ impl proto::coordinator_server::Coordinator for CoordinatorGrpcService {
         let stream = UnboundedReceiverStream::new(task_rx)
             .map(|local_assignment| Ok(convert::task_assignment_to_proto(&local_assignment)));
 
-        Ok(Response::new(Box::pin(stream)))
+        // Wrap the stream so a worker-side disconnect (client drops the
+        // RegisterStream, e.g. process crash or network partition) eagerly
+        // triggers reassignment of its in-flight tasks. Without this, those
+        // tasks would only get reassigned at the next health-check tick.
+        let guarded = DisconnectGuardedStream::new(
+            Box::pin(stream),
+            local_req.worker_id.clone(),
+            Arc::clone(&self.coordinator),
+        );
+
+        Ok(Response::new(Box::pin(guarded)))
     }
 
     /// Worker reports a task result.
@@ -202,6 +212,58 @@ pub async fn serve_grpc(
     builder.add_service(server).serve(addr).await?;
 
     Ok(())
+}
+
+/// Stream wrapper that fires `coordinator.handle_worker_disconnect(worker_id)`
+/// when the inner stream is dropped — meaning the gRPC client closed the
+/// RegisterStream (worker died, partitioned, or gracefully exited). The
+/// coordinator immediately reassigns in-flight tasks instead of waiting
+/// for the periodic health check.
+struct DisconnectGuardedStream {
+    inner: Pin<Box<dyn Stream<Item = Result<proto::TaskAssignment, Status>> + Send>>,
+    worker_id: String,
+    coordinator: Arc<Coordinator>,
+    notified: bool,
+}
+
+impl DisconnectGuardedStream {
+    fn new(
+        inner: Pin<Box<dyn Stream<Item = Result<proto::TaskAssignment, Status>> + Send>>,
+        worker_id: String,
+        coordinator: Arc<Coordinator>,
+    ) -> Self {
+        Self {
+            inner,
+            worker_id,
+            coordinator,
+            notified: false,
+        }
+    }
+}
+
+impl Stream for DisconnectGuardedStream {
+    type Item = Result<proto::TaskAssignment, Status>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for DisconnectGuardedStream {
+    fn drop(&mut self) {
+        if self.notified {
+            return;
+        }
+        self.notified = true;
+        let coord = Arc::clone(&self.coordinator);
+        let id = self.worker_id.clone();
+        tokio::spawn(async move {
+            coord.handle_worker_disconnect(&id).await;
+        });
+    }
 }
 
 #[cfg(test)]

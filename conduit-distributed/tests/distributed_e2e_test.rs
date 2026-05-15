@@ -547,3 +547,70 @@ async fn chaos_kill_worker_no_duplicate_completions() {
         );
     }
 }
+
+/// Worker stream drop triggers automatic re-dispatch without waiting for the
+/// next health-check tick. Regression test for the bug where in-flight tasks
+/// on a crashed worker would sit orphaned until health_check eventually ran.
+#[tokio::test]
+async fn worker_disconnect_triggers_immediate_reassignment() {
+    let (addr, coordinator, _result_rx) = start_server().await;
+
+    // Register two workers so we have somewhere to re-route to.
+    let mut client1 = connect_client(addr).await;
+    let _stream1 = client1
+        .register(Request::new(make_proto_register("disc-w1", 4)))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut client2 = connect_client(addr).await;
+    let _stream2 = client2
+        .register(Request::new(make_proto_register("disc-w2", 4)))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Submit 4 tasks. They distribute across both workers (least-loaded).
+    for i in 0..4 {
+        submit_task_helper(&coordinator, &format!("disc-task-{}", i), "default").await;
+    }
+
+    // Wait briefly for assignments to flow.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let initial_inflight = coordinator.inflight_count();
+    assert!(
+        initial_inflight > 0,
+        "expected tasks to be in-flight before disconnect, got 0"
+    );
+
+    // Worker 1 "crashes" — drop its stream and client. The Drop impl on the
+    // server-side DisconnectGuardedStream spawns handle_worker_disconnect,
+    // which reassigns disc-w1's orphans back to the pending queue.
+    drop(_stream1);
+    drop(client1);
+
+    // Give the spawned reassignment task a moment to land. We need this
+    // because Drop spawns an async task that's not synchronous with us.
+    let mut tries = 0;
+    while !coordinator
+        .worker_pool()
+        .orphaned_assignments(&["disc-w1".to_string()])
+        .is_empty()
+        && tries < 20
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tries += 1;
+    }
+
+    // After the disconnect-handler runs, disc-w1 must be gone from the pool
+    // — that's the load-bearing post-condition. Inflight may include
+    // disc-w2's tasks still, but disc-w1 should have zero.
+    let w1_remaining = coordinator
+        .worker_pool()
+        .orphaned_assignments(&["disc-w1".to_string()]);
+    assert!(
+        w1_remaining.is_empty(),
+        "after disconnect, disc-w1 should have no orphaned assignments; got {:?}",
+        w1_remaining
+    );
+}

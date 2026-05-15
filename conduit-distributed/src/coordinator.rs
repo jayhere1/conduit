@@ -413,6 +413,28 @@ impl Coordinator {
         *queue = remaining;
     }
 
+    /// Called when a worker's gRPC stream drops (process crash, network
+    /// partition, ungraceful exit). Immediately reassigns its in-flight
+    /// tasks instead of waiting for the next health-check tick — under
+    /// load that tick can be 30s+ away, leaving tasks effectively orphaned.
+    ///
+    /// The post-health-check cleanup path (`health_check()`) still runs and
+    /// is idempotent: a worker already removed here is a no-op there.
+    pub async fn handle_worker_disconnect(&self, worker_id: &str) {
+        let orphans = self.pool.orphaned_assignments(&[worker_id.to_string()]);
+        warn!(
+            worker = %worker_id,
+            orphaned_tasks = orphans.len(),
+            "Worker disconnected; reassigning orphaned tasks",
+        );
+        for aid in &orphans {
+            self.reassign_task(aid).await;
+        }
+        self.worker_channels.remove(worker_id);
+        self.pool.remove_worker(worker_id);
+        self.drain_pending_queue().await;
+    }
+
     /// Reassign a task from a dead worker.
     async fn reassign_task(&self, assignment_id: &str) {
         if let Some((_, inflight)) = self.inflight.remove(assignment_id) {
