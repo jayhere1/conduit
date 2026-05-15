@@ -216,6 +216,7 @@ mod tests {
             priority: 0,
             raw_dependencies: deps.into_iter().map(String::from).collect(),
             contracts: None,
+            parameters_text: String::new(),
         }
     }
 

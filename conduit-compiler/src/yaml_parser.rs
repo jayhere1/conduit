@@ -405,6 +405,7 @@ impl YamlDagParser {
                 priority: yaml_task.priority,
                 raw_dependencies: yaml_task.depends_on.clone(),
                 contracts,
+                parameters_text: String::new(),
             });
         }
 

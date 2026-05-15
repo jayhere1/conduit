@@ -17,8 +17,26 @@ from __future__ import annotations
 
 import functools
 import inspect
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+
+
+def _runtime_mode_active() -> bool:
+    """True when the SDK is imported by the Conduit executor to run a single
+    task. In this mode, importing a DAG module should register task metadata
+    but must NOT actually execute task bodies (the executor will then invoke
+    one specific task via `conduit_sdk._runtime.run_task`). The executor sets
+    `CONDUIT_RUNTIME_MODE=1` before spawning the child process.
+    """
+    return os.environ.get("CONDUIT_RUNTIME_MODE") == "1"
+
+
+class _TaskBodySuppressed(Exception):
+    """Internal sentinel raised by TaskDefinition.__call__ in runtime mode to
+    abort the @dag function body's local-dev call chain without running task
+    bodies. Caught by the @dag decorator; never propagates beyond it.
+    """
 
 
 @dataclass
@@ -37,7 +55,12 @@ class TaskDefinition:
     doc: Optional[str] = None
 
     def __call__(self, *args, **kwargs):
-        """Allow tasks to be called directly for local testing."""
+        """Call the task. In Conduit runtime mode, suppress the call so that
+        importing a DAG module from inside the executor does not execute every
+        task once before the executor runs the one it was actually dispatched.
+        """
+        if _runtime_mode_active():
+            raise _TaskBodySuppressed
         return self.function(*args, **kwargs)
 
     def __repr__(self):
@@ -102,11 +125,17 @@ def dag(
             doc=inspect.getdoc(func),
         )
 
-        # Execute the function body to collect @task definitions
-        # This is only for local dev — Conduit's compiler skips this
+        # Execute the function body to collect @task definitions. In runtime
+        # mode the function still runs (so @task decorators register), but
+        # any call-chain like `validated = validate(raw)` raises
+        # _TaskBodySuppressed at the first task invocation, which we swallow.
+        # That means task definitions are registered without their bodies
+        # being re-executed by the executor.
         _current_dag_context.append(dag_def)
         try:
             func()
+        except _TaskBodySuppressed:
+            pass
         finally:
             _current_dag_context.pop()
 

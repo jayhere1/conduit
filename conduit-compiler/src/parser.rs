@@ -46,6 +46,10 @@ pub struct ParsedTask {
     pub raw_dependencies: Vec<String>,
     /// Data quality contracts (from YAML or Python decorator).
     pub contracts: Option<TaskContracts>,
+    /// Verbatim text of the function's parameter list, e.g. `(data=greet)`.
+    /// Used by `extract_default_arg_deps` to discover deps expressed via the
+    /// SDK-documented `def fn(param=other_task)` pattern.
+    pub parameters_text: String,
 }
 
 impl DagParser {
@@ -211,7 +215,43 @@ impl DagParser {
         // to extract data-flow dependencies (e.g., `cleaned = transform(raw)`)
         self.extract_call_chain_deps(&body, source, &mut tasks);
 
+        // Extract data-flow deps expressed as parameter defaults,
+        // the SDK's documented pattern: `def fn(data=upstream_task)`.
+        Self::extract_default_arg_deps(&mut tasks);
+
         Ok(tasks)
+    }
+
+    /// Discover dependencies expressed via parameter defaults referencing
+    /// another task by name, e.g. `def farewell(data=greet)`. This is the
+    /// pattern documented in `conduit_sdk.__init__` and used by
+    /// `conduit init`'s scaffolded DAG; without this pass, those DAGs run
+    /// in the wrong order.
+    fn extract_default_arg_deps(tasks: &mut [ParsedTask]) {
+        let task_names: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+        for task in tasks.iter_mut() {
+            // Strip surrounding parens so we can scan parameter clauses uniformly.
+            let params = task
+                .parameters_text
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')');
+            for clause in params.split(',') {
+                let Some(eq_pos) = clause.find('=') else {
+                    continue;
+                };
+                let default = clause[eq_pos + 1..].trim();
+                // Strip optional type annotation in the LHS of `=` (we only
+                // care about the default value identifier on the RHS).
+                let default = default.trim_end_matches(|c: char| c == ',' || c.is_whitespace());
+                for name in &task_names {
+                    if default == name && name != &task.id && !task.raw_dependencies.contains(name)
+                    {
+                        task.raw_dependencies.push(name.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Recursively walk a node tree to find @task-decorated functions.
@@ -297,6 +337,11 @@ impl DagParser {
             }
         };
 
+        let parameters_text = func_def
+            .child_by_field_name("parameters")
+            .map(|n| self.node_text(&n, source))
+            .unwrap_or_default();
+
         Ok(Some(ParsedTask {
             id: task_id,
             task_type,
@@ -313,6 +358,7 @@ impl DagParser {
                 .unwrap_or(0),
             raw_dependencies: Vec::new(),
             contracts: None, // Python contracts are extracted via decorator analysis (future)
+            parameters_text,
         }))
     }
 

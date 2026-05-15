@@ -259,6 +259,10 @@ impl TaskExecutor {
                         "Task execution completed"
                     );
 
+                    // (XCom persistence happens inside ProcessRunner so all
+                    // callers benefit, including the CLI which bypasses
+                    // TaskExecutor and calls ProcessRunner::run directly.)
+
                     let event = ExecutorEvent::TaskCompleted {
                         task_id: task_id_clone,
                         run_id: run_id_clone,

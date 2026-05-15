@@ -30,6 +30,25 @@ pub struct TaskContext {
     pub params: HashMap<String, String>,
 }
 
+/// Root directory under which per-run XCom JSON files live.
+///
+/// Each task's XCom (if any) is written to
+/// `xcom_root()/{run_id}/{task_id}.json` after completion; downstream tasks
+/// read from the same directory. Located under the OS temp dir so it doesn't
+/// pollute the user's cwd; can be overridden with `CONDUIT_XCOM_ROOT`.
+pub fn xcom_root() -> std::path::PathBuf {
+    std::env::var_os("CONDUIT_XCOM_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("conduit-xcom"))
+}
+
+/// Per-run XCom directory: `xcom_root()/{run_id}`. Creates it lazily.
+pub fn xcom_dir_for_run(run_id: &str) -> std::path::PathBuf {
+    let dir = xcom_root().join(run_id);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Output from an executed process
 #[derive(Debug, Clone)]
 pub struct ProcessOutput {
@@ -75,6 +94,16 @@ impl ProcessRunner {
         context: &TaskContext,
         registry: Option<&ProviderRegistry>,
     ) -> ConduitResult<ProcessOutput> {
+        let output = Self::run_with_providers_inner(task, context, registry).await?;
+        Self::persist_xcom(&context.run_id, &context.task_id, output.xcom.as_ref());
+        Ok(output)
+    }
+
+    async fn run_with_providers_inner(
+        task: &Task,
+        context: &TaskContext,
+        registry: Option<&ProviderRegistry>,
+    ) -> ConduitResult<ProcessOutput> {
         debug!(
             task_id = %context.task_id,
             dag_id = %context.dag_id,
@@ -103,6 +132,38 @@ impl ProcessRunner {
         }
 
         Self::run_subprocess(task, context).await
+    }
+
+    /// Persist a task's XCom value to `xcom_dir_for_run(run_id)/{task_id}.json`
+    /// so downstream tasks in the same run can read it via CONDUIT_XCOM_DIR.
+    /// No-op if there is no XCom value. Failures are logged but never propagated:
+    /// a missing XCom degrades to a None in the downstream task body, which is
+    /// preferable to failing the upstream after it already succeeded.
+    fn persist_xcom(run_id: &str, task_id: &str, xcom: Option<&serde_json::Value>) {
+        let Some(xcom) = xcom else {
+            return;
+        };
+        let dir = xcom_dir_for_run(run_id);
+        let path = dir.join(format!("{}.json", task_id));
+        match serde_json::to_vec(xcom) {
+            Ok(bytes) => {
+                if let Err(e) = std::fs::write(&path, bytes) {
+                    debug!(
+                        task_id = %task_id,
+                        path = %path.display(),
+                        error = %e,
+                        "Failed to persist XCom"
+                    );
+                }
+            }
+            Err(e) => {
+                debug!(
+                    task_id = %task_id,
+                    error = %e,
+                    "XCom value not serializable"
+                );
+            }
+        }
     }
 
     /// Execute a task as a subprocess (the common path for Python, Bash, SQL, Executable).
@@ -336,9 +397,18 @@ impl ProcessRunner {
             TaskType::Python { module, function } => {
                 let mut cmd = Command::new("python3");
                 Self::inject_context_env(&mut cmd, context);
+                Self::inject_python_path(&mut cmd);
+                // CONDUIT_RUNTIME_MODE=1 tells conduit_sdk.decorators to
+                // suppress task call-chain bodies on module import; this
+                // process will explicitly run exactly one task via
+                // conduit_sdk._runtime.run_task.
+                cmd.env("CONDUIT_RUNTIME_MODE", "1");
                 cmd.arg("-c").arg(format!(
-                    "from {} import {}; {}()",
-                    module, function, function
+                    "from conduit_sdk._runtime import run_task; run_task({m:?}, {d:?}, {t:?}, {f:?})",
+                    m = module,
+                    d = context.dag_id,
+                    t = context.task_id,
+                    f = function,
                 ));
                 Ok(cmd)
             }
@@ -351,14 +421,19 @@ impl ProcessRunner {
             TaskType::Sql { query, .. } => {
                 let mut cmd = Command::new("python3");
                 Self::inject_context_env(&mut cmd, context);
+                // Encode the SQL as a JSON string literal so newlines, quotes,
+                // and backslashes are properly escaped for the embedded Python.
+                // JSON string syntax is a subset of Python string syntax.
+                let query_literal = serde_json::to_string(query)
+                    .unwrap_or_else(|_| "\"<unserializable SQL>\"".to_string());
                 let sql_executor = format!(
                     r#"
 print("CONDUIT::LOG::INFO::SQL execution started")
-print("CONDUIT::LOG::INFO::Executing: {}")
+print("CONDUIT::LOG::INFO::Executing: " + {query_lit})
 print("CONDUIT::LOG::INFO::SQL execution completed")
 print('CONDUIT::XCOM::{{"rows_affected": 0}}')
 "#,
-                    query.replace('"', "\\\"")
+                    query_lit = query_literal
                 );
                 cmd.arg("-c").arg(sql_executor);
                 Ok(cmd)
@@ -439,9 +514,55 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
             .env("CONDUIT_LOGICAL_DATE", context.logical_date.to_rfc3339())
             .env("CONDUIT_ENVIRONMENT", &context.environment);
 
+        cmd.env("CONDUIT_XCOM_DIR", xcom_dir_for_run(&context.run_id));
+
         for (key, value) in &context.params {
             cmd.env(format!("CONDUIT_PARAM_{}", key.to_uppercase()), value);
         }
+    }
+
+    /// Prepend the dags directory, project root, and bundled SDK location to
+    /// PYTHONPATH so that:
+    ///   - `from <module> import <function>` resolves against `./dags/<module>.py`
+    ///   - DAG files' top-level `from conduit_sdk import dag, task` resolves
+    ///
+    /// Honors `CONDUIT_DAG_DIR` for the dags directory (defaults to `./dags`)
+    /// and `CONDUIT_SDK_PATH` for the SDK (defaults to auto-discovery: look for
+    /// `sdk/python` walking up from the binary's location, which finds the
+    /// in-repo SDK during dev/quickstart).
+    fn inject_python_path(cmd: &mut Command) {
+        let dag_dir = std::env::var("CONDUIT_DAG_DIR").unwrap_or_else(|_| "./dags".to_string());
+        let existing = std::env::var("PYTHONPATH").unwrap_or_default();
+        let sdk_path = std::env::var("CONDUIT_SDK_PATH")
+            .ok()
+            .or_else(Self::discover_sdk_path);
+
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let mut parts: Vec<String> = vec![dag_dir, ".".to_string()];
+        if let Some(sdk) = sdk_path {
+            parts.push(sdk);
+        }
+        if !existing.is_empty() {
+            parts.push(existing);
+        }
+        cmd.env("PYTHONPATH", parts.join(sep));
+    }
+
+    /// Walk up from the current binary's directory looking for `sdk/python`
+    /// (the in-repo SDK location). Returns the absolute path as a String if
+    /// found. This lets the quickstart work without `pip install conduit-sdk`
+    /// when running from a checkout of the repo.
+    fn discover_sdk_path() -> Option<String> {
+        let exe = std::env::current_exe().ok()?;
+        let mut dir = exe.parent()?;
+        for _ in 0..6 {
+            let candidate = dir.join("sdk").join("python");
+            if candidate.join("conduit_sdk").is_dir() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+            dir = dir.parent()?;
+        }
+        None
     }
 
     async fn read_stdout(
