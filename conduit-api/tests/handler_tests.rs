@@ -143,7 +143,7 @@ async fn env_list_includes_production_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let envs = body["environments"].as_array().unwrap();
-    assert!(envs.len() >= 1, "Should have at least production");
+    assert!(!envs.is_empty(), "Should have at least production");
     assert!(envs.iter().any(|e| e["name"] == "production"));
 }
 

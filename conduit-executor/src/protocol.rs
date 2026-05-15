@@ -235,7 +235,7 @@ mod tests {
             assert_eq!(key, "result");
             assert_eq!(value.as_i64(), Some(42));
         } else {
-            assert!(false, "Expected XCom message, got: {:?}", msg);
+            panic!("Expected XCom message, got: {:?}", msg);
         }
     }
 
@@ -247,7 +247,7 @@ mod tests {
             assert_eq!(key, "data");
             assert!(value.is_object());
         } else {
-            assert!(false, "Expected XCom message, got: {:?}", msg);
+            panic!("Expected XCom message, got: {:?}", msg);
         }
     }
 
@@ -259,7 +259,7 @@ mod tests {
             assert_eq!(level, LogLevel::Info);
             assert_eq!(message, "Processing complete");
         } else {
-            assert!(false, "Expected Log message, got: {:?}", msg);
+            panic!("Expected Log message, got: {:?}", msg);
         }
     }
 
@@ -271,7 +271,7 @@ mod tests {
             assert_eq!(level, LogLevel::Warn);
             assert_eq!(message, "Time: 12:30:45");
         } else {
-            assert!(false, "Expected Log message, got: {:?}", msg);
+            panic!("Expected Log message, got: {:?}", msg);
         }
     }
 
@@ -282,7 +282,7 @@ mod tests {
         if let Some(ProtocolMessage::Progress { percent }) = msg {
             assert_eq!(percent, 75);
         } else {
-            assert!(false, "Expected Progress message, got: {:?}", msg);
+            panic!("Expected Progress message, got: {:?}", msg);
         }
     }
 
@@ -301,7 +301,7 @@ mod tests {
             assert_eq!(name, "rows_processed");
             assert_eq!(value, 1000.0);
         } else {
-            assert!(false, "Expected Metric message, got: {:?}", msg);
+            panic!("Expected Metric message, got: {:?}", msg);
         }
     }
 
@@ -313,7 +313,7 @@ mod tests {
             assert_eq!(name, "latency_ms");
             assert_eq!(value, 45.5);
         } else {
-            assert!(false, "Expected Metric message, got: {:?}", msg);
+            panic!("Expected Metric message, got: {:?}", msg);
         }
     }
 

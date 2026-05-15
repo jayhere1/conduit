@@ -77,26 +77,23 @@ impl S3Provider {
                 endpoint: endpoint.clone(),
             }
         } else {
-            self.region
-                .parse()
-                .unwrap_or(s3::Region::UsEast1)
+            self.region.parse().unwrap_or(s3::Region::UsEast1)
         };
 
         let credentials = if let (Some(ref key), Some(ref secret)) =
             (&self.access_key_id, &self.secret_access_key)
         {
-            s3::creds::Credentials::new(Some(key), Some(secret), None, None, None)
-                .map_err(|e| ProviderError::AuthenticationFailed {
-                    connection: self.name.clone(),
-                    reason: format!("Invalid S3 credentials: {}", e),
-                })?
-        } else {
-            // Try default credential chain
-            s3::creds::Credentials::default().map_err(|e| {
+            s3::creds::Credentials::new(Some(key), Some(secret), None, None, None).map_err(|e| {
                 ProviderError::AuthenticationFailed {
                     connection: self.name.clone(),
-                    reason: format!("No S3 credentials available: {}", e),
+                    reason: format!("Invalid S3 credentials: {}", e),
                 }
+            })?
+        } else {
+            // Try default credential chain
+            s3::creds::Credentials::default().map_err(|e| ProviderError::AuthenticationFailed {
+                connection: self.name.clone(),
+                reason: format!("No S3 credentials available: {}", e),
             })?
         };
 
@@ -133,6 +130,7 @@ impl Provider for S3Provider {
                 Capability::StorageList,
                 Capability::BulkLoad,
             ],
+            is_stub: false,
         }
     }
 
@@ -142,7 +140,10 @@ impl Provider for S3Provider {
         match self.build_bucket() {
             Ok(bucket) => {
                 // Try to list with max 1 result to verify access
-                match bucket.list(self.prefix.clone(), Some("/".to_string())).await {
+                match bucket
+                    .list(self.prefix.clone(), Some("/".to_string()))
+                    .await
+                {
                     Ok(_) => Ok(ConnectionTestResult {
                         success: true,
                         message: format!(
@@ -180,12 +181,13 @@ impl StorageProvider for S3Provider {
         let bucket = self.build_bucket()?;
         let key = self.full_key(path);
 
-        let response = bucket.get_object(&key).await.map_err(|e| {
-            ProviderError::StorageFailed {
+        let response = bucket
+            .get_object(&key)
+            .await
+            .map_err(|e| ProviderError::StorageFailed {
                 connection: self.name.clone(),
                 reason: format!("S3 GetObject failed for '{}': {}", key, e),
-            }
-        })?;
+            })?;
 
         if response.status_code() != 200 {
             return Err(ProviderError::StorageFailed {
@@ -207,13 +209,14 @@ impl StorageProvider for S3Provider {
         let key = self.full_key(path);
         let bytes = data.len() as u64;
 
-        let response = bucket
-            .put_object(&key, data)
-            .await
-            .map_err(|e| ProviderError::StorageFailed {
-                connection: self.name.clone(),
-                reason: format!("S3 PutObject failed for '{}': {}", key, e),
-            })?;
+        let response =
+            bucket
+                .put_object(&key, data)
+                .await
+                .map_err(|e| ProviderError::StorageFailed {
+                    connection: self.name.clone(),
+                    reason: format!("S3 PutObject failed for '{}': {}", key, e),
+                })?;
 
         if response.status_code() != 200 {
             return Err(ProviderError::StorageFailed {
@@ -239,21 +242,18 @@ impl StorageProvider for S3Provider {
         let bucket = self.build_bucket()?;
         let full_prefix = format!("{}{}", self.prefix, prefix);
 
-        let results = bucket
-            .list(full_prefix, None)
-            .await
-            .map_err(|e| ProviderError::StorageFailed {
-                connection: self.name.clone(),
-                reason: format!("S3 ListObjects failed: {}", e),
-            })?;
+        let results =
+            bucket
+                .list(full_prefix, None)
+                .await
+                .map_err(|e| ProviderError::StorageFailed {
+                    connection: self.name.clone(),
+                    reason: format!("S3 ListObjects failed: {}", e),
+                })?;
 
         let keys: Vec<String> = results
             .into_iter()
-            .flat_map(|page| {
-                page.contents
-                    .into_iter()
-                    .map(|obj| obj.key)
-            })
+            .flat_map(|page| page.contents.into_iter().map(|obj| obj.key))
             .collect();
 
         Ok(keys)
@@ -263,13 +263,14 @@ impl StorageProvider for S3Provider {
         let bucket = self.build_bucket()?;
         let key = self.full_key(path);
 
-        let response = bucket
-            .delete_object(&key)
-            .await
-            .map_err(|e| ProviderError::StorageFailed {
-                connection: self.name.clone(),
-                reason: format!("S3 DeleteObject failed for '{}': {}", key, e),
-            })?;
+        let response =
+            bucket
+                .delete_object(&key)
+                .await
+                .map_err(|e| ProviderError::StorageFailed {
+                    connection: self.name.clone(),
+                    reason: format!("S3 DeleteObject failed for '{}': {}", key, e),
+                })?;
 
         if response.status_code() != 204 && response.status_code() != 200 {
             return Err(ProviderError::StorageFailed {

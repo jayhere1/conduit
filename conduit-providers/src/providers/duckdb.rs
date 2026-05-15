@@ -188,9 +188,7 @@ fn duckdb_value_to_json(val: duckdb::types::Value) -> serde_json::Value {
                     .unwrap_or_else(|| format!("{val}")),
             )
         }
-        Value::Time64(..) | Value::Interval { .. } => {
-            serde_json::Value::String(format!("{val:?}"))
-        }
+        Value::Time64(..) | Value::Interval { .. } => serde_json::Value::String(format!("{val:?}")),
         Value::Enum(s) => serde_json::Value::String(s),
         Value::List(items) | Value::Array(items) => {
             serde_json::Value::Array(items.into_iter().map(duckdb_value_to_json).collect())
@@ -221,6 +219,7 @@ impl Provider for DuckDbProvider {
                 Capability::IncrementalRead,
                 Capability::Transactions,
             ],
+            is_stub: false,
         }
     }
 
@@ -234,18 +233,18 @@ impl Provider for DuckDbProvider {
                 name: name.clone(),
                 reason: format!("lock poisoned: {e}"),
             })?;
-            let mut stmt = conn.prepare("SELECT version()").map_err(|e| {
+            let mut stmt =
+                conn.prepare("SELECT version()")
+                    .map_err(|e| ProviderError::ConnectionFailed {
+                        name: name.clone(),
+                        reason: e.to_string(),
+                    })?;
+            let version: String = stmt.query_row([], |row| row.get(0)).map_err(|e| {
                 ProviderError::ConnectionFailed {
                     name: name.clone(),
                     reason: e.to_string(),
                 }
             })?;
-            let version: String = stmt
-                .query_row([], |row| row.get(0))
-                .map_err(|e| ProviderError::ConnectionFailed {
-                    name: name.clone(),
-                    reason: e.to_string(),
-                })?;
             Ok::<_, ProviderError>(version)
         })
         .await
@@ -289,16 +288,15 @@ impl SqlProvider for DuckDbProvider {
             })?;
 
             let query_upper = query.trim().to_uppercase();
-            let is_select =
-                query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
+            let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
             if is_select {
-                let mut stmt =
-                    conn.prepare(&query)
-                        .map_err(|e| ProviderError::QueryFailed {
-                            connection: name.clone(),
-                            reason: e.to_string(),
-                        })?;
+                let mut stmt = conn
+                    .prepare(&query)
+                    .map_err(|e| ProviderError::QueryFailed {
+                        connection: name.clone(),
+                        reason: e.to_string(),
+                    })?;
 
                 // Execute the query first, then read column metadata
                 let mut rows = stmt.query([]).map_err(|e| ProviderError::QueryFailed {
@@ -318,13 +316,10 @@ impl SqlProvider for DuckDbProvider {
                     .collect();
 
                 let mut all_rows = Vec::new();
-                while let Some(row) = rows
-                    .next()
-                    .map_err(|e| ProviderError::QueryFailed {
-                        connection: name.clone(),
-                        reason: e.to_string(),
-                    })?
-                {
+                while let Some(row) = rows.next().map_err(|e| ProviderError::QueryFailed {
+                    connection: name.clone(),
+                    reason: e.to_string(),
+                })? {
                     let vals: Vec<serde_json::Value> = (0..column_count)
                         .map(|i| {
                             let val: duckdb::types::Value = row.get_unwrap(i);
@@ -347,13 +342,12 @@ impl SqlProvider for DuckDbProvider {
                     metrics: HashMap::new(),
                 })
             } else {
-                let rows_affected = conn
-                    .execute_batch(&query)
-                    .map(|_| 0u64)
-                    .map_err(|e| ProviderError::QueryFailed {
+                let rows_affected = conn.execute_batch(&query).map(|_| 0u64).map_err(|e| {
+                    ProviderError::QueryFailed {
                         connection: name.clone(),
                         reason: e.to_string(),
-                    })?;
+                    }
+                })?;
 
                 Ok(SqlResult {
                     rows_affected,

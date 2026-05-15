@@ -341,14 +341,13 @@ impl WorkerPool {
                         entry.state = WorkerState::Disconnected;
                     }
                 }
-                WorkerState::Disconnected => {
+                WorkerState::Disconnected
                     if since_heartbeat
-                        > chrono::Duration::from_std(DEAD_TIMEOUT).unwrap_or_default()
-                    {
-                        warn!(worker = %entry.worker_id, "Disconnected worker declared dead");
-                        entry.state = WorkerState::Dead;
-                        newly_dead.push(entry.worker_id.clone());
-                    }
+                        > chrono::Duration::from_std(DEAD_TIMEOUT).unwrap_or_default() =>
+                {
+                    warn!(worker = %entry.worker_id, "Disconnected worker declared dead");
+                    entry.state = WorkerState::Dead;
+                    newly_dead.push(entry.worker_id.clone());
                 }
                 _ => {}
             }

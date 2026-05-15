@@ -2578,10 +2578,7 @@ async fn cmd_query(
     // Register local files as views
     if let Some(ref file_list) = files {
         for path in file_list {
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("data");
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("data");
             let abs_path = std::fs::canonicalize(path)
                 .unwrap_or_else(|_| path.clone())
                 .display()
@@ -2593,9 +2590,7 @@ async fn cmd_query(
                 "csv" | "tsv" => "read_csv",
                 "json" | "jsonl" | "ndjson" => "read_json",
                 _ => {
-                    anyhow::bail!(
-                        "Unsupported file format '.{ext}'. Supported: parquet, csv, json"
-                    )
+                    anyhow::bail!("Unsupported file format '.{ext}'. Supported: parquet, csv, json")
                 }
             };
 
@@ -2603,11 +2598,7 @@ async fn cmd_query(
                 "CREATE OR REPLACE VIEW \"{stem}\" AS SELECT * FROM {reader_fn}('{abs_path}')"
             );
             provider.execute_raw(&create_sql).await?;
-            eprintln!(
-                "  Registered file '{}' as table '{}'",
-                path.display(),
-                stem
-            );
+            eprintln!("  Registered file '{}' as table '{}'", path.display(), stem);
         }
     }
 
@@ -2702,8 +2693,10 @@ async fn cmd_preview(
             eprintln!("  Query: {}", truncate_str(query, 120));
 
             let provider = if let Some(conn_name) = connection {
-                let config_path =
-                    dags_path.parent().unwrap_or(Path::new(".")).join("conduit.yaml");
+                let config_path = dags_path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("conduit.yaml");
                 if config_path.exists() {
                     let config = conduit_common::config::ConduitConfig::load(&config_path)?;
                     if let Some(conn_config) = config.connections.get(conn_name) {
@@ -2817,10 +2810,12 @@ fn collect_upstream_sql(
         .iter()
         .filter(|tid| needed.contains(tid.as_str()))
         .filter_map(|tid| {
-            dag.tasks.get(tid.as_str()).and_then(|t| match &t.task_type {
-                TaskType::Sql { query, .. } => Some((tid.clone(), query.clone())),
-                _ => None,
-            })
+            dag.tasks
+                .get(tid.as_str())
+                .and_then(|t| match &t.task_type {
+                    TaskType::Sql { query, .. } => Some((tid.clone(), query.clone())),
+                    _ => None,
+                })
         })
         .collect()
 }

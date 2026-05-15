@@ -86,19 +86,21 @@ impl BigQueryProvider {
                 reason: format!("Invalid service account JSON: {}", e),
             })?;
 
-        let client_email = sa["client_email"].as_str().ok_or_else(|| {
-            ProviderError::AuthenticationFailed {
-                connection: self.name.clone(),
-                reason: "Missing 'client_email' in service account JSON".to_string(),
-            }
-        })?;
+        let client_email =
+            sa["client_email"]
+                .as_str()
+                .ok_or_else(|| ProviderError::AuthenticationFailed {
+                    connection: self.name.clone(),
+                    reason: "Missing 'client_email' in service account JSON".to_string(),
+                })?;
 
-        let private_key_pem = sa["private_key"].as_str().ok_or_else(|| {
-            ProviderError::AuthenticationFailed {
-                connection: self.name.clone(),
-                reason: "Missing 'private_key' in service account JSON".to_string(),
-            }
-        })?;
+        let private_key_pem =
+            sa["private_key"]
+                .as_str()
+                .ok_or_else(|| ProviderError::AuthenticationFailed {
+                    connection: self.name.clone(),
+                    reason: "Missing 'private_key' in service account JSON".to_string(),
+                })?;
 
         // Build JWT
         let now = chrono::Utc::now().timestamp();
@@ -111,10 +113,12 @@ impl BigQueryProvider {
         });
 
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-        let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key_pem.as_bytes())
-            .map_err(|e| ProviderError::AuthenticationFailed {
-                connection: self.name.clone(),
-                reason: format!("Invalid RSA private key: {}", e),
+        let key =
+            jsonwebtoken::EncodingKey::from_rsa_pem(private_key_pem.as_bytes()).map_err(|e| {
+                ProviderError::AuthenticationFailed {
+                    connection: self.name.clone(),
+                    reason: format!("Invalid RSA private key: {}", e),
+                }
             })?;
 
         let jwt = jsonwebtoken::encode(&header, &claims, &key).map_err(|e| {
@@ -149,10 +153,12 @@ impl BigQueryProvider {
         }
 
         let token_json: serde_json::Value =
-            resp.json().await.map_err(|e| ProviderError::AuthenticationFailed {
-                connection: self.name.clone(),
-                reason: format!("Failed to parse token response: {}", e),
-            })?;
+            resp.json()
+                .await
+                .map_err(|e| ProviderError::AuthenticationFailed {
+                    connection: self.name.clone(),
+                    reason: format!("Failed to parse token response: {}", e),
+                })?;
 
         token_json["access_token"]
             .as_str()
@@ -164,10 +170,7 @@ impl BigQueryProvider {
     }
 
     /// Execute a BigQuery SQL query via the REST API.
-    async fn execute_query(
-        &self,
-        query: &str,
-    ) -> Result<serde_json::Value, ProviderError> {
+    async fn execute_query(&self, query: &str) -> Result<serde_json::Value, ProviderError> {
         let token = self.get_access_token().await?;
 
         let url = format!(
@@ -240,12 +243,7 @@ impl BigQueryProvider {
                     .map(|row| {
                         row["f"]
                             .as_array()
-                            .map(|cells| {
-                                cells
-                                    .iter()
-                                    .map(|cell| cell["v"].clone())
-                                    .collect()
-                            })
+                            .map(|cells| cells.iter().map(|cell| cell["v"].clone()).collect())
                             .unwrap_or_default()
                     })
                     .collect()
@@ -287,6 +285,7 @@ impl Provider for BigQueryProvider {
                 Capability::BulkLoad,
                 Capability::IncrementalRead,
             ],
+            is_stub: false,
         }
     }
 

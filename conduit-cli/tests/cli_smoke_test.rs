@@ -126,8 +126,8 @@ fn cli_compile_to_output_file() {
 
     assert!(output.exists(), "plan.json should be written");
     let contents = fs::read_to_string(&output).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&contents)
-        .expect("Output should be valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&contents).expect("Output should be valid JSON");
     assert!(parsed.is_object(), "Plan should be a JSON object");
 }
 

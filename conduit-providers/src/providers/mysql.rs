@@ -145,6 +145,7 @@ impl Provider for MySqlProvider {
                 Capability::Transactions,
                 Capability::BulkLoad,
             ],
+            is_stub: false,
         }
     }
 
@@ -202,13 +203,12 @@ impl SqlProvider for MySqlProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(query)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
+            let rows = sqlx::query(&query).fetch_all(pool).await.map_err(|e| {
+                ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
-                })?;
+                }
+            })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
@@ -246,13 +246,12 @@ impl SqlProvider for MySqlProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(query)
-                .execute(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
+            let result = sqlx::query(&query).execute(pool).await.map_err(|e| {
+                ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
-                })?;
+                }
+            })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 

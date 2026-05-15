@@ -233,6 +233,7 @@ fn make_diamond_dag() -> Dag {
 /// API layer normally plays.
 ///
 /// Also records events in the EventStore.
+#[allow(clippy::too_many_arguments)]
 async fn run_mediator(
     dag: &Dag,
     mut command_rx: mpsc::UnboundedReceiver<SchedulerCommand>,

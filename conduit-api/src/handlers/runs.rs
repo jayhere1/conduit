@@ -138,7 +138,7 @@ pub async fn list_runs(
         runs.retain(|r| r.status == *status);
     }
 
-    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     runs.truncate(limit);
 
     Json(json!({
@@ -182,7 +182,7 @@ pub async fn list_all_runs(
         runs.retain(|r| r.status == *status);
     }
 
-    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     runs.truncate(limit);
 
     Json(json!({

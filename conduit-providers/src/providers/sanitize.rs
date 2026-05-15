@@ -111,6 +111,7 @@ fn contains_injection_pattern(query: &str) -> bool {
 /// - `mongodb://`, `mysql://`, `redis://` URIs with embedded credentials
 /// - `password=<value>` patterns (common in libpq / JDBC errors)
 /// - `pwd=<value>` patterns (ODBC style)
+#[allow(clippy::manual_strip)]
 pub fn sanitize_error(error: &str) -> String {
     let mut result = error.to_string();
 
@@ -256,7 +257,10 @@ mod tests {
 
     #[test]
     fn test_block_comment_inside_string_ok() {
-        let result = sanitize_query("SELECT * FROM users WHERE note = '/* not a comment */'", "test");
+        let result = sanitize_query(
+            "SELECT * FROM users WHERE note = '/* not a comment */'",
+            "test",
+        );
         assert!(result.is_ok());
     }
 
@@ -280,10 +284,7 @@ mod tests {
 
     #[test]
     fn test_with_cte_passes() {
-        let result = sanitize_query(
-            "WITH cte AS (SELECT 1 AS id) SELECT * FROM cte",
-            "test",
-        );
+        let result = sanitize_query("WITH cte AS (SELECT 1 AS id) SELECT * FROM cte", "test");
         assert!(result.is_ok());
     }
 

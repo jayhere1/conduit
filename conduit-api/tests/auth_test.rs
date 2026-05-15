@@ -322,10 +322,7 @@ mod tests {
     #[test]
     fn different_salts_different_hashes() {
         let key = "cdt_key_aaaa0000000000000000000000";
-        assert_ne!(
-            hash_key("salt-a", key),
-            hash_key("salt-b", key),
-        );
+        assert_ne!(hash_key("salt-a", key), hash_key("salt-b", key),);
     }
 
     #[test]

@@ -579,6 +579,70 @@ fn format_display_name(provider_type: &str) -> String {
     }
 }
 
+/// Supported provider type identifiers and their aliases.
+pub fn supported_provider_types() -> Vec<(
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+)> {
+    vec![
+        // SQL
+        ("postgres", "PostgreSQL", &["postgresql", "pg"], "sql"),
+        ("snowflake", "Snowflake", &["sf"], "sql"),
+        ("clickhouse", "ClickHouse", &["ch"], "sql"),
+        ("redshift", "Amazon Redshift", &[], "sql"),
+        ("bigquery", "Google BigQuery", &["bq"], "sql"),
+        ("duckdb", "DuckDB", &["duck"], "sql"),
+        ("mysql", "MySQL", &["mariadb"], "sql"),
+        ("sqlite", "SQLite", &[], "sql"),
+        ("oracle", "Oracle Database", &[], "sql"),
+        ("sqlserver", "SQL Server", &["mssql"], "sql"),
+        ("cockroachdb", "CockroachDB", &["crdb"], "sql"),
+        ("timescaledb", "TimescaleDB", &["tsdb"], "sql"),
+        // Storage
+        ("s3", "Amazon S3", &["aws_s3"], "storage"),
+        (
+            "gcs",
+            "Google Cloud Storage",
+            &["google_cloud_storage"],
+            "storage",
+        ),
+        // HTTP
+        (
+            "http",
+            "HTTP/REST API",
+            &["https", "rest", "webhook"],
+            "http",
+        ),
+        // Streaming
+        ("kafka", "Apache Kafka", &[], "stream"),
+        ("rabbitmq", "RabbitMQ", &["amqp"], "stream"),
+        ("kinesis", "AWS Kinesis", &[], "stream"),
+        ("pubsub", "GCP Pub/Sub", &["gcp_pubsub"], "stream"),
+        ("redis", "Redis Streams", &["redis_stream"], "stream"),
+        // SaaS
+        ("salesforce", "Salesforce", &["sfdc"], "saas"),
+        ("hubspot", "HubSpot", &[], "saas"),
+        ("stripe", "Stripe", &[], "saas"),
+        ("github", "GitHub", &["gh"], "saas"),
+        ("jira", "Jira", &[], "saas"),
+        ("slack", "Slack", &[], "saas"),
+        // Document / NoSQL
+        ("mongodb", "MongoDB", &["mongo"], "document"),
+        ("dynamodb", "DynamoDB", &[], "document"),
+        ("cassandra", "Cassandra", &["scylladb"], "document"),
+        (
+            "elasticsearch",
+            "Elasticsearch",
+            &["opensearch", "es"],
+            "document",
+        ),
+        ("redis_kv", "Redis KV", &[], "document"),
+        ("neo4j", "Neo4j", &[], "document"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,68 +1168,4 @@ mod tests {
         assert!(saas_count >= 5, "Should have at least 5 SaaS providers");
         assert!(doc_count >= 5, "Should have at least 5 document providers");
     }
-}
-
-/// Supported provider type identifiers and their aliases.
-pub fn supported_provider_types() -> Vec<(
-    &'static str,
-    &'static str,
-    &'static [&'static str],
-    &'static str,
-)> {
-    vec![
-        // SQL
-        ("postgres", "PostgreSQL", &["postgresql", "pg"], "sql"),
-        ("snowflake", "Snowflake", &["sf"], "sql"),
-        ("clickhouse", "ClickHouse", &["ch"], "sql"),
-        ("redshift", "Amazon Redshift", &[], "sql"),
-        ("bigquery", "Google BigQuery", &["bq"], "sql"),
-        ("duckdb", "DuckDB", &["duck"], "sql"),
-        ("mysql", "MySQL", &["mariadb"], "sql"),
-        ("sqlite", "SQLite", &[], "sql"),
-        ("oracle", "Oracle Database", &[], "sql"),
-        ("sqlserver", "SQL Server", &["mssql"], "sql"),
-        ("cockroachdb", "CockroachDB", &["crdb"], "sql"),
-        ("timescaledb", "TimescaleDB", &["tsdb"], "sql"),
-        // Storage
-        ("s3", "Amazon S3", &["aws_s3"], "storage"),
-        (
-            "gcs",
-            "Google Cloud Storage",
-            &["google_cloud_storage"],
-            "storage",
-        ),
-        // HTTP
-        (
-            "http",
-            "HTTP/REST API",
-            &["https", "rest", "webhook"],
-            "http",
-        ),
-        // Streaming
-        ("kafka", "Apache Kafka", &[], "stream"),
-        ("rabbitmq", "RabbitMQ", &["amqp"], "stream"),
-        ("kinesis", "AWS Kinesis", &[], "stream"),
-        ("pubsub", "GCP Pub/Sub", &["gcp_pubsub"], "stream"),
-        ("redis", "Redis Streams", &["redis_stream"], "stream"),
-        // SaaS
-        ("salesforce", "Salesforce", &["sfdc"], "saas"),
-        ("hubspot", "HubSpot", &[], "saas"),
-        ("stripe", "Stripe", &[], "saas"),
-        ("github", "GitHub", &["gh"], "saas"),
-        ("jira", "Jira", &[], "saas"),
-        ("slack", "Slack", &[], "saas"),
-        // Document / NoSQL
-        ("mongodb", "MongoDB", &["mongo"], "document"),
-        ("dynamodb", "DynamoDB", &[], "document"),
-        ("cassandra", "Cassandra", &["scylladb"], "document"),
-        (
-            "elasticsearch",
-            "Elasticsearch",
-            &["opensearch", "es"],
-            "document",
-        ),
-        ("redis_kv", "Redis KV", &[], "document"),
-        ("neo4j", "Neo4j", &[], "document"),
-    ]
 }

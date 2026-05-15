@@ -11,7 +11,7 @@ use proptest::prelude::*;
 use tempfile::TempDir;
 
 fn make_event(i: u32) -> EventKind {
-    if i % 3 == 0 {
+    if i.is_multiple_of(3) {
         EventKind::DagRunCreated {
             dag_id: format!("dag_{}", i),
             run_id: format!("run_{}", i),

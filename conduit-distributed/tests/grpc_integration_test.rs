@@ -706,7 +706,7 @@ async fn proto_conversion_fidelity_over_wire() {
     assert_eq!(received.run_id, "run-20260323-001");
     assert_eq!(received.task_id, "transform-users");
     assert_eq!(received.attempt, 3);
-    assert_eq!(received.deadline_epoch_ms > 0, true);
+    assert!(received.deadline_epoch_ms > 0);
 
     let spec = received.spec.unwrap();
     assert_eq!(spec.task_type, 1); // Python

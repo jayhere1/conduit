@@ -22,7 +22,7 @@ use conduit_common::event::{EventKind, RunStatus};
 use conduit_compiler::ConduitPlan;
 use conduit_executor::{ExecutorCommand, ExecutorEvent, TaskExecutor, TaskOutcome};
 use conduit_scheduler::{
-    PoolManager, Scheduler, SchedulerCommand, SchedulerEvent, RunStatus as SchedulerRunStatus,
+    PoolManager, RunStatus as SchedulerRunStatus, Scheduler, SchedulerCommand, SchedulerEvent,
 };
 use conduit_state::EventStore;
 
@@ -30,6 +30,7 @@ use conduit_state::EventStore;
 // Bridges Scheduler commands -> Executor commands, and Executor events ->
 // Scheduler events, simulating the role the API layer normally plays.
 
+#[allow(clippy::too_many_arguments)]
 async fn run_mediator(
     dag: &Dag,
     mut command_rx: mpsc::UnboundedReceiver<SchedulerCommand>,
@@ -186,9 +187,17 @@ async fn e2e_python_sdk_dag_compiles_and_runs() {
     let mut dag = plan.dags.get("sdk_e2e_pipeline").unwrap().clone();
 
     // 3. Verify compiled structure
-    assert_eq!(dag.tasks.len(), 3, "Expected 3 tasks, got {:?}", dag.tasks.keys().collect::<Vec<_>>());
+    assert_eq!(
+        dag.tasks.len(),
+        3,
+        "Expected 3 tasks, got {:?}",
+        dag.tasks.keys().collect::<Vec<_>>()
+    );
     assert!(dag.tasks.contains_key("extract"), "Missing 'extract' task");
-    assert!(dag.tasks.contains_key("transform"), "Missing 'transform' task");
+    assert!(
+        dag.tasks.contains_key("transform"),
+        "Missing 'transform' task"
+    );
     assert!(dag.tasks.contains_key("load"), "Missing 'load' task");
 
     // Verify dependencies were inferred
@@ -337,8 +346,14 @@ async fn e2e_python_sdk_dag_compiles_and_runs() {
         .position(|t| t == "load")
         .expect("load not in completions");
 
-    assert!(extract_pos < transform_pos, "extract should complete before transform");
-    assert!(transform_pos < load_pos, "transform should complete before load");
+    assert!(
+        extract_pos < transform_pos,
+        "extract should complete before transform"
+    );
+    assert!(
+        transform_pos < load_pos,
+        "transform should complete before load"
+    );
 
     // DAG should have succeeded
     let last = events.last().unwrap();
@@ -382,9 +397,21 @@ async fn e2e_python_sdk_compilation_preserves_metadata() {
 
     // Execution order should be topologically sorted
     assert_eq!(dag.execution_order.len(), 3);
-    let extract_idx = dag.execution_order.iter().position(|t| t == "extract").unwrap();
-    let transform_idx = dag.execution_order.iter().position(|t| t == "transform").unwrap();
-    let load_idx = dag.execution_order.iter().position(|t| t == "load").unwrap();
+    let extract_idx = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "extract")
+        .unwrap();
+    let transform_idx = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "transform")
+        .unwrap();
+    let load_idx = dag
+        .execution_order
+        .iter()
+        .position(|t| t == "load")
+        .unwrap();
     assert!(extract_idx < transform_idx);
     assert!(transform_idx < load_idx);
 }

@@ -324,20 +324,13 @@ impl AuthStore {
             last_used_at: None,
         };
 
-        // Acquire BOTH write locks before making any mutations to prevent
-        // inconsistent state if a panic occurs between insertions.
-        let mut keys = self
-            .keys_by_hash
-            .write()
-            .map_err(|_| AuthError::InvalidKey)?;
-        let mut ids = self
-            .id_to_hash
-            .write()
-            .map_err(|_| AuthError::InvalidKey)?;
-
-        ids.insert(key.id.clone(), key_hash.clone());
-        keys.insert(key_hash, key.clone());
-        Ok((plaintext, key))
+        if let (Ok(mut keys), Ok(mut ids)) = (self.keys_by_hash.write(), self.id_to_hash.write()) {
+            ids.insert(key.id.clone(), key_hash.clone());
+            keys.insert(key_hash, key.clone());
+            Ok((plaintext, key))
+        } else {
+            Err(AuthError::InvalidKey) // lock poisoned — shouldn't happen
+        }
     }
 
     /// Authenticate a request using a plaintext API key.
@@ -402,7 +395,7 @@ impl AuthStore {
             .read()
             .map(|keys| {
                 let mut list: Vec<ApiKey> = keys.values().cloned().collect();
-                list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                list.sort_by_key(|k| std::cmp::Reverse(k.created_at));
                 list
             })
             .unwrap_or_default()

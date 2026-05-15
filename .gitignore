@@ -1,7 +1,19 @@
 # Rust
 /target
+**/target/
 **/*.rs.bk
 # Note: Cargo.lock is committed for reproducible builds (binary project)
+
+# Python / PyO3
+.venv/
+**/.venv/
+*.so
+*.dylib
+*.dylib.dSYM/
+*.pyd
+dist/
+*.whl
+*.egg-info/
 
 # Node
 node_modules/

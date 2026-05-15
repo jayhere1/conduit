@@ -15,9 +15,9 @@
 
 use std::sync::Arc;
 
+use axum::http::{header, Method};
 use axum::routing::{delete, get, post};
 use axum::Router;
-use axum::http::{header, Method};
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::{ServeDir, ServeFile};

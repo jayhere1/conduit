@@ -5,8 +5,6 @@
 //! - Sensitivity: different inputs produce different fingerprints
 //! - Cascade: changing an upstream task changes all downstream fingerprints
 
-use std::collections::HashMap;
-
 use conduit_common::dag::*;
 use conduit_planner::PlanFingerprinter;
 use proptest::prelude::*;

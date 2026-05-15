@@ -89,20 +89,19 @@ impl SnowflakeProvider {
     /// Base URL for the Snowflake SQL REST API.
     fn api_url(&self) -> String {
         // Strip trailing .snowflakecomputing.com if the user included it
-        let account = self
-            .account
-            .trim_end_matches(".snowflakecomputing.com");
+        let account = self.account.trim_end_matches(".snowflakecomputing.com");
         format!("https://{}.snowflakecomputing.com", account)
     }
 
     /// Authenticate via username/password and return a session token.
     async fn login(&self) -> Result<String, ProviderError> {
-        let password = self.password.as_deref().ok_or_else(|| {
-            ProviderError::AuthenticationFailed {
-                connection: self.name.clone(),
-                reason: "No password provided in credentials".to_string(),
-            }
-        })?;
+        let password =
+            self.password
+                .as_deref()
+                .ok_or_else(|| ProviderError::AuthenticationFailed {
+                    connection: self.name.clone(),
+                    reason: "No password provided in credentials".to_string(),
+                })?;
 
         let url = format!(
             "{}/session/v1/login-request?warehouse={}&databaseName={}&roleName={}",
@@ -144,12 +143,13 @@ impl SnowflakeProvider {
             });
         }
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| {
-            ProviderError::AuthenticationFailed {
-                connection: self.name.clone(),
-                reason: format!("Failed to parse login response: {}", e),
-            }
-        })?;
+        let json: serde_json::Value =
+            resp.json()
+                .await
+                .map_err(|e| ProviderError::AuthenticationFailed {
+                    connection: self.name.clone(),
+                    reason: format!("Failed to parse login response: {}", e),
+                })?;
 
         json["data"]["token"]
             .as_str()
@@ -269,6 +269,7 @@ impl Provider for SnowflakeProvider {
                 Capability::IncrementalRead,
                 Capability::Transactions,
             ],
+            is_stub: false,
         }
     }
 
@@ -278,9 +279,7 @@ impl Provider for SnowflakeProvider {
         use tokio::time::{timeout, Duration};
 
         let start = Instant::now();
-        let account = self
-            .account
-            .trim_end_matches(".snowflakecomputing.com");
+        let account = self.account.trim_end_matches(".snowflakecomputing.com");
         let addr = format!("{}.snowflakecomputing.com:443", account);
 
         match timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await {
@@ -346,7 +345,10 @@ impl SqlProvider for SnowflakeProvider {
                 let schemas: Vec<String> = result
                     .sample_rows
                     .iter()
-                    .filter_map(|row| row.get(1).and_then(|v: &serde_json::Value| v.as_str().map(String::from)))
+                    .filter_map(|row| {
+                        row.get(1)
+                            .and_then(|v: &serde_json::Value| v.as_str().map(String::from))
+                    })
                     .collect();
                 if schemas.is_empty() {
                     Ok(vec![self.schema.clone(), "information_schema".to_string()])

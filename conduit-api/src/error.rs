@@ -82,9 +82,7 @@ fn sanitize_paths(msg: &str) -> String {
 
         // Find the end of this path-like segment
         let rest = &result[start..];
-        let end_offset = rest
-            .find(|c: char| c == ' ' || c == ':' || c == '\n')
-            .unwrap_or(rest.len());
+        let end_offset = rest.find([' ', ':', '\n']).unwrap_or(rest.len());
         let path_str = &result[start..start + end_offset];
 
         if path_str.len() < 2 {
@@ -99,7 +97,12 @@ fn sanitize_paths(msg: &str) -> String {
         };
 
         let new_end = start + replacement.len();
-        result = format!("{}{}{}", &result[..start], replacement, &result[start + end_offset..]);
+        result = format!(
+            "{}{}{}",
+            &result[..start],
+            replacement,
+            &result[start + end_offset..]
+        );
         // Advance cursor past the replacement so we don't re-process it
         cursor = new_end;
     }

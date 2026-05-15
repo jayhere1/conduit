@@ -40,6 +40,7 @@ impl CoordinatorGrpcService {
 }
 
 #[tonic::async_trait]
+#[allow(clippy::result_large_err)]
 impl proto::coordinator_server::Coordinator for CoordinatorGrpcService {
     type RegisterStream = TaskAssignmentStream;
 

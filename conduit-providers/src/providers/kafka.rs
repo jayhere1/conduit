@@ -17,7 +17,6 @@
 //!     schema_registry: http://schema-registry:8081   # optional
 //! ```
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -33,10 +32,17 @@ pub struct KafkaProvider {
     name: String,
     bootstrap_servers: String,
     security_protocol: String,
+    // Reserved for future SASL/SCRAM, consumer-group, and Schema Registry wiring.
+    // rskafka does not currently consume these; they are parsed for forward-compat.
+    #[allow(dead_code)]
     sasl_mechanism: String,
+    #[allow(dead_code)]
     group_id: String,
+    #[allow(dead_code)]
     schema_registry: Option<String>,
+    #[allow(dead_code)]
     user: Option<String>,
+    #[allow(dead_code)]
     password: Option<String>,
     client: OnceCell<Arc<rskafka::client::Client>>,
 }
@@ -112,6 +118,7 @@ impl Provider for KafkaProvider {
             ),
             version: None,
             capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
+            is_stub: true,
         }
     }
 
@@ -124,10 +131,7 @@ impl Provider for KafkaProvider {
                 match client.list_topics().await {
                     Ok(topics) => Ok(ConnectionTestResult {
                         success: true,
-                        message: format!(
-                            "Kafka cluster reachable ({} topics)",
-                            topics.len()
-                        ),
+                        message: format!("Kafka cluster reachable ({} topics)", topics.len()),
                         latency_ms: start.elapsed().as_millis() as u64,
                         server_version: None,
                     }),
@@ -165,7 +169,11 @@ impl StreamProvider for KafkaProvider {
 
         // Get partition client for partition 0
         let partition_client = client
-            .partition_client(topic, 0, rskafka::client::partition::UnknownTopicHandling::Error)
+            .partition_client(
+                topic,
+                0,
+                rskafka::client::partition::UnknownTopicHandling::Error,
+            )
             .await
             .map_err(|e| ProviderError::StreamFailed {
                 connection: self.name.clone(),
@@ -187,15 +195,16 @@ impl StreamProvider for KafkaProvider {
                         .iter()
                         .map(|(k, v)| (k.clone(), v.as_bytes().to_vec()))
                         .collect(),
-                    timestamp: msg
-                        .timestamp
-                        .unwrap_or_else(chrono::Utc::now),
+                    timestamp: msg.timestamp.unwrap_or_else(chrono::Utc::now),
                 }
             })
             .collect();
 
         partition_client
-            .produce(records, rskafka::client::partition::Compression::NoCompression)
+            .produce(
+                records,
+                rskafka::client::partition::Compression::NoCompression,
+            )
             .await
             .map_err(|e| ProviderError::StreamFailed {
                 connection: self.name.clone(),
@@ -218,7 +227,11 @@ impl StreamProvider for KafkaProvider {
         let client = self.ensure_client().await?;
 
         let partition_client = client
-            .partition_client(topic, 0, rskafka::client::partition::UnknownTopicHandling::Error)
+            .partition_client(
+                topic,
+                0,
+                rskafka::client::partition::UnknownTopicHandling::Error,
+            )
             .await
             .map_err(|e| ProviderError::StreamFailed {
                 connection: self.name.clone(),
@@ -258,12 +271,13 @@ impl StreamProvider for KafkaProvider {
     async fn list_topics(&self) -> Result<Vec<String>, ProviderError> {
         let client = self.ensure_client().await?;
 
-        let topics = client.list_topics().await.map_err(|e| {
-            ProviderError::StreamFailed {
+        let topics = client
+            .list_topics()
+            .await
+            .map_err(|e| ProviderError::StreamFailed {
                 connection: self.name.clone(),
                 reason: format!("Failed to list topics: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(topics.into_iter().map(|t| t.name).collect())
     }

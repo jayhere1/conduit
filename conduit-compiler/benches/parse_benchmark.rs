@@ -38,7 +38,7 @@ def {dag_id}(date: Param[str] = "{{{{ ds }}}}"):
     }
 
     // Generate call chain
-    code.push_str(&format!("    result_0 = task_0(date)\n"));
+    code.push_str("    result_0 = task_0(date)\n");
     for i in 1..num_tasks {
         code.push_str(&format!("    result_{i} = task_{i}(result_{})\n", i - 1));
     }

@@ -12,7 +12,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::sync::mpsc;
 
-use conduit_common::dag::{Task, TaskType, ResourceLimits, TriggerRule};
+use conduit_common::dag::{ResourceLimits, Task, TaskType, TriggerRule};
 use conduit_executor::{ExecutorCommand, ExecutorEvent, TaskExecutor, TaskOutcome};
 
 fn make_task(id: &str, command: &str, timeout: Option<&str>) -> Task {
@@ -115,7 +115,10 @@ async fn partial_output_then_failure() {
         ExecutorEvent::TaskCompleted { outcome, .. } => {
             assert_eq!(outcome, TaskOutcome::Failed);
         }
-        other => panic!("Expected TaskCompleted with Failed outcome, got {:?}", other),
+        other => panic!(
+            "Expected TaskCompleted with Failed outcome, got {:?}",
+            other
+        ),
     }
 }
 

@@ -81,7 +81,10 @@ impl SqliteProvider {
                     .await
                     .map_err(|e| ProviderError::ConnectionFailed {
                         name: self.name.clone(),
-                        reason: super::sanitize::sanitize_error(&format!("failed to set journal_mode: {}", e)),
+                        reason: super::sanitize::sanitize_error(&format!(
+                            "failed to set journal_mode: {}",
+                            e
+                        )),
                     })?;
 
                 let pragma_timeout = format!("PRAGMA busy_timeout = {}", self.busy_timeout);
@@ -90,7 +93,10 @@ impl SqliteProvider {
                     .await
                     .map_err(|e| ProviderError::ConnectionFailed {
                         name: self.name.clone(),
-                        reason: super::sanitize::sanitize_error(&format!("failed to set busy_timeout: {}", e)),
+                        reason: super::sanitize::sanitize_error(&format!(
+                            "failed to set busy_timeout: {}",
+                            e
+                        )),
                     })?;
 
                 Ok(pool)
@@ -136,6 +142,7 @@ impl Provider for SqliteProvider {
                 Capability::SqlDdl,
                 Capability::Transactions,
             ],
+            is_stub: false,
         }
     }
 
@@ -190,13 +197,12 @@ impl SqlProvider for SqliteProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(query)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
+            let rows = sqlx::query(&query).fetch_all(pool).await.map_err(|e| {
+                ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
-                })?;
+                }
+            })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
@@ -234,13 +240,12 @@ impl SqlProvider for SqliteProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(query)
-                .execute(pool)
-                .await
-                .map_err(|e| ProviderError::QueryFailed {
+            let result = sqlx::query(&query).execute(pool).await.map_err(|e| {
+                ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
-                })?;
+                }
+            })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 

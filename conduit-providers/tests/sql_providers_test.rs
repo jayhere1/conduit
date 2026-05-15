@@ -68,16 +68,21 @@ fn make_live_pg_config() -> ConnectionConfig {
 
     ConnectionConfig {
         conn_type: "postgres".to_string(),
-        host: Some(std::env::var("CONDUIT_TEST_PG_HOST").unwrap_or_else(|_| "localhost".to_string())),
+        host: Some(
+            std::env::var("CONDUIT_TEST_PG_HOST").unwrap_or_else(|_| "localhost".to_string()),
+        ),
         port: Some(
             std::env::var("CONDUIT_TEST_PG_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(5432),
         ),
-        database: Some(std::env::var("CONDUIT_TEST_PG_DB").unwrap_or_else(|_| "testdb".to_string())),
+        database: Some(
+            std::env::var("CONDUIT_TEST_PG_DB").unwrap_or_else(|_| "testdb".to_string()),
+        ),
         credentials: Some(
-            std::env::var("CONDUIT_TEST_PG_PASSWORD").unwrap_or_else(|_| "conduit_test".to_string()),
+            std::env::var("CONDUIT_TEST_PG_PASSWORD")
+                .unwrap_or_else(|_| "conduit_test".to_string()),
         ),
         extra,
     }
@@ -91,7 +96,9 @@ fn make_live_mysql_config() -> ConnectionConfig {
 
     ConnectionConfig {
         conn_type: "mysql".to_string(),
-        host: Some(std::env::var("CONDUIT_TEST_MYSQL_HOST").unwrap_or_else(|_| "localhost".to_string())),
+        host: Some(
+            std::env::var("CONDUIT_TEST_MYSQL_HOST").unwrap_or_else(|_| "localhost".to_string()),
+        ),
         port: Some(
             std::env::var("CONDUIT_TEST_MYSQL_PORT")
                 .ok()
@@ -102,13 +109,15 @@ fn make_live_mysql_config() -> ConnectionConfig {
             std::env::var("CONDUIT_TEST_MYSQL_DB").unwrap_or_else(|_| "testdb".to_string()),
         ),
         credentials: Some(
-            std::env::var("CONDUIT_TEST_MYSQL_PASSWORD").unwrap_or_else(|_| "conduit_test".to_string()),
+            std::env::var("CONDUIT_TEST_MYSQL_PASSWORD")
+                .unwrap_or_else(|_| "conduit_test".to_string()),
         ),
         extra,
     }
 }
 
 /// SQLite in-memory config — no Docker needed.
+#[allow(dead_code)]
 fn make_live_sqlite_config() -> ConnectionConfig {
     ConnectionConfig {
         conn_type: "sqlite".to_string(),
@@ -439,11 +448,7 @@ async fn test_redshift_execute_insert() {
             &params,
         )
         .await;
-    assert!(
-        result.is_ok(),
-        "Redshift INSERT failed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Redshift INSERT failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -725,10 +730,7 @@ async fn test_mysql_execute_insert() {
         .await
         .expect("Failed to create test table");
     let result = provider
-        .execute(
-            "INSERT IGNORE INTO test_table VALUES (1, 'hello')",
-            &params,
-        )
+        .execute("INSERT IGNORE INTO test_table VALUES (1, 'hello')", &params)
         .await;
     assert!(result.is_ok(), "MySQL INSERT failed: {:?}", result.err());
 }
@@ -1040,7 +1042,11 @@ async fn test_cockroachdb_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1 AS val", &params).await;
-    assert!(result.is_ok(), "CockroachDB SELECT failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "CockroachDB SELECT failed: {:?}",
+        result.err()
+    );
     let sql_result = result.unwrap();
     assert!(sql_result.rows_returned.is_some());
 }
@@ -1129,7 +1135,11 @@ async fn test_timescaledb_execute_select() {
 
     let params = HashMap::new();
     let result = provider.execute("SELECT 1 AS val", &params).await;
-    assert!(result.is_ok(), "TimescaleDB SELECT failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "TimescaleDB SELECT failed: {:?}",
+        result.err()
+    );
     let sql_result = result.unwrap();
     assert!(sql_result.rows_returned.is_some());
 }
