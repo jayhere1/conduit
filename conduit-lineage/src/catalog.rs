@@ -50,6 +50,13 @@ impl CatalogColumn {
 ///
 /// The catalog is optional and additive — without it, lineage extraction works
 /// exactly as before. With it, results are more precise.
+///
+/// **Views**: a view registered via `register_view` exposes columns derived
+/// from its defining SQL. Downstream queries treat the view exactly like a
+/// table: `SELECT *` expansion, bare-column resolution, and CTE-style lineage
+/// propagation all work. View resolution is single-level — a view defined in
+/// terms of another view falls back to the underlying view's stored columns,
+/// so cycles are impossible by construction.
 #[derive(Debug, Clone, Default)]
 pub struct TableCatalog {
     tables: HashMap<(Option<String>, String), Vec<CatalogColumn>>,
@@ -72,6 +79,36 @@ impl TableCatalog {
     ) {
         let key = (schema.map(|s| s.to_lowercase()), table.to_lowercase());
         self.tables.insert(key, columns);
+    }
+
+    /// Register a view by extracting its output columns from its defining
+    /// SQL and storing them under the view's name. Downstream queries that
+    /// reference the view get the same column-resolution and `*`-expansion
+    /// behavior as a real table.
+    ///
+    /// The view's SQL is parsed once at registration time using the *current*
+    /// catalog as context — so register underlying tables before views that
+    /// depend on them for the best resolution. Returns `true` if at least
+    /// one output column was successfully extracted; `false` if the SQL was
+    /// unparseable (the view is still registered with an empty column list).
+    pub fn register_view(&mut self, schema: Option<&str>, view: &str, defining_sql: &str) -> bool {
+        // Local import to avoid a top-of-file cycle on `sql_parser` (which
+        // also imports from this module). Both modules are inside the same
+        // crate so the local import is free.
+        use crate::sql_parser::SqlLineageExtractor;
+        let lineage = SqlLineageExtractor::extract_with_catalog(defining_sql, self);
+        let columns: Vec<CatalogColumn> = lineage
+            .output_columns
+            .iter()
+            // Filter out synthetic columns (e.g. WHERE-clause aggregations
+            // surfaced as `__where__`) — they shouldn't appear in
+            // `SELECT *` expansion against the view.
+            .filter(|c| !c.name.starts_with("__"))
+            .map(|c| CatalogColumn::new(&c.name, ColumnType::Unknown))
+            .collect();
+        let extracted = !columns.is_empty();
+        self.register_table(schema, view, columns);
+        extracted
     }
 
     /// Look up a table's columns.
