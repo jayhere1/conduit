@@ -52,6 +52,7 @@ impl Provider for DynamoDbProvider {
             display_name: format!("DynamoDB ({})", self.region),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

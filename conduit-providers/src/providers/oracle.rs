@@ -72,6 +72,7 @@ impl Provider for OracleProvider {
                 Capability::Transactions,
                 Capability::BulkLoad,
             ],
+            is_stub: true,
         }
     }
 

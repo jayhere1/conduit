@@ -68,6 +68,7 @@ impl Provider for SalesforceProvider {
             ),
             version: Some(self.api_version.clone()),
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

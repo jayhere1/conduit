@@ -63,6 +63,7 @@ impl Provider for RedisDocProvider {
             display_name: format!("Redis KV ({}:{}/{})", self.host, self.port, self.database),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

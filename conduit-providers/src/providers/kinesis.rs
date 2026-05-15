@@ -55,6 +55,7 @@ impl Provider for KinesisProvider {
             display_name: format!("Kinesis ({}, {})", self.stream_name, self.region),
             version: None,
             capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
+            is_stub: true,
         }
     }
 

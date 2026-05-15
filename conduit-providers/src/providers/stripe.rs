@@ -49,6 +49,7 @@ impl Provider for StripeProvider {
             ),
             version: Some(self.api_version.clone()),
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

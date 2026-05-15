@@ -67,6 +67,7 @@ impl Provider for ElasticsearchProvider {
             display_name: format!("Elasticsearch ({}:{})", self.host, self.port),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

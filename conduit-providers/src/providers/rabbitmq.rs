@@ -71,6 +71,7 @@ impl Provider for RabbitMqProvider {
             display_name: format!("RabbitMQ ({}:{}{})", self.host, self.port, self.vhost),
             version: None,
             capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
+            is_stub: true,
         }
     }
 

@@ -45,6 +45,7 @@ impl Provider for SlackProvider {
             display_name: format!("Slack ({})", self.workspace),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

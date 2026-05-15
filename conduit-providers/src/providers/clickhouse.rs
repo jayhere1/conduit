@@ -70,6 +70,7 @@ impl Provider for ClickHouseProvider {
                 Capability::BulkLoad,
                 Capability::IncrementalRead,
             ],
+            is_stub: true,
         }
     }
 

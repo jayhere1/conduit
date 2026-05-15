@@ -41,6 +41,7 @@ impl Provider for HubSpotProvider {
             display_name: format!("HubSpot (portal: {})", self.portal_id),
             version: Some("v3".to_string()),
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

@@ -65,6 +65,7 @@ impl Provider for CassandraProvider {
             display_name: format!("Cassandra ({}:{}/{})", self.host, self.port, self.keyspace),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

@@ -55,6 +55,7 @@ impl Provider for PubSubProvider {
             display_name: format!("Pub/Sub ({}/{})", self.project, self.topic),
             version: None,
             capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
+            is_stub: true,
         }
     }
 

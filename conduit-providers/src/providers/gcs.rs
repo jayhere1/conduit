@@ -139,6 +139,7 @@ impl Provider for GcsProvider {
                 Capability::StorageList,
                 Capability::BulkLoad,
             ],
+            is_stub: false,
         }
     }
 

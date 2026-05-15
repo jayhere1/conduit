@@ -133,6 +133,7 @@ impl Provider for HttpApiProvider {
             display_name: format!("HTTP ({}{})", self.base_url, self.base_path),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: false,
         }
     }
 

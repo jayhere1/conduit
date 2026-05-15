@@ -62,6 +62,7 @@ impl Provider for JiraProvider {
             ),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

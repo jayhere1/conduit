@@ -52,6 +52,7 @@ impl Provider for GitHubProvider {
             ),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

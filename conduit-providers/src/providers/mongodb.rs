@@ -71,6 +71,7 @@ impl Provider for MongoDbProvider {
             display_name: format!("MongoDB ({}:{}/{})", self.host, self.port, self.database),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 

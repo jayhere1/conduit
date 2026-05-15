@@ -27,6 +27,12 @@ pub struct ProviderInfo {
     pub version: Option<String>,
     /// Capabilities this provider supports.
     pub capabilities: Vec<Capability>,
+    /// True when this provider is a stub: its `execute` / `test_connection`
+    /// methods return `NotImplemented` and any task referencing it WILL fail
+    /// at runtime. Surfaced at compile time and in `/connections` so callers
+    /// don't unknowingly route real workloads through a placeholder.
+    #[serde(default)]
+    pub is_stub: bool,
 }
 
 /// What a provider can do.
@@ -382,6 +388,7 @@ mod tests {
             display_name: "PostgreSQL (localhost:5432)".to_string(),
             version: Some("15.4".to_string()),
             capabilities: vec![Capability::SqlQuery, Capability::Transactions],
+            is_stub: false,
         };
 
         let json = serde_json::to_value(&info).unwrap();

@@ -63,6 +63,7 @@ impl Provider for RedisStreamProvider {
             display_name: format!("Redis ({}:{}/{})", self.host, self.port, self.database),
             version: None,
             capabilities: vec![Capability::StreamProduce, Capability::StreamConsume],
+            is_stub: true,
         }
     }
 

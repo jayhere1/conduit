@@ -76,6 +76,7 @@ impl Provider for SqlServerProvider {
                 Capability::Transactions,
                 Capability::BulkLoad,
             ],
+            is_stub: true,
         }
     }
 

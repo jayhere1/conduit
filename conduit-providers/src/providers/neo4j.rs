@@ -70,6 +70,7 @@ impl Provider for Neo4jProvider {
             display_name: format!("Neo4j ({}:{}/{})", self.host, self.port, self.database),
             version: None,
             capabilities: vec![Capability::HttpRequest],
+            is_stub: true,
         }
     }
 
