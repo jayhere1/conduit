@@ -38,3 +38,37 @@ pub use registry::ProviderRegistry;
 pub use secrets::{SecretsBackend, SecretsChain, SecretsConfig, SecretsError};
 pub use traits::*;
 pub use traits_saas::{DocumentProvider, DocumentResult, RateLimitInfo, SaasProvider, SaasResult};
+
+/// Connection-type strings whose providers are stubs — `info().is_stub` is
+/// true and their data operations return `NotImplemented`. Used by callers
+/// (e.g. `conduit compile`) to warn before runtime when a DAG would route
+/// through one.
+///
+/// Kept in sync with the `is_stub: true` settings on each provider's
+/// `ProviderInfo`; the test in `tests/stub_contract_test.rs` enforces
+/// agreement at compile time.
+pub fn is_stub_provider_type(conn_type: &str) -> bool {
+    matches!(
+        conn_type.to_lowercase().as_str(),
+        "kinesis"
+            | "neo4j"
+            | "hubspot"
+            | "dynamodb"
+            | "salesforce"
+            | "redis_doc"
+            | "clickhouse"
+            | "sqlserver"
+            | "cassandra"
+            | "elasticsearch"
+            | "slack"
+            | "stripe"
+            | "github"
+            | "oracle"
+            | "redis_stream"
+            | "jira"
+            | "pubsub"
+            | "rabbitmq"
+            | "kafka"
+            | "mongodb"
+    )
+}

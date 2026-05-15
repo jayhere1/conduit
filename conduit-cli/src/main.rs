@@ -777,6 +777,12 @@ fn cmd_compile(path: &PathBuf, output: Option<&Path>, check: bool) -> Result<()>
         println!();
     }
 
+    // Warn when any DAG routes work through a provider that is a stub —
+    // its data operations return NotImplemented and apply WILL fail at
+    // runtime. We do this best-effort: skip silently if conduit.yaml is
+    // missing (e.g. running `conduit compile` from the workspace root).
+    warn_on_stub_connections(path, &plan);
+
     if !stats.errors.is_empty() {
         eprintln!("Errors:");
         for err in &stats.errors {
@@ -793,6 +799,74 @@ fn cmd_compile(path: &PathBuf, output: Option<&Path>, check: bool) -> Result<()>
     }
 
     Ok(())
+}
+
+/// Walk every SQL task across every DAG; for each one, look up the named
+/// connection in the project's conduit.yaml; if its `conn_type` is a stub,
+/// print a warning. We surface the offending DAG + task so users can find
+/// and replace it before deploying.
+fn warn_on_stub_connections(dags_path: &Path, plan: &conduit_compiler::ConduitPlan) {
+    use conduit_common::dag::TaskType;
+
+    // Walk up from dags_path to find conduit.yaml. Mirrors resolve_state_dir.
+    let yaml_path = {
+        let mut candidate = dags_path.to_path_buf();
+        if candidate.is_relative() {
+            candidate = std::env::current_dir().unwrap_or_default().join(candidate);
+        }
+        // dags_path may BE the dags subdir; look at the project root.
+        let project_root = if candidate.ends_with("dags") {
+            candidate.parent().map(Path::to_path_buf)
+        } else {
+            Some(candidate.clone())
+        };
+        match project_root.and_then(|p| {
+            let y = p.join("conduit.yaml");
+            y.exists().then_some(y)
+        }) {
+            Some(p) => p,
+            None => return,
+        }
+    };
+
+    let config = match conduit_common::config::ConduitConfig::load(&yaml_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut warnings: Vec<String> = Vec::new();
+    for (dag_id, dag) in &plan.dags {
+        for (task_id, task) in &dag.tasks {
+            let connection = match &task.task_type {
+                TaskType::Sql { connection, .. } => connection,
+                _ => continue,
+            };
+            let conn_cfg = match config.connections.get(connection) {
+                Some(c) => c,
+                None => continue, // unknown connection; planner will surface separately
+            };
+            if conduit_providers::is_stub_provider_type(&conn_cfg.conn_type) {
+                warnings.push(format!(
+                    "  {}.{} uses connection '{}' ({}) — STUB provider; will fail at runtime",
+                    dag_id, task_id, connection, conn_cfg.conn_type
+                ));
+            }
+        }
+    }
+
+    if !warnings.is_empty() {
+        eprintln!(
+            "WARNING: {} task(s) reference stub providers:",
+            warnings.len()
+        );
+        for w in &warnings {
+            eprintln!("{}", w);
+        }
+        eprintln!(
+            "Stub providers are placeholders and their data operations return NotImplemented."
+        );
+        eprintln!();
+    }
 }
 
 // ─── conduit run ─────────────────────────────────────────────────────────────
