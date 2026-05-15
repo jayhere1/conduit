@@ -104,6 +104,14 @@ impl SqlLineageExtractor {
     }
 
     fn extract_inner(sql: &str, catalog: Option<&TableCatalog>) -> SqlLineage {
+        // Replace Jinja `{{ ... }}` and `{% ... %}` blocks with safe SQL
+        // placeholders so the underlying sqlparser doesn't choke on templated
+        // SQL (dbt projects, Airflow macros). The placeholders are valid
+        // identifiers so they parse as bare column references or aliases —
+        // close enough that the column-level dataflow is still discoverable.
+        let sql_owned = strip_jinja(sql);
+        let sql = sql_owned.as_str();
+
         let dialect = GenericDialect {};
         let statements = match Parser::parse_sql(&dialect, sql) {
             Ok(stmts) => stmts,
@@ -781,6 +789,63 @@ impl SqlLineageExtractor {
             Self::collect_column_refs(&order_expr.expr, alias_map, tables, catalog, refs);
         }
     }
+}
+
+/// Replace Jinja template blocks with SQL-safe placeholder identifiers so the
+/// downstream SQL parser doesn't reject otherwise-valid SQL.
+///
+///   {{ var('table_name') }}        →  __conduit_jinja_0__
+///   {% if env == 'prod' %}...{% endif %}  →  /* empty */
+///
+/// We don't try to *render* the templates — that would require a context.
+/// We just want the surrounding SQL to parse so column-level lineage can be
+/// extracted from the parts we DO understand. Placeholders are unique per
+/// occurrence so an extractor can still produce sensible TableRefs.
+pub(crate) fn strip_jinja(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.char_indices().peekable();
+    let mut placeholder_n: usize = 0;
+
+    while let Some(&(i, c)) = chars.peek() {
+        if c == '{' {
+            let next = sql[i + 1..].chars().next();
+            match next {
+                // {{ expr }}  → replace with placeholder identifier
+                Some('{') => {
+                    if let Some(end) = sql[i + 2..].find("}}") {
+                        out.push_str(&format!("__conduit_jinja_{}__", placeholder_n));
+                        placeholder_n += 1;
+                        // Advance past the closing `}}`
+                        let advance_to = i + 2 + end + 2;
+                        while let Some(&(j, _)) = chars.peek() {
+                            if j >= advance_to {
+                                break;
+                            }
+                            chars.next();
+                        }
+                        continue;
+                    }
+                }
+                // {% stmt %}  → drop entirely (control flow has no SQL output)
+                Some('%') => {
+                    if let Some(end) = sql[i + 2..].find("%}") {
+                        let advance_to = i + 2 + end + 2;
+                        while let Some(&(j, _)) = chars.peek() {
+                            if j >= advance_to {
+                                break;
+                            }
+                            chars.next();
+                        }
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(c);
+        chars.next();
+    }
+    out
 }
 
 #[cfg(test)]
