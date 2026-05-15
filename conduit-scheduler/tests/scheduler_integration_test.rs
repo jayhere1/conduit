@@ -384,3 +384,124 @@ async fn test_trigger_evaluation_no_deps() {
         cmds
     );
 }
+
+/// Repro for the duplicate-dispatch bug: when a task is Pending and multiple
+/// events arrive before the executor's TaskCompleted comes back, the scheduler
+/// would re-elect it. After the fix, a task transitions to Queued at dispatch
+/// time and is never re-dispatched on subsequent evaluate passes.
+#[tokio::test]
+async fn dispatch_is_idempotent_under_event_storm() {
+    let task_a = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    let task_b = make_task("B", vec!["A"], TriggerRule::AllSuccess, 0, None);
+    let dag = make_dag("dag1", vec![task_a, task_b], vec!["A", "B"]);
+
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (tx, mut rx, scheduler_fut) = create_test_scheduler(plans);
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+
+    // Fire 50 spurious CronTicks before A completes — each previously re-elected
+    // A because state was still Pending.
+    for _ in 0..50 {
+        tx.send(SchedulerEvent::CronTick {
+            timestamp: Utc::now(),
+        })
+        .unwrap();
+    }
+
+    tx.send(SchedulerEvent::TaskCompleted {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: "A".to_string(),
+        snapshot_id: None,
+        duration_ms: 1,
+    })
+    .unwrap();
+
+    // Another storm after A completes — same logic for B.
+    for _ in 0..50 {
+        tx.send(SchedulerEvent::CronTick {
+            timestamp: Utc::now(),
+        })
+        .unwrap();
+    }
+
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    scheduler_fut.await;
+
+    let cmds = drain_commands(&mut rx);
+    let dispatches_a = cmds
+        .iter()
+        .filter(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "A"))
+        .count();
+    let dispatches_b = cmds
+        .iter()
+        .filter(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "B"))
+        .count();
+
+    assert_eq!(
+        dispatches_a, 1,
+        "A dispatched {} times, expected 1",
+        dispatches_a
+    );
+    assert_eq!(
+        dispatches_b, 1,
+        "B dispatched {} times, expected 1",
+        dispatches_b
+    );
+}
+
+/// Duplicate TaskCompleted events should be dropped, not allowed to overwrite
+/// terminal state.
+#[tokio::test]
+async fn duplicate_task_completed_is_ignored() {
+    let task_a = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    let task_b = make_task("B", vec!["A"], TriggerRule::AllSuccess, 0, None);
+    let dag = make_dag("dag1", vec![task_a, task_b], vec!["A", "B"]);
+
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (tx, mut rx, scheduler_fut) = create_test_scheduler(plans);
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+
+    for _ in 0..5 {
+        tx.send(SchedulerEvent::TaskCompleted {
+            dag_id: "dag1".to_string(),
+            run_id: "run1".to_string(),
+            task_id: "A".to_string(),
+            snapshot_id: None,
+            duration_ms: 1,
+        })
+        .unwrap();
+    }
+
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    scheduler_fut.await;
+
+    let cmds = drain_commands(&mut rx);
+    let dispatches_b = cmds
+        .iter()
+        .filter(|c| matches!(c, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "B"))
+        .count();
+    assert_eq!(
+        dispatches_b, 1,
+        "B dispatched {} times after duplicate completions, expected 1",
+        dispatches_b
+    );
+}

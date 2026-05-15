@@ -403,7 +403,7 @@ impl Scheduler {
         }
 
         let run_key = format!("{}/{}", dag_id, run_id);
-        self.dag_runs.insert(run_key, run_state.clone());
+        self.dag_runs.insert(run_key.clone(), run_state);
 
         info!(
             dag_id = %dag_id,
@@ -422,8 +422,15 @@ impl Scheduler {
             m.active_dag_runs.inc();
         }
 
-        // Evaluate which root tasks are ready
-        self.evaluate_ready_tasks(dag, &run_state);
+        // Evaluate ready tasks and dispatch them. We compute the ready list
+        // against the immutably-borrowed run_state, then transition each to
+        // Queued in the stored state before emitting commands — so any later
+        // evaluate call sees them as already-dispatched and doesn't re-elect.
+        let ready = match self.dag_runs.get(&run_key) {
+            Some(rs) => self.evaluate_ready_tasks(dag, rs),
+            None => return,
+        };
+        self.transition_and_dispatch(dag_id, &run_key, ready);
     }
 
     /// Handle task completion.
@@ -437,7 +444,9 @@ impl Scheduler {
     ) {
         let run_key = format!("{}/{}", dag_id, run_id);
 
-        // Mutate first, then drop the mutable borrow
+        // Mutate first, then drop the mutable borrow. Drop late or duplicate
+        // completion events for already-terminal tasks instead of overwriting
+        // — overwriting could turn a Failed task into Success on a stale event.
         {
             let run_state = match self.dag_runs.get_mut(&run_key) {
                 Some(r) => r,
@@ -446,6 +455,19 @@ impl Scheduler {
                     return;
                 }
             };
+
+            if let Some(
+                TaskState::Success { .. } | TaskState::Failed { .. } | TaskState::Skipped { .. },
+            ) = run_state.task_states.get(task_id)
+            {
+                warn!(
+                    dag_id = %dag_id,
+                    run_id = %run_id,
+                    task_id = %task_id,
+                    "Ignoring duplicate TaskCompleted event — task already terminal"
+                );
+                return;
+            }
 
             run_state.task_states.insert(
                 task_id.clone(),
@@ -476,24 +498,27 @@ impl Scheduler {
             m.active_tasks.dec();
         }
 
-        let dag = match self.plans.get(dag_id) {
-            Some(d) => d,
-            None => {
-                error!(dag_id = %dag_id, "DAG not found");
-                return;
+        // Compute ready set while holding only immutable borrows.
+        let ready = {
+            let dag = match self.plans.get(dag_id) {
+                Some(d) => d,
+                None => {
+                    error!(dag_id = %dag_id, "DAG not found");
+                    return;
+                }
+            };
+            match self.dag_runs.get(&run_key) {
+                Some(rs) => self.evaluate_ready_tasks(dag, rs),
+                None => return,
             }
         };
 
-        let run_state = match self.dag_runs.get(&run_key) {
-            Some(r) => r,
-            None => return,
-        };
+        self.transition_and_dispatch(dag_id, &run_key, ready);
 
-        // Evaluate downstream tasks
-        self.evaluate_ready_tasks(dag, run_state);
-
-        // Check if DAG run is complete
-        self.check_dag_run_complete(dag, run_state);
+        // Re-borrow to check completion after dispatch state mutations.
+        if let (Some(dag), Some(rs)) = (self.plans.get(dag_id), self.dag_runs.get(&run_key)) {
+            self.check_dag_run_complete(dag, rs);
+        }
     }
 
     /// Handle task failure.
@@ -636,8 +661,13 @@ impl Scheduler {
     }
 
     /// Evaluate which tasks in a run are ready to execute.
-    fn evaluate_ready_tasks(&self, dag: &Dag, run_state: &DagRunState) {
+    /// Find tasks ready to dispatch. Pure of dispatch side-effects so the
+    /// caller can atomically mutate state and emit commands together — the
+    /// previous `&self`-only signature caused duplicate dispatches when
+    /// multiple events arrived between a dispatch and its completion.
+    fn evaluate_ready_tasks(&self, dag: &Dag, run_state: &DagRunState) -> Vec<TaskId> {
         let evaluator = TriggerRuleEvaluator::new();
+        let mut ready = Vec::new();
 
         for task_id in &dag.execution_order {
             let current_state = run_state
@@ -646,41 +676,17 @@ impl Scheduler {
                 .cloned()
                 .unwrap_or(TaskState::Pending);
 
-            // Only evaluate Pending tasks
+            // Only Pending tasks are candidates for dispatch.
             if !matches!(current_state, TaskState::Pending) {
                 continue;
             }
 
             let task = &dag.tasks[task_id];
-
-            // Check if this task is ready
-            let is_ready = evaluator.evaluate(&task.trigger_rule, task_id, dag, run_state);
-
-            if is_ready {
-                if let Some(m) = metrics::try_global() {
-                    m.tasks_total
-                        .get_or_create(&metrics::StatusLabels {
-                            status: "dispatched".to_string(),
-                        })
-                        .inc();
-                    m.active_tasks.inc();
-                }
-
-                self.send_command(SchedulerCommand::DispatchTask {
-                    dag_id: dag.id.clone(),
-                    run_id: run_state.run_id.clone(),
-                    task_id: task_id.clone(),
-                    attempt: 0,
-                });
-
-                debug!(
-                    dag_id = %dag.id,
-                    run_id = %run_state.run_id,
-                    task_id = %task_id,
-                    "Task is ready to dispatch"
-                );
+            if evaluator.evaluate(&task.trigger_rule, task_id, dag, run_state) {
+                ready.push(task_id.clone());
             }
         }
+        ready
     }
 
     /// Check if a DAG run is complete (all tasks terminal).
@@ -806,9 +812,60 @@ impl Scheduler {
         // Re-borrow immutably to evaluate tasks that may now be ready
         // (e.g., AllDone, OneSuccess, OneFailed downstream of the failure)
         // and check if the run is now complete.
-        if let Some(updated_state) = self.dag_runs.get(run_key) {
-            self.evaluate_ready_tasks(dag, updated_state);
-            self.check_dag_run_complete(dag, updated_state);
+        let ready = match self.dag_runs.get(run_key) {
+            Some(rs) => self.evaluate_ready_tasks(dag, rs),
+            None => return,
+        };
+        self.transition_and_dispatch(&dag.id, run_key, ready);
+        if let Some(rs) = self.dag_runs.get(run_key) {
+            self.check_dag_run_complete(dag, rs);
+        }
+    }
+
+    /// Atomically move each task in `ready` to `Queued` in the stored run
+    /// state and emit one `DispatchTask` command per task. The state
+    /// transition happens *before* the command is sent, so any concurrent
+    /// `evaluate_ready_tasks` (triggered by interleaved events) sees the
+    /// task as no-longer-Pending and skips it. This is the invariant that
+    /// prevents duplicate dispatches.
+    fn transition_and_dispatch(&mut self, dag_id: &DagId, run_key: &str, ready: Vec<TaskId>) {
+        if ready.is_empty() {
+            return;
+        }
+
+        let run_id = {
+            let Some(rs) = self.dag_runs.get_mut(run_key) else {
+                return;
+            };
+            for task_id in &ready {
+                rs.task_states.insert(task_id.clone(), TaskState::Queued);
+            }
+            rs.run_id.clone()
+        };
+
+        for task_id in ready {
+            if let Some(m) = metrics::try_global() {
+                m.tasks_total
+                    .get_or_create(&metrics::StatusLabels {
+                        status: "dispatched".to_string(),
+                    })
+                    .inc();
+                m.active_tasks.inc();
+            }
+
+            self.send_command(SchedulerCommand::DispatchTask {
+                dag_id: dag_id.clone(),
+                run_id: run_id.clone(),
+                task_id: task_id.clone(),
+                attempt: 0,
+            });
+
+            debug!(
+                dag_id = %dag_id,
+                run_id = %run_id,
+                task_id = %task_id,
+                "Task dispatched"
+            );
         }
     }
 }
