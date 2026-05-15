@@ -618,6 +618,48 @@ impl Worker {
         *self.state.read().await
     }
 
+    /// Wait for a graceful-shutdown signal (SIGTERM or SIGINT), then drain
+    /// in-flight tasks before returning. Intended to be the last `await` in
+    /// a worker daemon's `main`:
+    ///
+    /// ```ignore
+    /// worker.shutdown_on_signal(Duration::from_secs(300)).await;
+    /// // process exits after at most `timeout` of draining
+    /// ```
+    ///
+    /// On Unix, listens for both `SIGTERM` (Kubernetes' termination signal)
+    /// and `SIGINT` (Ctrl+C). On Windows, only Ctrl+C is observed.
+    pub async fn shutdown_on_signal(&self, drain_timeout: Duration) {
+        Self::await_shutdown_signal().await;
+        info!(
+            worker = %self.config.worker_id,
+            running_tasks = self.running.len(),
+            "Shutdown signal received — entering drain mode"
+        );
+        self.drain().await;
+        self.wait_for_drain(drain_timeout).await;
+        info!(
+            worker = %self.config.worker_id,
+            "Worker drain complete; exiting"
+        );
+    }
+
+    #[cfg(unix)]
+    async fn await_shutdown_signal() {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn await_shutdown_signal() {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+
     /// Number of currently running tasks.
     pub fn running_count(&self) -> usize {
         self.running.len()
@@ -835,5 +877,55 @@ echo 'CONDUIT::LOG::INFO::Hello from task'
 
         assert_eq!(result.outcome, TaskOutcome::Retry);
         assert_eq!(result.exit_code, 2);
+    }
+
+    /// Drain-mode regression test: assert that after `drain()` runs, the
+    /// worker rejects new assignments AND its state has flipped to Draining.
+    /// `shutdown_on_signal` calls this exact sequence after a SIGTERM, so
+    /// covering `drain()` end-to-end is the load-bearing piece of the
+    /// graceful-shutdown story.
+    #[tokio::test]
+    async fn test_drain_rejects_new_work_and_waits_for_running() {
+        let (worker, mut result_rx, _log_rx) = make_worker();
+
+        // Long-running task already in flight.
+        let mut inflight = make_assignment("inflight");
+        inflight.spec.script = "sleep 0.3".to_string();
+        inflight.spec.timeout_secs = 5;
+        worker.handle_assignment(inflight).await;
+        assert!(worker.running_count() > 0);
+
+        // Engage drain mode. Subsequent assignments must be rejected.
+        worker.drain().await;
+        assert_eq!(worker.state().await, WorkerState::Draining);
+
+        let new = make_assignment("post-drain");
+        worker.handle_assignment(new).await;
+
+        // The post-drain assignment surfaces an immediate Failed result with
+        // a "draining" error message; the in-flight task still completes.
+        let mut outcomes = Vec::new();
+        for _ in 0..2 {
+            let r = tokio::time::timeout(Duration::from_secs(5), result_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            outcomes.push(r);
+        }
+        assert!(
+            outcomes
+                .iter()
+                .any(|r| r.task_id == "post-drain" && r.error.contains("draining")),
+            "post-drain assignment should be rejected with 'draining' error; got {:?}",
+            outcomes
+        );
+
+        // wait_for_drain returns once running is empty (or timeout).
+        worker.wait_for_drain(Duration::from_secs(2)).await;
+        assert_eq!(
+            worker.running_count(),
+            0,
+            "wait_for_drain should not return while tasks are still running"
+        );
     }
 }
