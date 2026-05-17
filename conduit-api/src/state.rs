@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
-use conduit_lineage::TableCatalog;
+use conduit_lineage::{ExternalLineageStore, TableCatalog};
+
+use crate::plan_cache::PlanCache;
 use conduit_providers::registry::ConnectionSummary;
 use conduit_providers::traits::ConnectionTestResult;
 use conduit_providers::ProviderRegistry;
@@ -74,6 +76,19 @@ pub struct AppState {
     /// Cached table catalog for enhanced SQL lineage resolution.
     /// Populated via `/api/v1/lineage/catalog/refresh` or on-demand per query.
     pub catalog_cache: RwLock<Option<TableCatalog>>,
+    /// Ingested OpenLineage events from upstream systems (Airflow, dbt, Spark).
+    /// Durable via RocksDB by default; see `conduit-lineage::openlineage_ingest` docs.
+    pub external_lineage: Arc<ExternalLineageStore>,
+    /// Compiled-plan + per-DAG stitched-lineage cache, invalidated on
+    /// DAG source signature change. Shared across all handlers that
+    /// need a `ConduitPlan` or a `CrossTaskLineage`.
+    pub plan_cache: Arc<PlanCache>,
+    /// Optional persistent event store backing the `/events` query API. When
+    /// `state_dir/events` exists, it's opened on `AppState::with_options`; if
+    /// the directory is missing or open fails (e.g. permissions), the field
+    /// stays `None` and the events endpoint reports an empty result rather
+    /// than failing the request.
+    pub event_store: Option<Arc<conduit_state::EventStore>>,
 }
 
 impl AppState {
@@ -121,6 +136,29 @@ impl AppState {
         let snapshot_store = Arc::new(SnapshotStore::new());
         let env_manager = env_manager.with_snapshot_store(Arc::clone(&snapshot_store));
 
+        let external_lineage = Arc::new(open_external_lineage_store(&state_dir));
+        let plan_cache = Arc::new(PlanCache::new(dags_path.clone()));
+
+        // Open the persistent event store if it exists. Failure is non-fatal:
+        // the events API just reports an empty result with a clear note. The
+        // CLI's audit/replay commands open the same DB at the same location.
+        let events_dir = state_dir.join("events");
+        let event_store = if events_dir.exists() {
+            match conduit_state::EventStore::open(&events_dir) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %events_dir.display(),
+                        error = %e,
+                        "Failed to open event store; /events API will return empty",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Arc::new(Self {
             dags_path,
             state_dir,
@@ -133,6 +171,9 @@ impl AppState {
             auth_store,
             scheduler_tx: OnceLock::new(),
             catalog_cache: RwLock::new(None),
+            external_lineage,
+            plan_cache,
+            event_store,
         })
     }
 
@@ -629,6 +670,34 @@ impl AppState {
 
         if let Ok(mut guard) = self.provider_registry.write() {
             *guard = Some(registry);
+        }
+    }
+}
+
+/// Open the durable external-lineage store at `state_dir/external_lineage_db`.
+///
+/// Falls back to an in-memory store (with a warning) when the on-disk
+/// store can't be opened — typically this means another process is
+/// holding the RocksDB lock or the user supplied a state dir on
+/// read-only media. The in-memory store still satisfies every public
+/// API; it just loses ingested events on restart.
+fn open_external_lineage_store(state_dir: &std::path::Path) -> ExternalLineageStore {
+    let path = state_dir.join("external_lineage_db");
+    match conduit_state::RocksExternalLineageBackend::open(&path) {
+        Ok(backend) => {
+            tracing::info!(
+                path = %path.display(),
+                "External lineage store opened (durable)"
+            );
+            ExternalLineageStore::new(Arc::new(backend))
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Falling back to in-memory external lineage store; ingested events will not persist across restart"
+            );
+            ExternalLineageStore::in_memory()
         }
     }
 }
