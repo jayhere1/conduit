@@ -324,6 +324,24 @@ impl<'a> ChangeDetector<'a> {
     }
 }
 
+/// Truncate a fingerprint hex to a short slug for human display.
+/// Returns "—" if the fingerprint is absent (e.g. Added has no env-side
+/// fingerprint; Removed has no current fingerprint). 8 hex chars are
+/// enough to distinguish fingerprints in practice and keep the line tidy.
+fn short_fp(fp: Option<&Fingerprint>) -> String {
+    match fp {
+        Some(f) => {
+            let hex = &f.0;
+            if hex.len() >= 8 {
+                hex[..8].to_string()
+            } else {
+                hex.to_string()
+            }
+        }
+        None => "—".to_string(),
+    }
+}
+
 impl std::fmt::Display for ChangeSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = &self.summary;
@@ -343,31 +361,83 @@ impl std::fmt::Display for ChangeSet {
         writeln!(f, "  Must execute:   {} tasks", s.must_execute)?;
         writeln!(f, "  Can reuse:      {} snapshots", s.reusable)?;
 
-        if !self.changes.is_empty() {
+        // Show the diff grouped by DAG, with old → new fingerprints so the
+        // operator can correlate plan output with what actually changed
+        // (this used to be a flat unsorted list with no fingerprint info —
+        // Bet 5 slice 3 in docs/STRATEGIC_DIRECTION.md).
+        let interesting: Vec<&TaskChange> = self
+            .changes
+            .iter()
+            .filter(|c| c.kind != ChangeKind::Unchanged)
+            .collect();
+
+        if !interesting.is_empty() {
+            // BTreeMap for deterministic per-DAG ordering.
+            let mut by_dag: std::collections::BTreeMap<&DagId, Vec<&TaskChange>> =
+                std::collections::BTreeMap::new();
+            for c in &interesting {
+                by_dag.entry(&c.dag_id).or_default().push(c);
+            }
+
             writeln!(f)?;
             writeln!(f, "  Changes:")?;
-            for change in &self.changes {
-                if change.kind == ChangeKind::Unchanged {
-                    continue; // Don't show unchanged in the diff
+            for (dag_id, changes) in &by_dag {
+                writeln!(f, "    {}:", dag_id)?;
+                for change in changes {
+                    let symbol = match change.kind {
+                        ChangeKind::Added => "+",
+                        ChangeKind::Modified => "~",
+                        ChangeKind::UpstreamInvalidated => "^",
+                        ChangeKind::Removed => "-",
+                        ChangeKind::Unchanged => " ",
+                    };
+
+                    // Render fingerprint deltas tied to each change kind:
+                    //   Added: no env fingerprint, only the new one.
+                    //   Removed: no current fingerprint, only the env one.
+                    //   Modified / UpstreamInvalidated: old → new.
+                    let fp_note = match change.kind {
+                        ChangeKind::Added => {
+                            format!(" (fp {})", short_fp(change.current_fingerprint.as_ref()))
+                        }
+                        ChangeKind::Removed => {
+                            format!(
+                                " (was fp {})",
+                                short_fp(change.environment_fingerprint.as_ref())
+                            )
+                        }
+                        ChangeKind::Modified | ChangeKind::UpstreamInvalidated => format!(
+                            " (fp {} → {})",
+                            short_fp(change.environment_fingerprint.as_ref()),
+                            short_fp(change.current_fingerprint.as_ref()),
+                        ),
+                        ChangeKind::Unchanged => String::new(),
+                    };
+
+                    let kind_label = match change.kind {
+                        ChangeKind::Added => " — new task",
+                        ChangeKind::Modified => " — task changed",
+                        ChangeKind::UpstreamInvalidated => " — upstream changed",
+                        ChangeKind::Removed => " — task removed",
+                        ChangeKind::Unchanged => "",
+                    };
+
+                    let reuse_note = if change.reusable_snapshot_id.is_some() {
+                        " · reusable snapshot found"
+                    } else {
+                        ""
+                    };
+
+                    writeln!(
+                        f,
+                        "      [{}] {}{}{}{}",
+                        symbol, change.task_id, kind_label, fp_note, reuse_note
+                    )?;
                 }
-                let symbol = match change.kind {
-                    ChangeKind::Added => "+",
-                    ChangeKind::Modified => "~",
-                    ChangeKind::UpstreamInvalidated => "^",
-                    ChangeKind::Removed => "-",
-                    ChangeKind::Unchanged => " ",
-                };
-                let reuse_note = if change.reusable_snapshot_id.is_some() {
-                    " (reusable snapshot found)"
-                } else {
-                    ""
-                };
-                writeln!(
-                    f,
-                    "    [{}] {}.{}{}",
-                    symbol, change.dag_id, change.task_id, reuse_note
-                )?;
             }
+        } else {
+            writeln!(f)?;
+            writeln!(f, "  No changes — environment is up to date.")?;
         }
 
         Ok(())
@@ -404,6 +474,8 @@ mod tests {
             trigger_rule: TriggerRule::default(),
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 
@@ -425,6 +497,7 @@ mod tests {
             compiled_at: Utc::now(),
             catchup: true,
             max_catchup_runs: None,
+            lineage_strict: false,
         };
         let mut dags = HashMap::new();
         dags.insert(dag_id.to_string(), dag);
@@ -595,5 +668,104 @@ mod tests {
         let output = format!("{}", changeset);
         assert!(output.contains("Added"));
         assert!(output.contains("[+]"));
+    }
+
+    #[test]
+    fn display_groups_changes_by_dag_with_fingerprints() {
+        // Bet 5 slice 3: the diff should read like a code review — grouped by
+        // DAG, with the kind explained in words and old → new fingerprints
+        // visible so the operator can correlate the plan with what they
+        // committed.
+        let plan = make_plan(
+            "etl",
+            vec![
+                make_task("extract", vec![]),
+                make_task("transform", vec!["extract"]),
+            ],
+            vec!["extract", "transform"],
+        );
+        let env = Environment::new("production");
+        let store = SnapshotStore::new();
+
+        let output = format!("{}", ChangeDetector::new(&plan, &env, &store).detect());
+
+        // DAG header appears.
+        assert!(output.contains("etl:"), "expected dag header, got:\n{}", output);
+        // Words explain what changed.
+        assert!(
+            output.contains("new task"),
+            "Added should be labelled 'new task'\n{}",
+            output
+        );
+        // Fingerprint slug appears (8 hex chars). Both extract and transform
+        // are new, so the line should mention `fp ` followed by hex.
+        assert!(
+            output.contains("(fp "),
+            "expected fingerprint slug in output:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn display_renders_old_to_new_fingerprint_for_modified() {
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
+
+        // Point env at a snapshot whose fingerprint differs from `extract`'s
+        // current fingerprint → Modified.
+        let store = SnapshotStore::new();
+        let stale_fp = "f".repeat(64);
+        store
+            .put(make_snapshot("snap_stale", &stale_fp, "etl", "extract"))
+            .unwrap();
+        let mut env = Environment::new("production");
+        env.snapshot_map.insert(
+            ("etl".to_string(), "extract".to_string()),
+            "snap_stale".to_string(),
+        );
+
+        let output = format!("{}", ChangeDetector::new(&plan, &env, &store).detect());
+
+        assert!(
+            output.contains("task changed"),
+            "Modified line should say 'task changed':\n{}",
+            output
+        );
+        assert!(
+            output.contains("ffffffff"),
+            "old fp slug should appear:\n{}",
+            output
+        );
+        assert!(
+            output.contains("→"),
+            "Modified line should render an old → new arrow:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn display_reports_clean_when_nothing_changed() {
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
+
+        let fps = PlanFingerprinter::fingerprint_plan(&plan);
+        let fp = fps
+            .get(&("etl".to_string(), "extract".to_string()))
+            .unwrap();
+        let store = SnapshotStore::new();
+        store
+            .put(make_snapshot("snap_match", &fp.0, "etl", "extract"))
+            .unwrap();
+        let mut env = Environment::new("production");
+        env.snapshot_map.insert(
+            ("etl".to_string(), "extract".to_string()),
+            "snap_match".to_string(),
+        );
+
+        let output = format!("{}", ChangeDetector::new(&plan, &env, &store).detect());
+        assert!(
+            output.contains("No changes"),
+            "clean diff should explicitly say so:\n{}",
+            output
+        );
+        assert!(!output.contains("Changes:"));
     }
 }
