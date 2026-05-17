@@ -231,6 +231,10 @@ pub enum EnvHistoryReason {
     Promotion { from: EnvironmentId },
     /// Captured because this env was rolled back to a prior version.
     Rollback { from_version: u32 },
+    /// Captured before `conduit apply` rewrote the snapshot pointers, so the
+    /// apply can be reverted with `conduit env rollback`. `plan_id` is the
+    /// id of the DeploymentPlan that was applied.
+    Apply { plan_id: String },
     /// Captured manually (e.g. via an explicit checkpoint).
     Manual,
 }

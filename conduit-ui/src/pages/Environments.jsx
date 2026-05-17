@@ -841,6 +841,8 @@ export default function Environments() {
                                 reasonLabel = `promotion from ${reason.from}`;
                               else if (reason.type === 'rollback')
                                 reasonLabel = `rollback from v${reason.from_version}`;
+                              else if (reason.type === 'apply')
+                                reasonLabel = `apply (plan ${reason.plan_id})`;
                               const isCurrent = entry.version === historyCurrentVersion;
                               return (
                                 <tr

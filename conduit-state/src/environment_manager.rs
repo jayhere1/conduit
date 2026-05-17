@@ -262,6 +262,65 @@ impl EnvironmentManager {
         Ok(diff)
     }
 
+    /// Rewrite an environment's snapshot pointers as the result of a
+    /// `conduit apply`. Captures the *prior* `snapshot_map` as a history
+    /// entry tagged `EnvHistoryReason::Apply { plan_id }` before mutating,
+    /// so the apply is reversible via `rollback`.
+    ///
+    /// `new_snapshot_map` is the post-apply map (typically built by
+    /// `DeploymentPlan::apply_to_environment`). Returns the history version
+    /// that captured the pre-apply state.
+    ///
+    /// If no history store is attached, the env is still mutated — apply
+    /// must succeed even without history — but no version is recorded and
+    /// `rollback` will refuse later. Callers that care about reversibility
+    /// should ensure the manager was built with `with_history_store`.
+    pub fn apply_snapshot_map(
+        &self,
+        env_name: &str,
+        new_snapshot_map: HashMap<(conduit_common::dag::DagId, conduit_common::dag::TaskId), String>,
+        plan_id: String,
+    ) -> ConduitResult<Option<u32>> {
+        let mut envs = self
+            .environments
+            .write()
+            .map_err(|e| ConduitError::EventStoreError(format!("Lock error: {}", e)))?;
+
+        let env = envs
+            .get_mut(env_name)
+            .ok_or_else(|| ConduitError::EnvironmentNotFound(env_name.to_string()))?;
+
+        let captured_version = if let Some(store) = &self.history {
+            let next = store.next_version(env_name)?;
+            let entry = EnvSnapshotMapVersion {
+                version: next,
+                env_id: env_name.to_string(),
+                captured_at: Utc::now(),
+                reason: EnvHistoryReason::Apply {
+                    plan_id: plan_id.clone(),
+                },
+                snapshot_map: env.snapshot_map.clone(),
+            };
+            store.record(&entry)?;
+            env.current_version = next;
+            Some(next)
+        } else {
+            None
+        };
+
+        env.snapshot_map = new_snapshot_map;
+        env.updated_at = Utc::now();
+
+        info!(
+            env = env_name,
+            plan_id = plan_id.as_str(),
+            version = env.current_version,
+            "Apply recorded to environment"
+        );
+
+        Ok(captured_version)
+    }
+
     /// Roll back an environment to a prior version captured in the history
     /// store. If `to_version` is None, rolls back to the immediately previous
     /// version (the entry just before `current_version`).
@@ -664,6 +723,121 @@ mod tests {
         let (mgr, _dir) = mgr_with_history();
         // No promotions yet → no history → rollback has nothing to restore.
         assert!(mgr.rollback("production", None).is_err());
+    }
+
+    #[test]
+    fn apply_snapshot_map_captures_prior_state() {
+        // Bet 5: applies must record env history so they are revertible via
+        // `conduit env rollback`.
+        let (mgr, _dir) = mgr_with_history();
+
+        // Seed production with a pre-apply pointer.
+        {
+            let mut envs = mgr.environments.write().unwrap();
+            put_snap(envs.get_mut("production").unwrap(), "etl", "load", "pre_v1");
+        }
+
+        let mut new_map = HashMap::new();
+        new_map.insert(
+            ("etl".to_string(), "load".to_string()),
+            "post_v1".to_string(),
+        );
+
+        let captured = mgr
+            .apply_snapshot_map("production", new_map.clone(), "plan_abc".to_string())
+            .unwrap();
+        assert_eq!(captured, Some(1));
+
+        let prod = mgr.get("production").unwrap();
+        assert_eq!(
+            prod.snapshot_map
+                .get(&("etl".to_string(), "load".to_string()))
+                .unwrap(),
+            "post_v1"
+        );
+        assert_eq!(prod.current_version, 1);
+
+        let v1 = mgr.history_version("production", 1).unwrap();
+        assert_eq!(
+            v1.snapshot_map
+                .get(&("etl".to_string(), "load".to_string()))
+                .unwrap(),
+            "pre_v1",
+            "history entry must hold the pre-apply map, not the post-apply map"
+        );
+        assert!(matches!(
+            v1.reason,
+            EnvHistoryReason::Apply { ref plan_id } if plan_id == "plan_abc"
+        ));
+    }
+
+    #[test]
+    fn apply_then_rollback_round_trips() {
+        // The whole point of recording apply history: rollback must restore the
+        // pre-apply snapshot map.
+        let (mgr, _dir) = mgr_with_history();
+
+        {
+            let mut envs = mgr.environments.write().unwrap();
+            put_snap(envs.get_mut("production").unwrap(), "etl", "load", "v1");
+            put_snap(
+                envs.get_mut("production").unwrap(),
+                "etl",
+                "transform",
+                "v1",
+            );
+        }
+
+        let mut new_map = HashMap::new();
+        new_map.insert(("etl".to_string(), "load".to_string()), "v2".to_string());
+        new_map.insert(
+            ("etl".to_string(), "transform".to_string()),
+            "v2".to_string(),
+        );
+
+        mgr.apply_snapshot_map("production", new_map, "plan_xyz".to_string())
+            .unwrap();
+
+        // Rolling back should revert to "v1" for both tasks.
+        let (_new_version, changes) = mgr.rollback("production", None).unwrap();
+        assert_eq!(changes, 2);
+
+        let prod = mgr.get("production").unwrap();
+        assert_eq!(
+            prod.snapshot_map
+                .get(&("etl".to_string(), "load".to_string()))
+                .unwrap(),
+            "v1"
+        );
+        assert_eq!(
+            prod.snapshot_map
+                .get(&("etl".to_string(), "transform".to_string()))
+                .unwrap(),
+            "v1"
+        );
+    }
+
+    #[test]
+    fn apply_without_history_store_still_mutates() {
+        // Apply must succeed even when no history store is attached — we just
+        // can't roll back later.
+        let mgr = EnvironmentManager::new();
+
+        let mut new_map = HashMap::new();
+        new_map.insert(("d".to_string(), "t".to_string()), "snap".to_string());
+
+        let captured = mgr
+            .apply_snapshot_map("production", new_map, "plan_no_hist".to_string())
+            .unwrap();
+        assert_eq!(captured, None, "no history store ⇒ no version captured");
+
+        let prod = mgr.get("production").unwrap();
+        assert_eq!(
+            prod.snapshot_map
+                .get(&("d".to_string(), "t".to_string()))
+                .unwrap(),
+            "snap"
+        );
     }
 
     #[test]
