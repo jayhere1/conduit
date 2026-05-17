@@ -246,6 +246,15 @@ enum Commands {
         /// Force full refresh on all incremental tasks (ignore watermarks)
         #[arg(long)]
         full_refresh: bool,
+
+        /// Apply only the named tasks (repeatable). Each value is
+        /// `dag_id.task_id`. Upstream Execute / Reuse / Remove actions in the
+        /// same plan are auto-included so dependencies stay consistent;
+        /// unchanged upstream are skipped. Examples:
+        ///   conduit apply prod --only etl.load
+        ///   conduit apply prod --only etl.load --only sales.transform
+        #[arg(long, value_name = "DAG.TASK")]
+        only: Vec<String>,
     },
 
     /// Start the API server
@@ -640,12 +649,14 @@ fn main() -> Result<()> {
             plan_file,
             auto_approve,
             full_refresh,
+            only,
         } => rt.block_on(cmd_apply(
             &environment,
             &dags_path,
             plan_file.as_deref(),
             auto_approve,
             full_refresh,
+            &only,
         )),
         Commands::Serve {
             host,
@@ -1338,6 +1349,7 @@ async fn cmd_apply(
     plan_file: Option<&Path>,
     auto_approve: bool,
     _full_refresh: bool,
+    only: &[String],
 ) -> Result<()> {
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
     use conduit_planner::{ActionKind, DeploymentPlan};
@@ -1373,6 +1385,44 @@ async fn cmd_apply(
 
         let deploy = DeploymentPlan::generate(&plan, &env, &state.snapshot_store);
         println!("{}", deploy);
+        deploy
+    };
+
+    // Partial apply: narrow the plan to selected tasks + their must-include
+    // upstream. Pure Skip upstream are dropped; the env preserves unselected
+    // pointers because `apply_to_environment` only mutates entries that have
+    // an action in the plan.
+    let deploy = if !only.is_empty() {
+        let selectors: Result<Vec<(String, String)>, _> = only
+            .iter()
+            .map(|s| {
+                s.split_once('.')
+                    .map(|(d, t)| (d.to_string(), t.to_string()))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--only value '{}' must be in 'dag_id.task_id' form",
+                            s
+                        )
+                    })
+            })
+            .collect();
+        let selectors = selectors?;
+        let original_action_count = deploy.actions.len();
+        let filtered = deploy
+            .filtered_to(&plan, &selectors)
+            .map_err(|e| anyhow::anyhow!("partial apply rejected: {}", e))?;
+        println!();
+        println!(
+            "Partial apply: {} selector(s), {} action(s) kept (was {} in full plan).",
+            selectors.len(),
+            filtered.actions.len(),
+            original_action_count,
+        );
+        for s in &selectors {
+            println!("  • {}.{}", s.0, s.1);
+        }
+        filtered
+    } else {
         deploy
     };
 
@@ -1518,13 +1568,30 @@ async fn cmd_apply(
         }
     }
 
-    // Update environment with new snapshot pointers
-    let mut env = state
+    // Update environment with new snapshot pointers.
+    //
+    // We do this through `env_manager.apply_snapshot_map` rather than mutating
+    // a local clone, so the env's prior snapshot_map is captured as a history
+    // entry tagged `Apply { plan_id }`. That makes the apply reversible via
+    // `conduit env rollback <env>` (Bet 5).
+    //
+    // The environment is auto-created if it doesn't exist yet so applying to
+    // a brand-new env name works the same way it did before this change.
+    if state.env_manager.get(environment).is_err() {
+        let _ = state.env_manager.create(environment, None);
+    }
+
+    let mut env_snapshot = state
         .env_manager
         .get(environment)
         .unwrap_or_else(|_| conduit_common::snapshot::Environment::new(environment));
+    deploy.apply_to_environment(&mut env_snapshot, &new_snapshots);
+    let post_apply_map = env_snapshot.snapshot_map.clone();
+    let snapshot_count = post_apply_map.len();
 
-    deploy.apply_to_environment(&mut env, &new_snapshots);
+    let recorded_version = state
+        .env_manager
+        .apply_snapshot_map(environment, post_apply_map, deploy.id.clone())?;
 
     // Persist state to disk
     state.save()?;
@@ -1539,9 +1606,15 @@ async fn cmd_apply(
     println!();
     println!(
         "Environment '{}' updated ({} snapshot pointers).",
-        environment,
-        env.snapshot_map.len()
+        environment, snapshot_count
     );
+    if let Some(v) = recorded_version {
+        println!(
+            "  Pre-apply state captured as history version {} — \
+             revert with `conduit env rollback {}`.",
+            v, environment
+        );
+    }
 
     Ok(())
 }
@@ -2062,6 +2135,7 @@ fn cmd_env_history(name: &str, dags_path: &PathBuf) -> Result<()> {
             EnvHistoryReason::Rollback { from_version } => {
                 format!("rollback from v{}", from_version)
             }
+            EnvHistoryReason::Apply { plan_id } => format!("apply (plan {})", plan_id),
             EnvHistoryReason::Manual => "manual".to_string(),
         };
         println!(
