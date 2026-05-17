@@ -22,6 +22,38 @@ use crate::change_detector::{ChangeDetector, ChangeKind, ChangeSet};
 use crate::impact_analyzer::ImpactAnalyzer;
 use conduit_state::SnapshotStore;
 
+/// Errors that prevent a partial-apply selection from producing a valid
+/// filtered plan. Returned by `DeploymentPlan::filtered_to`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartialApplyError {
+    /// `--only` was passed with no selectors. Distinguish from "nothing to do":
+    /// empty selection is operator error, not a no-op apply.
+    EmptySelection,
+    /// One or more selectors don't match any action in this plan. The plan may
+    /// have been generated against a different DAG layout, or the selector is
+    /// a typo. Lists the offending `(dag, task)` pairs.
+    UnknownSelectors(Vec<(DagId, TaskId)>),
+}
+
+impl std::fmt::Display for PartialApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptySelection => {
+                write!(f, "partial apply: --only was passed but no selectors were given")
+            }
+            Self::UnknownSelectors(items) => {
+                write!(f, "partial apply: selectors not in plan:")?;
+                for (d, t) in items {
+                    write!(f, " {}.{}", d, t)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for PartialApplyError {}
+
 /// What to do with a specific task during apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActionKind {
@@ -367,6 +399,174 @@ impl DeploymentPlan {
         self.contract_validation = Some(validation);
     }
 
+    /// Build a partial deployment plan containing only the selected tasks,
+    /// plus the upstream Execute / ReuseSnapshot / Remove actions they depend
+    /// on (transitively). Actions for tasks outside the selection are dropped;
+    /// `apply_to_environment` then leaves those env pointers untouched.
+    ///
+    /// `selectors` are `(dag_id, task_id)` pairs. Each must match an action in
+    /// this plan — selectors that don't are returned in
+    /// `PartialApplyError::UnknownSelectors`.
+    ///
+    /// Upstream inclusion is based on the task `dependencies` declared in the
+    /// `ConduitPlan`. Only upstream tasks that are themselves Execute / Reuse
+    /// / Remove are auto-included — pure `Skip` upstream are no-ops and stay
+    /// out, so the filtered plan stays minimal.
+    ///
+    /// The returned plan keeps the original execution order, has stats
+    /// recomputed from the kept actions, and carries the same `id` and
+    /// `target_environment` as the source — partial apply is still "this
+    /// plan applied to this env", just narrower.
+    pub fn filtered_to(
+        &self,
+        plan: &ConduitPlan,
+        selectors: &[(DagId, TaskId)],
+    ) -> Result<DeploymentPlan, PartialApplyError> {
+        use std::collections::HashSet;
+
+        if selectors.is_empty() {
+            return Err(PartialApplyError::EmptySelection);
+        }
+
+        let action_index: HashSet<(DagId, TaskId)> = self
+            .actions
+            .iter()
+            .map(|a| (a.dag_id.clone(), a.task_id.clone()))
+            .collect();
+
+        let unknown: Vec<(DagId, TaskId)> = selectors
+            .iter()
+            .filter(|s| !action_index.contains(s))
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            return Err(PartialApplyError::UnknownSelectors(unknown));
+        }
+
+        // BFS through ConduitPlan task deps to close over upstream that must
+        // also run. An upstream is "must include" if its action in self is
+        // anything other than Skip — Skip upstream are no-ops and can be
+        // dropped from the partial plan without affecting correctness.
+        let action_kind_for = |key: &(DagId, TaskId)| -> Option<&ActionKind> {
+            self.actions
+                .iter()
+                .find(|a| &(a.dag_id.clone(), a.task_id.clone()) == key)
+                .map(|a| &a.action)
+        };
+
+        let mut selected: HashSet<(DagId, TaskId)> = selectors.iter().cloned().collect();
+        let mut queue: Vec<(DagId, TaskId)> = selectors.to_vec();
+        while let Some((dag_id, task_id)) = queue.pop() {
+            let dag = match plan.dags.get(&dag_id) {
+                Some(d) => d,
+                None => continue, // selector validated above; defensive
+            };
+            let task = match dag.tasks.get(&task_id) {
+                Some(t) => t,
+                None => continue,
+            };
+            for dep in &task.dependencies {
+                let key = (dag_id.clone(), dep.task_id.clone());
+                if selected.contains(&key) {
+                    continue;
+                }
+                match action_kind_for(&key) {
+                    Some(ActionKind::Skip) | None => {
+                        // Skip upstream is a no-op — safe to leave out.
+                        // None means the dep has no action (e.g. fully external),
+                        // also safe to skip.
+                    }
+                    Some(_) => {
+                        selected.insert(key.clone());
+                        queue.push(key);
+                    }
+                }
+            }
+        }
+
+        let kept_actions: Vec<DeploymentAction> = self
+            .actions
+            .iter()
+            .filter(|a| selected.contains(&(a.dag_id.clone(), a.task_id.clone())))
+            .cloned()
+            .collect();
+
+        let auto_included = selected.len() - selectors.len();
+
+        let stats = DeploymentStats {
+            total_tasks_in_plan: self.stats.total_tasks_in_plan,
+            tasks_to_execute: kept_actions
+                .iter()
+                .filter(|a| a.action == ActionKind::Execute)
+                .count(),
+            tasks_to_reuse: kept_actions
+                .iter()
+                .filter(|a| matches!(a.action, ActionKind::ReuseSnapshot { .. }))
+                .count(),
+            tasks_to_skip: kept_actions
+                .iter()
+                .filter(|a| a.action == ActionKind::Skip)
+                .count(),
+            tasks_to_remove: kept_actions
+                .iter()
+                .filter(|a| a.action == ActionKind::Remove)
+                .count(),
+            estimated_total_ms: {
+                let sum: u64 = kept_actions
+                    .iter()
+                    .filter_map(|a| a.estimated_duration_ms)
+                    .sum();
+                if sum > 0 {
+                    Some(sum)
+                } else {
+                    None
+                }
+            },
+            // Critical path and blast radius are properties of the unfiltered
+            // plan; the filtered subset is a hand-picked slice that has no
+            // meaningful "blast radius" of its own. Keep the original values
+            // so the operator can still see the impact of the underlying plan.
+            critical_path_depth: self.stats.critical_path_depth,
+            blast_radius: self.stats.blast_radius,
+        };
+
+        // Filter contracts to only those for kept tasks.
+        let kept_keys: HashSet<(DagId, TaskId)> = kept_actions
+            .iter()
+            .map(|a| (a.dag_id.clone(), a.task_id.clone()))
+            .collect();
+        let pending_contracts = self
+            .pending_contracts
+            .iter()
+            .filter(|tc| match &tc.dag_id {
+                Some(d) => kept_keys.contains(&(d.clone(), tc.task_id.clone())),
+                None => false,
+            })
+            .cloned()
+            .collect();
+
+        let change_set_display = self.change_set_display.as_ref().map(|s| {
+            format!(
+                "{}\n[partial apply — {} selected, {} upstream auto-included, {} actions kept]",
+                s,
+                selectors.len(),
+                auto_included,
+                kept_actions.len()
+            )
+        });
+
+        Ok(DeploymentPlan {
+            id: self.id.clone(),
+            target_environment: self.target_environment.clone(),
+            created_at: self.created_at,
+            actions: kept_actions,
+            stats,
+            contract_validation: None,
+            pending_contracts,
+            change_set_display,
+        })
+    }
+
     /// Apply the plan to an environment: update snapshot pointers.
     ///
     /// This is the "apply" step — it takes the deployment plan and
@@ -511,6 +711,8 @@ mod tests {
             trigger_rule: TriggerRule::default(),
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 
@@ -532,6 +734,7 @@ mod tests {
             compiled_at: Utc::now(),
             catchup: true,
             max_catchup_runs: None,
+            lineage_strict: false,
         };
         let mut dags = HashMap::new();
         dags.insert(dag_id.to_string(), dag);
@@ -652,6 +855,140 @@ mod tests {
 
         assert_eq!(restored.target_environment, "staging");
         assert_eq!(restored.actions.len(), deploy.actions.len());
+    }
+
+    #[test]
+    fn filtered_to_selects_single_task_and_auto_includes_upstream() {
+        // extract -> transform -> load
+        // Select only `load` — extract and transform must come along because
+        // they're Execute upstream of load.
+        let plan = make_plan(
+            "etl",
+            vec![
+                make_task("extract", vec![]),
+                make_task("transform", vec!["extract"]),
+                make_task("load", vec!["transform"]),
+            ],
+            vec!["extract", "transform", "load"],
+        );
+        let env = Environment::new("production");
+        let store = SnapshotStore::new();
+
+        let deploy = DeploymentPlan::generate(&plan, &env, &store);
+        assert_eq!(deploy.actions.len(), 3, "all three tasks should be Execute");
+
+        let selectors = vec![("etl".to_string(), "load".to_string())];
+        let filtered = deploy.filtered_to(&plan, &selectors).unwrap();
+
+        let ids: Vec<&str> = filtered.actions.iter().map(|a| a.task_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["extract", "transform", "load"],
+            "upstream must be auto-included in execution order"
+        );
+        assert_eq!(filtered.stats.tasks_to_execute, 3);
+    }
+
+    #[test]
+    fn filtered_to_skips_unchanged_upstream() {
+        // extract is Unchanged (Skip action), transform is Modified (Execute).
+        // Selecting `transform` should *not* drag the Skip extract along — Skip
+        // is a no-op and including it just bloats the partial plan.
+        let plan = make_plan(
+            "etl",
+            vec![
+                make_task("extract", vec![]),
+                make_task("transform", vec!["extract"]),
+            ],
+            vec!["extract", "transform"],
+        );
+
+        // Seed env with a matching snapshot for `extract` so it becomes Unchanged.
+        let fps = crate::fingerprinter::PlanFingerprinter::fingerprint_plan(&plan);
+        let extract_fp = fps
+            .get(&("etl".to_string(), "extract".to_string()))
+            .unwrap();
+        let store = SnapshotStore::new();
+        store
+            .put(Snapshot {
+                id: "snap_extract".to_string(),
+                fingerprint: extract_fp.clone(),
+                dag_id: "etl".to_string(),
+                task_id: "extract".to_string(),
+                created_at: chrono::Utc::now(),
+                parent_fingerprints: vec![],
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let mut env = Environment::new("production");
+        env.snapshot_map.insert(
+            ("etl".to_string(), "extract".to_string()),
+            "snap_extract".to_string(),
+        );
+
+        let deploy = DeploymentPlan::generate(&plan, &env, &store);
+
+        let selectors = vec![("etl".to_string(), "transform".to_string())];
+        let filtered = deploy.filtered_to(&plan, &selectors).unwrap();
+
+        let ids: Vec<&str> = filtered.actions.iter().map(|a| a.task_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["transform"],
+            "Skip upstream is a no-op and should not be dragged into the partial plan"
+        );
+    }
+
+    #[test]
+    fn filtered_to_errors_on_unknown_selector() {
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
+        let env = Environment::new("production");
+        let store = SnapshotStore::new();
+        let deploy = DeploymentPlan::generate(&plan, &env, &store);
+
+        let selectors = vec![("etl".to_string(), "no_such_task".to_string())];
+        let err = deploy.filtered_to(&plan, &selectors).unwrap_err();
+        match err {
+            PartialApplyError::UnknownSelectors(items) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].1, "no_such_task");
+            }
+            other => panic!("expected UnknownSelectors, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn filtered_to_rejects_empty_selection() {
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
+        let env = Environment::new("production");
+        let store = SnapshotStore::new();
+        let deploy = DeploymentPlan::generate(&plan, &env, &store);
+
+        let err = deploy.filtered_to(&plan, &[]).unwrap_err();
+        assert_eq!(err, PartialApplyError::EmptySelection);
+    }
+
+    #[test]
+    fn filtered_to_preserves_plan_id_and_target() {
+        // Partial apply is still "this plan applied to this env" — the filtered
+        // plan must keep the same id and target so history accounting lines up.
+        let plan = make_plan(
+            "etl",
+            vec![
+                make_task("a", vec![]),
+                make_task("b", vec!["a"]),
+            ],
+            vec!["a", "b"],
+        );
+        let env = Environment::new("production");
+        let store = SnapshotStore::new();
+        let deploy = DeploymentPlan::generate(&plan, &env, &store);
+
+        let selectors = vec![("etl".to_string(), "a".to_string())];
+        let filtered = deploy.filtered_to(&plan, &selectors).unwrap();
+
+        assert_eq!(filtered.id, deploy.id);
+        assert_eq!(filtered.target_environment, deploy.target_environment);
     }
 
     #[test]
