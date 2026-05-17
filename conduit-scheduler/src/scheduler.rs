@@ -160,6 +160,10 @@ pub struct Scheduler {
     cron_schedules: HashMap<DagId, CronSchedule>,
     /// Optional persistent event store for catchup queries.
     event_store: Option<Arc<EventStore>>,
+    /// Alert hooks fired on every non-success DAG-run completion. Each hook
+    /// is spawned on the tokio runtime so a slow notifier (PagerDuty, Slack)
+    /// can't stall the scheduler event loop. Empty by default.
+    alert_hooks: Vec<Arc<dyn crate::alerts::AlertHook>>,
 }
 
 impl Scheduler {
@@ -197,12 +201,21 @@ impl Scheduler {
             plans,
             cron_schedules,
             event_store: None,
+            alert_hooks: Vec::new(),
         })
     }
 
     /// Attach a persistent event store for catchup-on-missed-runs.
     pub fn with_event_store(mut self, store: Arc<EventStore>) -> Self {
         self.event_store = Some(store);
+        self
+    }
+
+    /// Register an alert hook fired on every non-success DAG-run completion.
+    /// Hooks fire in registration order, each in its own spawned task so a
+    /// slow / failing hook doesn't block the scheduler or other hooks.
+    pub fn with_alert_hook(mut self, hook: Arc<dyn crate::alerts::AlertHook>) -> Self {
+        self.alert_hooks.push(hook);
         self
     }
 
@@ -489,12 +502,8 @@ impl Scheduler {
 
         // Record metrics
         if let Some(m) = metrics::try_global() {
-            m.tasks_total
-                .get_or_create(&metrics::StatusLabels {
-                    status: "completed".to_string(),
-                })
-                .inc();
-            m.task_duration_seconds.observe(duration_ms as f64 / 1000.0);
+            m.record_task_event(dag_id, task_id, "completed");
+            m.observe_task_duration(dag_id, task_id, duration_ms as f64 / 1000.0);
             m.active_tasks.dec();
         }
 
@@ -593,11 +602,7 @@ impl Scheduler {
             );
 
             if let Some(m) = metrics::try_global() {
-                m.tasks_total
-                    .get_or_create(&metrics::StatusLabels {
-                        status: "retried".to_string(),
-                    })
-                    .inc();
+                m.record_task_event(dag_id, task_id, "retried");
             }
 
             self.send_command(SchedulerCommand::RetryTask {
@@ -616,11 +621,7 @@ impl Scheduler {
             );
 
             if let Some(m) = metrics::try_global() {
-                m.tasks_total
-                    .get_or_create(&metrics::StatusLabels {
-                        status: "failed".to_string(),
-                    })
-                    .inc();
+                m.record_task_event(dag_id, task_id, "failed");
                 m.active_tasks.dec();
             }
 
@@ -736,7 +737,35 @@ impl Scheduler {
                         status: status_str.to_string(),
                     })
                     .inc();
+                let duration_seconds =
+                    (Utc::now() - run_state.started_at).num_milliseconds() as f64 / 1000.0;
+                m.observe_dag_run_duration(&dag.id, duration_seconds);
                 m.active_dag_runs.dec();
+            }
+
+            // Fire alert hooks for non-success terminal states. Each hook
+            // runs on its own tokio task so a slow / failing notifier can't
+            // stall the scheduler event loop or other hooks. Errors are
+            // logged and swallowed — alert delivery is never load-bearing.
+            if let Some(alert_status) = crate::alerts::AlertStatus::from_run_status(status) {
+                if !self.alert_hooks.is_empty() {
+                    let event = self.build_alert_event(dag, run_state, alert_status);
+                    for hook in &self.alert_hooks {
+                        let hook = Arc::clone(hook);
+                        let event = event.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = hook.fire(&event).await {
+                                error!(
+                                    hook = hook.name(),
+                                    dag_id = %event.dag_id,
+                                    run_id = %event.run_id,
+                                    error = %e,
+                                    "Alert hook failed"
+                                );
+                            }
+                        });
+                    }
+                }
             }
 
             self.send_command(SchedulerCommand::CompleteDagRun {
@@ -744,6 +773,37 @@ impl Scheduler {
                 run_id: run_state.run_id.clone(),
                 status,
             });
+        }
+    }
+
+    /// Build the `AlertEvent` payload for a terminal DAG run. Collects the
+    /// failed-task list with each task's last error message so alert
+    /// recipients have enough context to triage without re-querying state.
+    fn build_alert_event(
+        &self,
+        dag: &Dag,
+        run_state: &DagRunState,
+        status: crate::alerts::AlertStatus,
+    ) -> crate::alerts::AlertEvent {
+        let failed_tasks: Vec<(TaskId, String)> = dag
+            .execution_order
+            .iter()
+            .filter_map(|task_id| match run_state.task_states.get(task_id) {
+                Some(TaskState::Failed { error, .. }) => {
+                    Some((task_id.clone(), error.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        crate::alerts::AlertEvent {
+            dag_id: dag.id.clone(),
+            run_id: run_state.run_id.clone(),
+            status,
+            started_at: run_state.started_at,
+            completed_at: Utc::now(),
+            failed_tasks,
+            config: run_state.config.clone(),
         }
     }
 
@@ -788,11 +848,7 @@ impl Scheduler {
                 );
 
                 if let Some(m) = metrics::try_global() {
-                    m.tasks_total
-                        .get_or_create(&metrics::StatusLabels {
-                            status: "skipped".to_string(),
-                        })
-                        .inc();
+                    m.record_task_event(&dag.id, task_id, "skipped");
                 }
 
                 commands_to_send.push(SchedulerCommand::SkipTask {
@@ -845,11 +901,7 @@ impl Scheduler {
 
         for task_id in ready {
             if let Some(m) = metrics::try_global() {
-                m.tasks_total
-                    .get_or_create(&metrics::StatusLabels {
-                        status: "dispatched".to_string(),
-                    })
-                    .inc();
+                m.record_task_event(dag_id, &task_id, "dispatched");
                 m.active_tasks.inc();
             }
 

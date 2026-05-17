@@ -46,6 +46,8 @@ fn make_task(
         trigger_rule,
         incremental: None,
         contracts: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 
@@ -68,6 +70,7 @@ fn make_dag(id: &str, tasks: Vec<Task>, execution_order: Vec<&str>) -> Dag {
         compiled_at: Utc::now(),
         catchup: false,
         max_catchup_runs: None,
+        lineage_strict: false,
     }
 }
 
@@ -503,5 +506,152 @@ async fn duplicate_task_completed_is_ignored() {
         dispatches_b, 1,
         "B dispatched {} times after duplicate completions, expected 1",
         dispatches_b
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Alert hooks (Bet 3)
+// ---------------------------------------------------------------------------
+
+use std::sync::Arc as StdArc;
+use std::sync::Mutex;
+use conduit_scheduler::{AlertEvent, AlertHook, AlertStatus};
+
+/// Test-only hook that captures every `AlertEvent::fire` call. Mirrors the
+/// in-crate `RecordingHook` but is local to this integration test so we don't
+/// have to promote that fixture to public API.
+#[derive(Default, Clone)]
+struct CapturingHook {
+    events: StdArc<Mutex<Vec<AlertEvent>>>,
+}
+
+impl CapturingHook {
+    fn calls(&self) -> Vec<AlertEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl AlertHook for CapturingHook {
+    async fn fire(&self, event: &AlertEvent) -> Result<(), String> {
+        self.events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+    fn name(&self) -> &'static str {
+        "capturing-hook"
+    }
+}
+
+fn create_test_scheduler_with_hook(
+    plans: HashMap<String, Dag>,
+    hook: StdArc<dyn AlertHook>,
+) -> (
+    mpsc::UnboundedSender<SchedulerEvent>,
+    mpsc::UnboundedReceiver<SchedulerCommand>,
+    impl std::future::Future<Output = ()>,
+) {
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+
+    let pools = PoolManager::new(vec![Pool {
+        name: "default".to_string(),
+        slots: 128,
+        description: None,
+    }]);
+
+    let scheduler = Scheduler::new(event_rx, command_tx, pools, plans)
+        .expect("Scheduler::new should succeed")
+        .with_alert_hook(hook);
+
+    let handle = async move {
+        let _ = scheduler.run().await;
+    };
+
+    (event_tx, command_rx, handle)
+}
+
+/// Failed DAG run fires the alert hook exactly once with the failed task's
+/// error captured in `failed_tasks`. Retries are 0 so the failure is terminal.
+#[tokio::test]
+async fn alert_hook_fires_on_dag_failure() {
+    let task = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    let dag = make_dag("dag1", vec![task], vec!["A"]);
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let hook = CapturingHook::default();
+    let hook_handle: StdArc<dyn AlertHook> = StdArc::new(hook.clone());
+    let (tx, _rx, scheduler_fut) = create_test_scheduler_with_hook(plans, hook_handle);
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+    tx.send(SchedulerEvent::TaskFailed {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: "A".to_string(),
+        error: "boom".to_string(),
+        attempt: 1,
+    })
+    .unwrap();
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    scheduler_fut.await;
+
+    // Spawned hook tasks need a moment to drain after the scheduler exits.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let calls = hook.calls();
+    assert_eq!(calls.len(), 1, "hook should fire exactly once for a failed run");
+    let evt = &calls[0];
+    assert_eq!(evt.dag_id, "dag1");
+    assert_eq!(evt.run_id, "run1");
+    assert_eq!(evt.status, AlertStatus::Failed);
+    assert_eq!(evt.failed_tasks.len(), 1);
+    assert_eq!(evt.failed_tasks[0].0, "A");
+    assert!(
+        evt.failed_tasks[0].1.contains("boom"),
+        "failed-task error must propagate: got {:?}",
+        evt.failed_tasks[0].1
+    );
+}
+
+/// Successful DAG run does NOT fire the hook — alerts are non-success only.
+#[tokio::test]
+async fn alert_hook_does_not_fire_on_success() {
+    let task = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    let dag = make_dag("dag1", vec![task], vec!["A"]);
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let hook = CapturingHook::default();
+    let hook_handle: StdArc<dyn AlertHook> = StdArc::new(hook.clone());
+    let (tx, _rx, scheduler_fut) = create_test_scheduler_with_hook(plans, hook_handle);
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+    tx.send(SchedulerEvent::TaskCompleted {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: "A".to_string(),
+        snapshot_id: None,
+        duration_ms: 1,
+    })
+    .unwrap();
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    scheduler_fut.await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert!(
+        hook.calls().is_empty(),
+        "hook must not fire for a successful run"
     );
 }
