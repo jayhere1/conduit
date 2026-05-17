@@ -526,6 +526,57 @@ mod tests {
     }
 
     #[test]
+    fn plan_differs_per_environment() {
+        // Bet 1.1 acceptance: the same DAG must yield different plans against
+        // two environments whose snapshot maps differ.
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
+        let fps = PlanFingerprinter::fingerprint_plan(&plan);
+        let current_fp = fps
+            .get(&("etl".to_string(), "extract".to_string()))
+            .unwrap();
+
+        let store = SnapshotStore::new();
+        // snap_match holds the *current* fingerprint — env pointing at it sees no change.
+        store
+            .put(make_snapshot("snap_match", &current_fp.0, "etl", "extract"))
+            .unwrap();
+        // snap_stale holds a different fingerprint — env pointing at it sees a Modified task.
+        let stale_fp = "0".repeat(64);
+        store
+            .put(make_snapshot("snap_stale", &stale_fp, "etl", "extract"))
+            .unwrap();
+
+        let mut fresh = Environment::new("fresh");
+        fresh.snapshot_map.insert(
+            ("etl".to_string(), "extract".to_string()),
+            "snap_match".to_string(),
+        );
+
+        let mut stale = Environment::new("stale");
+        stale.snapshot_map.insert(
+            ("etl".to_string(), "extract".to_string()),
+            "snap_stale".to_string(),
+        );
+
+        let fresh_changeset = ChangeDetector::new(&plan, &fresh, &store).detect();
+        let stale_changeset = ChangeDetector::new(&plan, &stale, &store).detect();
+
+        assert_eq!(fresh_changeset.summary.unchanged, 1);
+        assert_eq!(fresh_changeset.summary.modified, 0);
+        assert_eq!(fresh_changeset.summary.must_execute, 0);
+
+        assert_eq!(stale_changeset.summary.unchanged, 0);
+        assert_eq!(stale_changeset.summary.modified, 1);
+        assert_eq!(stale_changeset.summary.must_execute, 1);
+
+        // The same plan against different envs must produce different summaries.
+        assert_ne!(
+            fresh_changeset.summary.must_execute,
+            stale_changeset.summary.must_execute
+        );
+    }
+
+    #[test]
     fn display_format_works() {
         let plan = make_plan(
             "etl",

@@ -63,6 +63,24 @@ def py_smoke():
     dags
 }
 
+/// Write a SQL DAG fixture.
+fn write_sql_dag(dir: &TempDir) -> std::path::PathBuf {
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+
+    let dag = r#"
+id: sql_lineage
+description: SQL lineage fixture
+tasks:
+  summarize_orders:
+    type: sql
+    connection: warehouse
+    query: "SELECT customer_id, SUM(amount) AS total FROM raw.orders WHERE status = 'paid' GROUP BY customer_id"
+"#;
+    fs::write(dags.join("sql_lineage.yaml"), dag).unwrap();
+    dags
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -207,5 +225,60 @@ fn cli_init_creates_project() {
     assert!(
         project_dir.join("dags").exists(),
         "dags/ directory should exist"
+    );
+}
+
+#[test]
+fn cli_lineage_outputs_native_json_for_sql_task() {
+    let tmp = TempDir::new().unwrap();
+    let dags = write_sql_dag(&tmp);
+
+    let output = conduit()
+        .arg("lineage")
+        .arg("sql_lineage.summarize_orders")
+        .arg("--dags-path")
+        .arg(dags.to_str().unwrap())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["dag_id"], "sql_lineage");
+    assert_eq!(parsed["task_id"], "summarize_orders");
+    assert_eq!(parsed["source_tables"][0]["name"], "orders");
+}
+
+#[test]
+fn cli_lineage_can_emit_openlineage_event() {
+    let tmp = TempDir::new().unwrap();
+    let dags = write_sql_dag(&tmp);
+
+    let output = conduit()
+        .arg("lineage")
+        .arg("sql_lineage.summarize_orders")
+        .arg("--dags-path")
+        .arg(dags.to_str().unwrap())
+        .arg("--openlineage")
+        .arg("--output-dataset")
+        .arg("analytics.order_summary")
+        .arg("--run-id")
+        .arg("550e8400-e29b-41d4-a716-446655440000")
+        .arg("--event-time")
+        .arg("2026-05-17T12:00:00Z")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["eventType"], "COMPLETE");
+    assert_eq!(parsed["outputs"][0]["name"], "analytics.order_summary");
+    assert_eq!(
+        parsed["outputs"][0]["facets"]["columnLineage"]["fields"]["total"]["inputFields"][0]
+            ["transformations"][0]["subtype"],
+        "AGGREGATION"
     );
 }

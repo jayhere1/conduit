@@ -7,6 +7,7 @@
 //!   conduit run <dag_id>           Compile, schedule, and execute a DAG
 //!   conduit plan [env]             Show changes between local and environment
 //!   conduit apply [env]            Execute changes and update environment state
+//!   conduit lineage <dag.task>     Extract SQL lineage for a task
 //!   conduit serve                  Start the API server
 //!   conduit status                 Show system status
 //!   conduit env create|list|promote
@@ -15,10 +16,16 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
+use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 use conduit_compiler::ConduitPlan;
+use conduit_lineage::{
+    OpenLineageEventType, OpenLineageRunEvent, OpenLineageSqlEventOptions, SqlLineageExtractor,
+    CONDUIT_OPENLINEAGE_PRODUCER,
+};
 
 // ─── State directory management ──────────────────────────────────────────────
 // Every command that touches state (plan, apply, run, env, status, serve)
@@ -52,7 +59,7 @@ fn resolve_state_dir(dags_path: &Path) -> PathBuf {
 /// Open or create the persistent state stores from a state directory.
 struct PersistentState {
     env_manager: conduit_state::EnvironmentManager,
-    snapshot_store: conduit_state::SnapshotStore,
+    snapshot_store: std::sync::Arc<conduit_state::SnapshotStore>,
     state_dir: PathBuf,
 }
 
@@ -85,10 +92,29 @@ impl PersistentState {
             conduit_state::EnvironmentManager::new()
         };
 
-        // Open snapshot store backed by RocksDB
+        // Attach env history store so promote/rollback record versions.
+        let history_dir = state_dir.join("env_history");
+        let env_manager = match conduit_state::EnvHistoryStore::open(&history_dir) {
+            Ok(store) => env_manager.with_history_store(store),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "env_history dir unavailable; promote/rollback will not record versions"
+                );
+                env_manager
+            }
+        };
+
+        // Open snapshot store backed by RocksDB.
         let snap_dir = state_dir.join("snapshots_db");
-        let snapshot_store = conduit_state::SnapshotStore::open(&snap_dir)
-            .unwrap_or_else(|_| conduit_state::SnapshotStore::new());
+        let snapshot_store = std::sync::Arc::new(
+            conduit_state::SnapshotStore::open(&snap_dir)
+                .unwrap_or_else(|_| conduit_state::SnapshotStore::new()),
+        );
+
+        // Share the snapshot store with the env manager so promotion policies
+        // that gate on snapshot age can resolve snapshot IDs.
+        let env_manager = env_manager.with_snapshot_store(std::sync::Arc::clone(&snapshot_store));
 
         Ok(Self {
             env_manager,
@@ -303,6 +329,48 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// Extract SQL lineage for a task
+    Lineage {
+        /// Task reference in the form dag_id.task_id
+        task_ref: String,
+
+        /// Path to DAG definitions
+        #[arg(short, long, default_value = "./dags")]
+        dags_path: PathBuf,
+
+        /// Emit an OpenLineage RunEvent instead of Conduit's native lineage JSON
+        #[arg(long)]
+        openlineage: bool,
+
+        /// OpenLineage output dataset name, e.g. analytics.customer_totals
+        #[arg(long)]
+        output_dataset: Option<String>,
+
+        /// OpenLineage dataset namespace for input and output datasets
+        #[arg(long)]
+        dataset_namespace: Option<String>,
+
+        /// OpenLineage job namespace
+        #[arg(long, default_value = "conduit")]
+        job_namespace: String,
+
+        /// OpenLineage job name. Defaults to dag_id.task_id
+        #[arg(long)]
+        job_name: Option<String>,
+
+        /// OpenLineage run UUID. Defaults to a generated UUID
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// OpenLineage event timestamp. Defaults to now
+        #[arg(long)]
+        event_time: Option<String>,
+
+        /// OpenLineage event type
+        #[arg(long, default_value = "COMPLETE")]
+        event_type: String,
+    },
+
     /// Backfill a DAG across a range of dates/partitions
     Backfill {
         /// DAG ID to backfill
@@ -465,6 +533,44 @@ enum EnvCommands {
         /// Target environment
         target: String,
     },
+    /// Diff two environments — show added/removed/changed snapshots
+    Diff {
+        /// Left environment (the "from" side)
+        a: String,
+        /// Right environment (the "to" side)
+        b: String,
+    },
+    /// Show version history for an environment
+    History {
+        /// Environment name
+        name: String,
+    },
+    /// Roll back an environment to a prior history version
+    Rollback {
+        /// Environment name
+        name: String,
+        /// Specific version to restore. Defaults to the env's current_version
+        /// (which restores the state captured before the most recent mutation).
+        #[arg(long)]
+        to_version: Option<u32>,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Set or clear the promotion policy on an environment
+    SetPolicy {
+        /// Environment name (target of the policy)
+        name: String,
+        /// Only allow promotions whose source matches this env name
+        #[arg(long)]
+        require_source: Option<String>,
+        /// Newest snapshot in the source must be at least N seconds old
+        #[arg(long)]
+        min_age_secs: Option<u64>,
+        /// Clear the policy (overrides --require-source and --min-age-secs)
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -555,6 +661,19 @@ fn main() -> Result<()> {
             EnvCommands::Promote { source, target } => {
                 cmd_env_promote(&source, &target, &dags_path)
             }
+            EnvCommands::Diff { a, b } => cmd_env_diff(&a, &b, &dags_path),
+            EnvCommands::History { name } => cmd_env_history(&name, &dags_path),
+            EnvCommands::Rollback {
+                name,
+                to_version,
+                yes,
+            } => cmd_env_rollback(&name, to_version, yes, &dags_path),
+            EnvCommands::SetPolicy {
+                name,
+                require_source,
+                min_age_secs,
+                clear,
+            } => cmd_env_set_policy(&name, require_source, min_age_secs, clear, &dags_path),
         },
         Commands::Replay {
             to,
@@ -568,6 +687,30 @@ fn main() -> Result<()> {
             output,
             dry_run,
         } => cmd_migrate(&source, &output, dry_run),
+
+        Commands::Lineage {
+            task_ref,
+            dags_path,
+            openlineage,
+            output_dataset,
+            dataset_namespace,
+            job_namespace,
+            job_name,
+            run_id,
+            event_time,
+            event_type,
+        } => cmd_lineage(
+            &task_ref,
+            &dags_path,
+            openlineage,
+            output_dataset.as_deref(),
+            dataset_namespace.as_deref(),
+            &job_namespace,
+            job_name.as_deref(),
+            run_id.as_deref(),
+            event_time.as_deref(),
+            &event_type,
+        ),
 
         Commands::Backfill {
             dag_id,
@@ -1833,6 +1976,180 @@ fn cmd_env_promote(source: &str, target: &str, dags_path: &PathBuf) -> Result<()
     Ok(())
 }
 
+fn cmd_env_diff(a: &str, b: &str, dags_path: &PathBuf) -> Result<()> {
+    let state_dir = resolve_state_dir(dags_path);
+    let state = PersistentState::open(&state_dir)?;
+
+    let env_a = state.env_manager.get(a)?;
+    let env_b = state.env_manager.get(b)?;
+    let diff = env_a.diff(&env_b);
+
+    println!("--- {}", a);
+    println!("+++ {}", b);
+
+    if diff.is_empty() {
+        println!("(no differences)");
+        return Ok(());
+    }
+
+    let short = |s: &str| -> String {
+        let n = s.len().min(12);
+        s[..n].to_string()
+    };
+
+    let mut removed = diff.removed.clone();
+    removed.sort_by(|x, y| (&x.dag_id, &x.task_id).cmp(&(&y.dag_id, &y.task_id)));
+    for e in &removed {
+        println!("- {}.{}  {}", e.dag_id, e.task_id, short(&e.snapshot_id));
+    }
+
+    let mut changed = diff.changed.clone();
+    changed.sort_by(|x, y| (&x.dag_id, &x.task_id).cmp(&(&y.dag_id, &y.task_id)));
+    for c in &changed {
+        println!(
+            "~ {}.{}  {} -> {}",
+            c.dag_id,
+            c.task_id,
+            short(&c.old_snapshot_id),
+            short(&c.new_snapshot_id)
+        );
+    }
+
+    let mut added = diff.added.clone();
+    added.sort_by(|x, y| (&x.dag_id, &x.task_id).cmp(&(&y.dag_id, &y.task_id)));
+    for e in &added {
+        println!("+ {}.{}  {}", e.dag_id, e.task_id, short(&e.snapshot_id));
+    }
+
+    println!();
+    println!(
+        "{} added, {} removed, {} changed ({} total)",
+        diff.added.len(),
+        diff.removed.len(),
+        diff.changed.len(),
+        diff.total()
+    );
+
+    Ok(())
+}
+
+fn cmd_env_history(name: &str, dags_path: &PathBuf) -> Result<()> {
+    use conduit_common::snapshot::EnvHistoryReason;
+
+    let state_dir = resolve_state_dir(dags_path);
+    let state = PersistentState::open(&state_dir)?;
+
+    let env = state.env_manager.get(name)?;
+    let history = state.env_manager.history(name)?;
+
+    println!("Environment '{}'", env.id);
+    println!("  current_version: {}", env.current_version);
+    println!("  history entries: {}", history.len());
+    println!();
+
+    if history.is_empty() {
+        println!("(no history recorded — promote or rollback this env to create entries)");
+        return Ok(());
+    }
+
+    println!(
+        "{:>7}  {:<24}  {:>9}  reason",
+        "version", "captured_at", "snapshots"
+    );
+    for entry in &history {
+        let reason = match &entry.reason {
+            EnvHistoryReason::Promotion { from } => format!("promotion from '{}'", from),
+            EnvHistoryReason::Rollback { from_version } => {
+                format!("rollback from v{}", from_version)
+            }
+            EnvHistoryReason::Manual => "manual".to_string(),
+        };
+        println!(
+            "{:>7}  {:<24}  {:>9}  {}",
+            entry.version,
+            entry.captured_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            entry.snapshot_count,
+            reason
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_env_rollback(
+    name: &str,
+    to_version: Option<u32>,
+    yes: bool,
+    dags_path: &PathBuf,
+) -> Result<()> {
+    let state_dir = resolve_state_dir(dags_path);
+    let state = PersistentState::open(&state_dir)?;
+
+    let env = state.env_manager.get(name)?;
+    let target = to_version.unwrap_or(env.current_version);
+
+    if !yes {
+        use std::io::{BufRead, Write};
+        print!(
+            "Roll back '{}' (current version {}) to version {}? [y/N] ",
+            name, env.current_version, target
+        );
+        std::io::stdout().flush().ok();
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+        if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let (new_version, changes) = state.env_manager.rollback(name, to_version)?;
+    state.save()?;
+
+    println!(
+        "Rolled back '{}' to version {} ({} snapshot changes, new history version {})",
+        name, target, changes, new_version
+    );
+    Ok(())
+}
+
+fn cmd_env_set_policy(
+    name: &str,
+    require_source: Option<String>,
+    min_age_secs: Option<u64>,
+    clear: bool,
+    dags_path: &PathBuf,
+) -> Result<()> {
+    use conduit_common::snapshot::PromotionPolicy;
+
+    let state_dir = resolve_state_dir(dags_path);
+    let state = PersistentState::open(&state_dir)?;
+
+    let policy = if clear {
+        PromotionPolicy::default()
+    } else {
+        PromotionPolicy {
+            require_source,
+            min_age_secs,
+        }
+    };
+
+    let env = state.env_manager.set_promotion_policy(name, policy)?;
+    state.save()?;
+
+    println!("Updated promotion policy for '{}':", env.id);
+    match &env.promotion_policy.require_source {
+        Some(s) => println!("  require_source: {}", s),
+        None => println!("  require_source: (any)"),
+    }
+    match env.promotion_policy.min_age_secs {
+        Some(n) => println!("  min_age_secs:   {}", n),
+        None => println!("  min_age_secs:   (none)"),
+    }
+    Ok(())
+}
+
 // ─── conduit replay ──────────────────────────────────────────────────────────
 
 fn cmd_replay(
@@ -2181,6 +2498,124 @@ Next Steps:
     }
 
     Ok(())
+}
+
+// ─── conduit lineage ─────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_lineage(
+    task_ref: &str,
+    dags_path: &PathBuf,
+    openlineage: bool,
+    output_dataset: Option<&str>,
+    dataset_namespace: Option<&str>,
+    job_namespace: &str,
+    job_name: Option<&str>,
+    run_id: Option<&str>,
+    event_time: Option<&str>,
+    event_type: &str,
+) -> Result<()> {
+    let (dag_id, task_id) = parse_task_ref(task_ref)?;
+    let (plan, _) = ConduitPlan::compile(dags_path)?;
+    let dag = plan.dags.get(dag_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "DAG '{}' not found. Available DAGs: {}",
+            dag_id,
+            plan.dags.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    let task = dag.tasks.get(task_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Task '{}' not found in DAG '{}'. Available tasks: {}",
+            task_id,
+            dag_id,
+            dag.tasks.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })?;
+
+    let (connection, sql) = match &task.task_type {
+        conduit_common::dag::TaskType::Sql { connection, query } => {
+            (connection.as_str(), query.as_str())
+        }
+        other => {
+            anyhow::bail!(
+                "Task '{}.{}' is {:?}, not a SQL task",
+                dag_id,
+                task_id,
+                other
+            )
+        }
+    };
+
+    let lineage = SqlLineageExtractor::extract(sql);
+
+    if openlineage {
+        let event_type = OpenLineageEventType::parse(event_type).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid OpenLineage event type '{}'. Expected START, RUNNING, COMPLETE, ABORT, FAIL, or OTHER",
+                event_type
+            )
+        })?;
+        let event_time = if let Some(value) = event_time {
+            DateTime::parse_from_rfc3339(value).map_err(|_| {
+                anyhow::anyhow!("Invalid --event-time '{}'. Expected RFC3339", value)
+            })?;
+            value.to_string()
+        } else {
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+        };
+        let run_id = if let Some(value) = run_id {
+            Uuid::parse_str(value)
+                .map_err(|_| anyhow::anyhow!("Invalid --run-id '{}'. Expected UUID", value))?
+                .to_string()
+        } else {
+            Uuid::new_v4().to_string()
+        };
+
+        let event = OpenLineageRunEvent::from_sql_lineage(
+            &lineage,
+            OpenLineageSqlEventOptions {
+                event_type,
+                event_time,
+                run_id,
+                job_namespace: job_namespace.to_string(),
+                job_name: job_name.unwrap_or(task_ref).to_string(),
+                dataset_namespace: dataset_namespace.unwrap_or(connection).to_string(),
+                output_dataset: output_dataset.unwrap_or(task_ref).to_string(),
+                producer: CONDUIT_OPENLINEAGE_PRODUCER.to_string(),
+            },
+        );
+        println!("{}", serde_json::to_string_pretty(&event)?);
+    } else {
+        let result = serde_json::json!({
+            "dag_id": dag_id,
+            "task_id": task_id,
+            "connection": connection,
+            "sql": sql,
+            "output_columns": lineage.output_columns,
+            "source_tables": lineage.source_tables,
+            "column_mappings": lineage.column_mappings,
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
+
+    Ok(())
+}
+
+fn parse_task_ref(task_ref: &str) -> Result<(&str, &str)> {
+    let (dag_id, task_id) = task_ref.rsplit_once('.').ok_or_else(|| {
+        anyhow::anyhow!(
+            "Task reference must use the form dag_id.task_id, got '{}'",
+            task_ref
+        )
+    })?;
+    if dag_id.is_empty() || task_id.is_empty() {
+        anyhow::bail!(
+            "Task reference must use the form dag_id.task_id, got '{}'",
+            task_ref
+        );
+    }
+    Ok((dag_id, task_id))
 }
 
 // ─── conduit backfill ────────────────────────────────────────────────────────

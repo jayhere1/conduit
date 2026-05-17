@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use axum::http::{header, Method};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -72,6 +72,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/environments/:env_name/diff/:other_env",
             get(handlers::envs::diff_environments),
+        )
+        .route(
+            "/environments/:env_name/history",
+            get(handlers::envs::list_env_history),
+        )
+        .route(
+            "/environments/:env_name/history/:version",
+            get(handlers::envs::get_env_history_version),
+        )
+        .route(
+            "/environments/:env_name/rollback",
+            post(handlers::envs::rollback_environment),
+        )
+        .route(
+            "/environments/:env_name/policy",
+            put(handlers::envs::update_env_policy),
         )
         // ── Plan/Apply ───────────────────────────────────────
         .route("/plan", post(handlers::plan::generate_plan))

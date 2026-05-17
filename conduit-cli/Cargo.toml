@@ -16,6 +16,7 @@ conduit-state = { path = "../conduit-state" }
 conduit-scheduler = { path = "../conduit-scheduler" }
 conduit-executor = { path = "../conduit-executor" }
 conduit-planner = { path = "../conduit-planner" }
+conduit-lineage = { path = "../conduit-lineage" }
 conduit-api = { path = "../conduit-api" }
 conduit-providers = { path = "../conduit-providers" }
 clap = { workspace = true }
@@ -25,6 +26,7 @@ serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 comfy-table = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }

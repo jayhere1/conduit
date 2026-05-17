@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { Link } from 'react-router-dom';
-import { ChevronDown, Search, Activity } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { ChevronDown, Search, Activity, X } from 'lucide-react';
 import { listAllRuns } from '../api';
 import { useApi, usePolling } from '../hooks/useApi';
 import Card from '../components/Card';
@@ -11,11 +11,24 @@ import EmptyState from '../components/EmptyState';
 import { formatRelativeTime, formatDuration } from '../utils/time';
 
 export default function Runs() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const envFilter = searchParams.get('environment') || '';
+
   const [statusFilter, setStatusFilter] = useState('all');
   const [dagFilter, setDagFilter] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'startedAt', direction: 'desc' });
 
-  const { data: runs, loading, error, refetch } = useApi(listAllRuns, []);
+  // Server-side env filter (other filters stay client-side for now).
+  const { data: runs, loading, error, refetch } = useApi(
+    () => listAllRuns(envFilter ? { environment: envFilter } : {}),
+    [envFilter]
+  );
+
+  const clearEnvFilter = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('environment');
+    setSearchParams(next, { replace: true });
+  };
 
   // Set up polling for auto-refresh every 5 seconds
   // Use refetch directly as callback since it's the refetch function itself
@@ -76,6 +89,20 @@ export default function Runs() {
   return (
     <div className="p-6">
       <PageHeader title="Pipeline Runs" />
+
+      {envFilter && (
+        <div className="mt-4 inline-flex items-center gap-2 px-3 py-1.5 bg-conduit-700/40 border border-conduit-600/50 rounded-full text-sm text-conduit-100">
+          <span className="text-conduit-300">environment:</span>
+          <span className="font-mono">{envFilter}</span>
+          <button
+            onClick={clearEnvFilter}
+            className="ml-1 text-conduit-400 hover:text-conduit-100 transition-colors"
+            title="Clear environment filter"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Filter Bar */}
       <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -152,6 +179,9 @@ export default function Runs() {
                     Status
                   </th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                    Environment
+                  </th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
                     Triggered By
                   </th>
                   <th
@@ -191,6 +221,18 @@ export default function Runs() {
                     </td>
                     <td className="px-6 py-4 text-sm">
                       <StatusBadge status={run.status} dot={true} />
+                    </td>
+                    <td className="px-6 py-4 text-sm">
+                      {run.environment ? (
+                        <Link
+                          to={`/runs?environment=${encodeURIComponent(run.environment)}`}
+                          className="font-mono text-xs text-conduit-300 hover:text-conduit-100 transition-colors"
+                        >
+                          {run.environment}
+                        </Link>
+                      ) : (
+                        <span className="text-gray-500">-</span>
+                      )}
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-400">
                       {run.triggeredBy || '-'}

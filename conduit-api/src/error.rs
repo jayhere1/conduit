@@ -15,6 +15,7 @@ pub enum ApiError {
     EnvironmentNotFound(String),
     Unauthorized(String),
     Forbidden(String),
+    PromotionPolicyViolation(String),
 }
 
 impl IntoResponse for ApiError {
@@ -46,6 +47,11 @@ impl IntoResponse for ApiError {
             }
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg),
+            ApiError::PromotionPolicyViolation(msg) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "promotion_policy_violation",
+                msg,
+            ),
         };
 
         let body = json!({
@@ -114,6 +120,7 @@ impl From<conduit_common::error::ConduitError> for ApiError {
         use conduit_common::error::ConduitError;
         match err {
             ConduitError::EnvironmentNotFound(name) => ApiError::EnvironmentNotFound(name),
+            ConduitError::PromotionPolicyViolation(msg) => ApiError::PromotionPolicyViolation(msg),
             ConduitError::SnapshotNotFound(id) => {
                 ApiError::NotFound(format!("Snapshot not found: {}", id))
             }

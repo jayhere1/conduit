@@ -81,7 +81,7 @@ Process-isolated task execution with stdin/stdout protocol. Supports Python, Bas
 All SQL providers use lazy connection pooling, parameterized queries, and percent-encoded credentials.
 
 ### SQL Lineage (`conduit-lineage`)
-Column-level lineage via `sqlparser-rs` AST walking (not regex). Handles SELECT, JOINs, CTEs, UNIONs, subqueries, window functions, INSERT...SELECT, and CREATE TABLE AS SELECT. Optional `TableCatalog` integration enables bare column resolution, `SELECT *` expansion, and CTE column propagation. 67 tests. Lineage is currently labeled **beta** — known limitations include Jinja template SQL and view resolution.
+Column-level lineage via `sqlparser-rs` AST walking (not regex). Handles SELECT, JOINs, CTEs, UNIONs, subqueries, window functions, INSERT...SELECT, and CREATE TABLE AS SELECT. Optional `TableCatalog` integration enables bare column resolution, `SELECT *` expansion, CTE column propagation, and view column registration. OpenLineage RunEvent generation emits output `columnLineage` facets. Lineage is currently labeled **beta** — known limitations include semantic dbt/Jinja resolution and dialect-specific constructs such as BigQuery `SELECT * EXCEPT`.
 
 ### REST API + Web UI (`conduit-api`, `conduit-ui`)
 Axum-based REST API with WebSocket event streaming. The API dispatches runs to the scheduler (not just recording intent). React web UI provides DAG visualization, run monitoring, task state tracking, and log streaming.
@@ -106,7 +106,7 @@ Terraform-style change detection and deployment. Computes content-addressable fi
 | `conduit env create <name>` | Create a virtual environment (forked from production) |
 | `conduit env list` | List all environments |
 | `conduit env promote <src> <dst>` | Promote one environment into another |
-| `conduit lineage <dag_id>` | Show column-level data lineage for a DAG |
+| `conduit lineage <dag.task>` | Show SQL lineage for a task, or emit an OpenLineage RunEvent |
 | `conduit migrate <path>` | Convert Airflow DAGs to Conduit format |
 | `conduit status` | Show system status |
 

@@ -20,6 +20,8 @@ use crate::AppState;
 pub struct ListRunsQuery {
     pub limit: Option<usize>,
     pub status: Option<String>,
+    /// Filter to runs that targeted this environment (e.g. "production", "staging").
+    pub environment: Option<String>,
 }
 
 /// Request body for triggering a DAG run.
@@ -29,6 +31,8 @@ pub struct TriggerRunRequest {
     pub logical_date: Option<String>,
     /// Optional configuration overrides.
     pub config: Option<HashMap<String, String>>,
+    /// Target environment. Defaults to "production".
+    pub environment: Option<String>,
 }
 
 /// POST /api/v1/dags/:dag_id/runs — trigger a new DAG run.
@@ -57,6 +61,9 @@ pub async fn trigger_run(
         .unwrap_or(now);
 
     let config = body.config.unwrap_or_default();
+    let environment = body
+        .environment
+        .unwrap_or_else(|| "production".to_string());
 
     let task_states: HashMap<String, String> = dag
         .tasks
@@ -87,6 +94,7 @@ pub async fn trigger_run(
         finished_at: None,
         task_states: task_states.clone(),
         triggered_by: "api".to_string(),
+        environment: environment.clone(),
     };
 
     state.record_run(run_info);
@@ -119,6 +127,7 @@ pub async fn trigger_run(
     Ok(Json(json!({
         "runId": run_id,
         "dagId": dag_id,
+        "environment": environment,
         "status": status,
         "taskStates": task_states,
         "message": message,
@@ -136,6 +145,9 @@ pub async fn list_runs(
 
     if let Some(ref status) = params.status {
         runs.retain(|r| r.status == *status);
+    }
+    if let Some(ref env) = params.environment {
+        runs.retain(|r| r.environment == *env);
     }
 
     runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
@@ -167,6 +179,7 @@ pub async fn get_run(
         "endedAt": run.finished_at.map(|t| t.to_rfc3339()),
         "taskStates": run.task_states,
         "triggeredBy": run.triggered_by,
+        "environment": run.environment,
     })))
 }
 
@@ -180,6 +193,9 @@ pub async fn list_all_runs(
 
     if let Some(ref status) = params.status {
         runs.retain(|r| r.status == *status);
+    }
+    if let Some(ref env) = params.environment {
+        runs.retain(|r| r.environment == *env);
     }
 
     runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));

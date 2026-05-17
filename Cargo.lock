@@ -877,6 +877,7 @@ dependencies = [
  "conduit-common",
  "conduit-compiler",
  "conduit-executor",
+ "conduit-lineage",
  "conduit-planner",
  "conduit-providers",
  "conduit-scheduler",
@@ -890,6 +891,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "walkdir",
 ]
 

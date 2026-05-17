@@ -59,6 +59,10 @@ function del(path) {
   return request(path, { method: 'DELETE' });
 }
 
+function put(path, body) {
+  return request(path, { method: 'PUT', body: JSON.stringify(body) });
+}
+
 // ─── Health & Info ───────────────────────────────────────────────────────────
 
 export const health = () => get('/health');
@@ -149,6 +153,7 @@ function normalizeRun(run) {
     taskStates: run.taskStates || run.task_states || {},
     tasks: run.tasks || [],
     triggeredBy: run.triggeredBy || run.triggered_by,
+    environment: run.environment,
   };
 }
 
@@ -159,15 +164,27 @@ function normalizeRuns(runs) {
   return (runs || []).map(normalizeRun);
 }
 
-export const listAllRuns = () =>
-  get('/runs')
+export const listAllRuns = (filters = {}) => {
+  const params = new URLSearchParams();
+  if (filters.environment) params.set('environment', filters.environment);
+  if (filters.status) params.set('status', filters.status);
+  if (filters.limit != null) params.set('limit', String(filters.limit));
+  const qs = params.toString();
+  return get(`/runs${qs ? `?${qs}` : ''}`)
     .then((r) => normalizeRuns(r.runs || []))
     .catch(() => []);
+};
 
-export const listRuns = (dagId) =>
-  get(`/dags/${dagId}/runs`)
+export const listRuns = (dagId, filters = {}) => {
+  const params = new URLSearchParams();
+  if (filters.environment) params.set('environment', filters.environment);
+  if (filters.status) params.set('status', filters.status);
+  if (filters.limit != null) params.set('limit', String(filters.limit));
+  const qs = params.toString();
+  return get(`/dags/${dagId}/runs${qs ? `?${qs}` : ''}`)
     .then((r) => normalizeRuns(r.runs || []))
     .catch(() => []);
+};
 
 export const getRun = (runId) =>
   get(`/runs/${runId}`).then(normalizeRun);
@@ -186,6 +203,21 @@ export const promoteEnvironment = (source, target) =>
   post('/environments/promote', { source, target });
 export const diffEnvironments = (envA, envB) =>
   get(`/environments/${envA}/diff/${envB}`);
+
+export const getEnvHistory = (name, includeSnapshots = false) =>
+  get(`/environments/${name}/history${includeSnapshots ? '?include_snapshots=true' : ''}`);
+
+export const getEnvHistoryVersion = (name, version) =>
+  get(`/environments/${name}/history/${version}`);
+
+export const rollbackEnvironment = (name, toVersion) =>
+  post(`/environments/${name}/rollback`, toVersion != null ? { to_version: toVersion } : {});
+
+export const updateEnvPolicy = (name, policy) =>
+  put(`/environments/${name}/policy`, {
+    require_source: policy.requireSource ?? null,
+    min_age_secs: policy.minAgeSecs ?? null,
+  });
 
 // ─── Plan / Apply ────────────────────────────────────────────────────────────
 

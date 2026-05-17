@@ -498,73 +498,39 @@ Example:
 conduit snapshot export prod-snap-20240322-143215 backup.json
 ```
 
-## Lineage Commands (Phase 4)
+## Lineage Commands
 
-### lineage upstream
+### lineage
 
-Show upstream lineage.
+Extract column-level lineage for a SQL task. The task reference must use `dag_id.task_id`.
 
 ```bash
-conduit lineage upstream <table> <column> [options]
+conduit lineage <dag.task> [options]
 
 Arguments:
-  <table>               Table name
-  <column>              Column name
+  <dag.task>            SQL task reference
 
 Options:
-  --depth <n>           Max depth (default: 10)
-  --format <type>       Output format: text, json (default: text)
+  --dags-path <path>    Path to DAG definitions (default: ./dags)
+  --openlineage         Emit an OpenLineage RunEvent instead of native lineage JSON
+  --output-dataset <n>  OpenLineage output dataset name (default: dag.task)
+  --dataset-namespace <n>
+                        OpenLineage dataset namespace (default: SQL connection)
+  --job-namespace <n>   OpenLineage job namespace (default: conduit)
+  --job-name <n>        OpenLineage job name (default: dag.task)
+  --run-id <uuid>       OpenLineage run UUID (default: generated UUID)
+  --event-time <time>   OpenLineage event timestamp, RFC3339 (default: now)
+  --event-type <type>   START, RUNNING, COMPLETE, ABORT, FAIL, or OTHER
+                        (default: COMPLETE)
 ```
 
 Example:
 
 ```bash
-conduit lineage upstream analytics.metrics customer_ltv
-```
-
-### lineage downstream
-
-Show downstream lineage.
-
-```bash
-conduit lineage downstream <table> <column> [options]
-
-Arguments:
-  <table>               Table name
-  <column>              Column name
-
-Options:
-  --depth <n>           Max depth (default: 10)
-  --format <type>       Output format: text, json (default: text)
-```
-
-Example:
-
-```bash
-conduit lineage downstream raw.transactions amount
-```
-
-### lineage graph
-
-Export lineage graph.
-
-```bash
-conduit lineage graph <start-table> <start-column> [options]
-
-Arguments:
-  <start-table>         Starting table
-  <start-column>        Starting column
-
-Options:
-  --direction <dir>     Direction: upstream, downstream, both (default: both)
-  --format <type>       Output format: json, dot (default: json)
-  --output <path>       Write to file
-```
-
-Example:
-
-```bash
-conduit lineage graph analytics.metrics customer_ltv --output graph.json
+conduit lineage daily_etl.transform_orders
+conduit lineage daily_etl.transform_orders \
+  --openlineage \
+  --output-dataset analytics.order_summary
 ```
 
 ## API Commands

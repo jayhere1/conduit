@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import {
   listEnvironments,
@@ -6,6 +7,9 @@ import {
   deleteEnvironment,
   promoteEnvironment,
   diffEnvironments,
+  getEnvHistory,
+  rollbackEnvironment,
+  updateEnvPolicy,
 } from '../api';
 import Card from '../components/Card';
 import StatusBadge from '../components/StatusBadge';
@@ -22,6 +26,10 @@ import {
   Shield,
   Clock,
   X,
+  History as HistoryIcon,
+  Undo2,
+  Settings,
+  Activity,
 } from 'lucide-react';
 
 function formatRelativeTime(isoDate) {
@@ -58,6 +66,21 @@ export default function Environments() {
 
   const [deletingEnv, setDeletingEnv] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // History viewer
+  const [historyEnv, setHistoryEnv] = useState(null);
+  const [historyEntries, setHistoryEntries] = useState(null);
+  const [historyCurrentVersion, setHistoryCurrentVersion] = useState(null);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
+  const [rollbackPending, setRollbackPending] = useState(null); // version being rolled back to
+  const [rollbackError, setRollbackError] = useState(null);
+
+  // Policy editor
+  const [policyEnv, setPolicyEnv] = useState(null); // the env object
+  const [policyForm, setPolicyForm] = useState({ requireSource: '', minAgeSecs: '' });
+  const [isSavingPolicy, setIsSavingPolicy] = useState(false);
+  const [policyError, setPolicyError] = useState(null);
 
   const handleCreateClick = () => {
     setShowCreateForm(true);
@@ -164,6 +187,92 @@ export default function Environments() {
 
   const handleDeleteClick = (envName) => {
     setDeletingEnv(envName);
+  };
+
+  const openHistory = async (envName) => {
+    setHistoryEnv(envName);
+    setHistoryEntries(null);
+    setHistoryCurrentVersion(null);
+    setHistoryError(null);
+    setRollbackError(null);
+    setIsLoadingHistory(true);
+    try {
+      const res = await getEnvHistory(envName);
+      setHistoryEntries(res.versions || []);
+      setHistoryCurrentVersion(res.currentVersion ?? null);
+    } catch (err) {
+      setHistoryError(err.message);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
+
+  const closeHistory = () => {
+    setHistoryEnv(null);
+    setHistoryEntries(null);
+    setHistoryCurrentVersion(null);
+    setHistoryError(null);
+    setRollbackError(null);
+    setRollbackPending(null);
+  };
+
+  const handleRollback = async (version) => {
+    if (!historyEnv) return;
+    setRollbackPending(version);
+    setRollbackError(null);
+    try {
+      await rollbackEnvironment(historyEnv, version);
+      // Re-fetch history (rollback itself adds a new version).
+      const res = await getEnvHistory(historyEnv);
+      setHistoryEntries(res.versions || []);
+      setHistoryCurrentVersion(res.currentVersion ?? null);
+      await refetch();
+    } catch (err) {
+      setRollbackError(err.message);
+    } finally {
+      setRollbackPending(null);
+    }
+  };
+
+  const openPolicyEditor = (env) => {
+    setPolicyEnv(env);
+    const p = env.promotionPolicy || {};
+    setPolicyForm({
+      requireSource: p.requireSource || '',
+      minAgeSecs: p.minAgeSecs != null ? String(p.minAgeSecs) : '',
+    });
+    setPolicyError(null);
+  };
+
+  const closePolicyEditor = () => {
+    setPolicyEnv(null);
+    setPolicyForm({ requireSource: '', minAgeSecs: '' });
+    setPolicyError(null);
+  };
+
+  const handlePolicySave = async () => {
+    if (!policyEnv) return;
+    setIsSavingPolicy(true);
+    setPolicyError(null);
+    try {
+      const minAge =
+        policyForm.minAgeSecs.trim() === '' ? null : Number(policyForm.minAgeSecs);
+      if (minAge != null && (!Number.isFinite(minAge) || minAge < 0)) {
+        setPolicyError('min_age_secs must be a non-negative number');
+        setIsSavingPolicy(false);
+        return;
+      }
+      await updateEnvPolicy(policyEnv.name || policyEnv.id, {
+        requireSource: policyForm.requireSource.trim() || null,
+        minAgeSecs: minAge,
+      });
+      closePolicyEditor();
+      await refetch();
+    } catch (err) {
+      setPolicyError(err.message);
+    } finally {
+      setIsSavingPolicy(false);
+    }
   };
 
   const handleDeleteConfirm = async () => {
@@ -325,7 +434,7 @@ export default function Environments() {
                     )}
 
                     {/* Stats */}
-                    <div className="grid grid-cols-2 gap-4 mb-4 pb-4 border-t border-conduit-700/50">
+                    <div className="grid grid-cols-3 gap-4 mb-4 pb-4 border-t border-conduit-700/50">
                       <div>
                         <p className="text-xs text-conduit-500 uppercase tracking-wide">
                           Snapshots
@@ -336,7 +445,15 @@ export default function Environments() {
                       </div>
                       <div>
                         <p className="text-xs text-conduit-500 uppercase tracking-wide">
-                          Last Updated
+                          Version
+                        </p>
+                        <p className="text-xl font-bold text-conduit-200 mt-1">
+                          {env.currentVersion || 0}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-conduit-500 uppercase tracking-wide">
+                          Updated
                         </p>
                         <p className="text-sm text-conduit-300 mt-1">
                           {formatRelativeTime(env.updatedAt)}
@@ -344,8 +461,30 @@ export default function Environments() {
                       </div>
                     </div>
 
+                    {/* Policy summary (only when non-empty) */}
+                    {env.promotionPolicy &&
+                      (env.promotionPolicy.requireSource ||
+                        env.promotionPolicy.minAgeSecs != null) && (
+                        <div className="mb-4 px-3 py-2 bg-amber-900/10 border border-amber-700/30 rounded text-xs text-amber-200/80">
+                          <span className="font-semibold">Policy:</span>{' '}
+                          {env.promotionPolicy.requireSource && (
+                            <span>
+                              source = <code>{env.promotionPolicy.requireSource}</code>
+                            </span>
+                          )}
+                          {env.promotionPolicy.requireSource &&
+                            env.promotionPolicy.minAgeSecs != null &&
+                            ', '}
+                          {env.promotionPolicy.minAgeSecs != null && (
+                            <span>
+                              min age = {env.promotionPolicy.minAgeSecs}s
+                            </span>
+                          )}
+                        </div>
+                      )}
+
                     {/* Actions */}
-                    <div className="flex gap-2 pt-2 border-t border-conduit-700/50">
+                    <div className="flex flex-wrap gap-2 pt-2 border-t border-conduit-700/50">
                       <button
                         onClick={() => handlePromoteClick((env.name || env.id))}
                         className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-conduit-800/50 hover:bg-conduit-700/50 text-conduit-300 text-xs font-medium rounded-lg border border-conduit-700/50 transition-all"
@@ -359,6 +498,28 @@ export default function Environments() {
                       >
                         <GitCompare className="w-3.5 h-3.5" />
                         Diff
+                      </button>
+                      <button
+                        onClick={() => openHistory((env.name || env.id))}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-conduit-800/50 hover:bg-conduit-700/50 text-conduit-300 text-xs font-medium rounded-lg border border-conduit-700/50 transition-all"
+                      >
+                        <HistoryIcon className="w-3.5 h-3.5" />
+                        History
+                      </button>
+                      <Link
+                        to={`/runs?environment=${encodeURIComponent(env.name || env.id)}`}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-conduit-800/50 hover:bg-conduit-700/50 text-conduit-300 text-xs font-medium rounded-lg border border-conduit-700/50 transition-all"
+                        title="View runs targeting this env"
+                      >
+                        <Activity className="w-3.5 h-3.5" />
+                        Runs
+                      </Link>
+                      <button
+                        onClick={() => openPolicyEditor(env)}
+                        title="Edit promotion policy"
+                        className="flex items-center justify-center gap-1.5 px-3 py-2 bg-conduit-800/50 hover:bg-conduit-700/50 text-conduit-300 text-xs font-medium rounded-lg border border-conduit-700/50 transition-all"
+                      >
+                        <Settings className="w-3.5 h-3.5" />
                       </button>
                       {(env.name || env.id) !== 'production' && (
                         <button
@@ -601,6 +762,226 @@ export default function Environments() {
                         </div>
                       </>
                     )}
+                  </div>
+                </Card>
+              </div>
+            )}
+
+            {/* History Modal */}
+            {historyEnv && (
+              <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                <Card className="w-full max-w-2xl border-conduit-600/50 max-h-[90vh] overflow-y-auto">
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <h3 className="text-lg font-semibold text-conduit-50">
+                          History — {historyEnv}
+                        </h3>
+                        {historyCurrentVersion != null && (
+                          <p className="text-xs text-conduit-400 mt-1">
+                            Current version: {historyCurrentVersion}
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        onClick={closeHistory}
+                        className="text-conduit-400 hover:text-conduit-200 transition-colors"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    {historyError && (
+                      <div className="p-3 bg-red-900/20 border border-red-700/50 rounded text-red-200 text-sm">
+                        {historyError}
+                      </div>
+                    )}
+                    {rollbackError && (
+                      <div className="p-3 bg-red-900/20 border border-red-700/50 rounded text-red-200 text-sm">
+                        {rollbackError}
+                      </div>
+                    )}
+
+                    {isLoadingHistory ? (
+                      <div className="py-8 flex justify-center">
+                        <Spinner />
+                      </div>
+                    ) : historyEntries && historyEntries.length === 0 ? (
+                      <p className="py-6 text-center text-conduit-400">
+                        No history recorded yet. Promote or rollback this environment to
+                        create entries.
+                      </p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-conduit-700/50">
+                              <th className="text-left py-2 px-2 text-conduit-400 font-medium">
+                                Version
+                              </th>
+                              <th className="text-left py-2 px-2 text-conduit-400 font-medium">
+                                Captured
+                              </th>
+                              <th className="text-right py-2 px-2 text-conduit-400 font-medium">
+                                Snapshots
+                              </th>
+                              <th className="text-left py-2 px-2 text-conduit-400 font-medium">
+                                Reason
+                              </th>
+                              <th className="text-right py-2 px-2 text-conduit-400 font-medium">
+                                Action
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {historyEntries?.map((entry) => {
+                              const reason = entry.reason || {};
+                              let reasonLabel = 'manual';
+                              if (reason.type === 'promotion')
+                                reasonLabel = `promotion from ${reason.from}`;
+                              else if (reason.type === 'rollback')
+                                reasonLabel = `rollback from v${reason.from_version}`;
+                              const isCurrent = entry.version === historyCurrentVersion;
+                              return (
+                                <tr
+                                  key={entry.version}
+                                  className="border-b border-conduit-700/30 hover:bg-conduit-800/20 transition-colors"
+                                >
+                                  <td className="py-2 px-2 text-conduit-200 font-mono">
+                                    v{entry.version}
+                                    {isCurrent && (
+                                      <span className="ml-2 text-xs text-amber-400">
+                                        (current)
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="py-2 px-2 text-conduit-300 text-xs">
+                                    {formatRelativeTime(entry.capturedAt)}
+                                  </td>
+                                  <td className="py-2 px-2 text-conduit-300 text-right">
+                                    {entry.snapshotCount}
+                                  </td>
+                                  <td className="py-2 px-2 text-conduit-400 text-xs">
+                                    {reasonLabel}
+                                  </td>
+                                  <td className="py-2 px-2 text-right">
+                                    <button
+                                      onClick={() => handleRollback(entry.version)}
+                                      disabled={rollbackPending != null}
+                                      className="inline-flex items-center gap-1 px-2 py-1 bg-conduit-700/50 hover:bg-conduit-600/60 disabled:opacity-50 text-conduit-100 text-xs rounded border border-conduit-600/50 transition-all"
+                                    >
+                                      <Undo2 className="w-3 h-3" />
+                                      {rollbackPending === entry.version
+                                        ? 'Rolling back...'
+                                        : 'Restore'}
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    <div className="flex justify-end pt-3 border-t border-conduit-700/50">
+                      <Button variant="secondary" onClick={closeHistory}>
+                        Close
+                      </Button>
+                    </div>
+                  </div>
+                </Card>
+              </div>
+            )}
+
+            {/* Policy Editor Modal */}
+            {policyEnv && (
+              <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                <Card className="w-full max-w-md border-conduit-600/50">
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-lg font-semibold text-conduit-50">
+                        Promotion Policy — {policyEnv.name || policyEnv.id}
+                      </h3>
+                      <button
+                        onClick={closePolicyEditor}
+                        className="text-conduit-400 hover:text-conduit-200 transition-colors"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    {policyError && (
+                      <div className="p-3 bg-red-900/20 border border-red-700/50 rounded text-red-200 text-sm">
+                        {policyError}
+                      </div>
+                    )}
+
+                    <p className="text-xs text-conduit-400">
+                      Constraints on promotions targeting this environment. Empty fields
+                      impose no constraint.
+                    </p>
+
+                    <div>
+                      <label className="block text-sm font-medium text-conduit-200 mb-2">
+                        Require source env
+                      </label>
+                      <select
+                        value={policyForm.requireSource}
+                        onChange={(e) =>
+                          setPolicyForm({ ...policyForm, requireSource: e.target.value })
+                        }
+                        disabled={isSavingPolicy}
+                        className="w-full px-3 py-2 bg-conduit-800/50 border border-conduit-700/50 rounded-lg text-conduit-50 focus:outline-none focus:border-conduit-500 focus:ring-1 focus:ring-conduit-500 glass transition-all"
+                      >
+                        <option value="">(any source)</option>
+                        {envList
+                          .filter((e) => (e.name || e.id) !== (policyEnv.name || policyEnv.id))
+                          .map((e) => (
+                            <option key={(e.name || e.id)} value={(e.name || e.id)}>
+                              {(e.name || e.id)}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-conduit-200 mb-2">
+                        Minimum snapshot age (seconds)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="e.g. 3600 (1h bake time)"
+                        value={policyForm.minAgeSecs}
+                        onChange={(e) =>
+                          setPolicyForm({ ...policyForm, minAgeSecs: e.target.value })
+                        }
+                        disabled={isSavingPolicy}
+                        className="w-full px-3 py-2 bg-conduit-800/50 border border-conduit-700/50 rounded-lg text-conduit-50 placeholder-conduit-500 focus:outline-none focus:border-conduit-500 focus:ring-1 focus:ring-conduit-500 glass transition-all"
+                      />
+                      <p className="mt-1 text-xs text-conduit-500">
+                        The newest snapshot in the source env must be at least this many
+                        seconds old.
+                      </p>
+                    </div>
+
+                    <div className="flex gap-3 justify-end pt-2">
+                      <Button
+                        variant="secondary"
+                        onClick={closePolicyEditor}
+                        disabled={isSavingPolicy}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        onClick={handlePolicySave}
+                        loading={isSavingPolicy}
+                        disabled={isSavingPolicy}
+                      >
+                        Save Policy
+                      </Button>
+                    </div>
                   </div>
                 </Card>
               </div>

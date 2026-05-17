@@ -32,6 +32,9 @@ pub enum ConduitError {
     #[error("environment not found: {0}")]
     EnvironmentNotFound(String),
 
+    #[error("promotion policy violation: {0}")]
+    PromotionPolicyViolation(String),
+
     // ── Scheduler errors ────────────────────────────────────
     #[error("scheduler error: {0}")]
     SchedulerError(String),

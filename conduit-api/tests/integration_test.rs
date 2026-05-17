@@ -271,6 +271,73 @@ async fn extract_sql_lineage() {
     assert!(result.is_object());
 }
 
+#[tokio::test]
+async fn extract_sql_lineage_can_emit_openlineage_event() {
+    let (router, _) = app(false);
+    let (status, body) = post_json(
+        &router,
+        "/api/v1/lineage/sql",
+        r#"{
+            "sql": "SELECT a, SUM(b) AS total FROM source_table WHERE a > 1",
+            "source_task_id": "transform_task",
+            "openlineage": {
+                "output_dataset": "analytics.dest_table",
+                "dataset_namespace": "warehouse",
+                "job_namespace": "conduit-tests",
+                "job_name": "demo.transform_task",
+                "run_id": "550e8400-e29b-41d4-a716-446655440000",
+                "event_time": "2026-05-17T12:00:00Z",
+                "event_type": "COMPLETE"
+            }
+        }"#,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "OpenLineage extraction failed: {}",
+        body
+    );
+
+    let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let event = &result["openlineage"];
+    assert_eq!(event["eventType"], "COMPLETE");
+    assert_eq!(event["job"]["namespace"], "conduit-tests");
+    assert_eq!(event["outputs"][0]["name"], "analytics.dest_table");
+    assert_eq!(
+        event["outputs"][0]["facets"]["columnLineage"]["fields"]["total"]["inputFields"][0]
+            ["transformations"][0]["subtype"],
+        "AGGREGATION"
+    );
+}
+
+#[tokio::test]
+async fn extract_sql_lineage_rejects_invalid_openlineage_run_id() {
+    let (router, _) = app(false);
+    let (status, body) = post_json(
+        &router,
+        "/api/v1/lineage/sql",
+        r#"{
+            "sql": "SELECT a FROM source_table",
+            "source_task_id": "transform_task",
+            "openlineage": {
+                "output_dataset": "analytics.dest_table",
+                "run_id": "not-a-uuid"
+            }
+        }"#,
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Expected 400, got: {}",
+        body
+    );
+}
+
 // ─── Contract Endpoints (no auth) ────────────────────────────────────────
 
 #[tokio::test]

@@ -36,6 +36,14 @@ pub struct DagRunInfo {
     pub finished_at: Option<DateTime<Utc>>,
     pub task_states: HashMap<String, String>,
     pub triggered_by: String,
+    /// Virtual environment this run targets. Persisted JSON written before
+    /// this field existed deserializes as "production".
+    #[serde(default = "default_run_environment")]
+    pub environment: String,
+}
+
+fn default_run_environment() -> String {
+    "production".to_string()
 }
 
 /// Shared application state.
@@ -48,8 +56,9 @@ pub struct AppState {
     pub ui_dir: Option<PathBuf>,
     /// Environment manager.
     pub env_manager: EnvironmentManager,
-    /// Snapshot store.
-    pub snapshot_store: SnapshotStore,
+    /// Snapshot store, shared with the env manager so promotion policies that
+    /// gate on snapshot age see the same data.
+    pub snapshot_store: Arc<SnapshotStore>,
     /// Active and historical DAG runs.
     pub runs: RwLock<Vec<DagRunInfo>>,
     /// WebSocket broadcast channel for live events.
@@ -102,12 +111,22 @@ impl AppState {
             }
         }
 
+        // Attach env history store so promote/rollback record versions on disk.
+        let env_manager = EnvironmentManager::new();
+        let env_manager = match conduit_state::EnvHistoryStore::open(state_dir.join("env_history"))
+        {
+            Ok(store) => env_manager.with_history_store(store),
+            Err(_) => env_manager,
+        };
+        let snapshot_store = Arc::new(SnapshotStore::new());
+        let env_manager = env_manager.with_snapshot_store(Arc::clone(&snapshot_store));
+
         Arc::new(Self {
             dags_path,
             state_dir,
             ui_dir,
-            env_manager: EnvironmentManager::new(),
-            snapshot_store: SnapshotStore::new(),
+            env_manager,
+            snapshot_store,
             runs: RwLock::new(Vec::new()),
             event_tx,
             provider_registry: RwLock::new(None),
@@ -273,6 +292,7 @@ impl AppState {
                 finished_at: ended,
                 task_states,
                 triggered_by: "scheduler".to_string(),
+                environment: "production".to_string(),
             });
         }
 
@@ -309,6 +329,7 @@ impl AppState {
                 finished_at: Some(started + Duration::hours(1) + Duration::minutes(23)),
                 task_states,
                 triggered_by: "scheduler".to_string(),
+                environment: "production".to_string(),
             });
         }
 
@@ -375,6 +396,11 @@ impl AppState {
                 } else {
                     "scheduler".to_string()
                 },
+                environment: if day == 4 {
+                    "staging".to_string()
+                } else {
+                    "production".to_string()
+                },
             });
         }
 
@@ -405,6 +431,11 @@ impl AppState {
                 finished_at: Some(started + Duration::minutes(28 + day * 3)),
                 task_states,
                 triggered_by: "scheduler".to_string(),
+                environment: if day < 2 {
+                    "staging".to_string()
+                } else {
+                    "production".to_string()
+                },
             });
         }
 

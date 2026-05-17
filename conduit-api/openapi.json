@@ -1113,7 +1113,7 @@
       "post": {
         "tags": ["Lineage"],
         "summary": "Extract SQL lineage",
-        "description": "Parse SQL and extract column-level lineage.",
+        "description": "Parse SQL and extract column-level lineage. Optionally include OpenLineage metadata to emit a RunEvent with a columnLineage output dataset facet.",
         "operationId": "extractSqlLineage",
         "requestBody": {
           "required": true,
@@ -1130,6 +1130,46 @@
                   "source_task_id": {
                     "type": "string",
                     "description": "Task ID where this SQL runs"
+                  },
+                  "openlineage": {
+                    "type": "object",
+                    "description": "Optional OpenLineage RunEvent generation options.",
+                    "required": ["output_dataset"],
+                    "properties": {
+                      "output_dataset": {
+                        "type": "string",
+                        "description": "Output dataset name, for example analytics.customer_totals"
+                      },
+                      "dataset_namespace": {
+                        "type": "string",
+                        "description": "Namespace for input and output datasets"
+                      },
+                      "job_namespace": {
+                        "type": "string",
+                        "default": "conduit"
+                      },
+                      "job_name": {
+                        "type": "string",
+                        "description": "OpenLineage job name. Defaults to source_task_id"
+                      },
+                      "run_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "event_time": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "event_type": {
+                        "type": "string",
+                        "enum": ["START", "RUNNING", "COMPLETE", "ABORT", "FAIL", "OTHER"],
+                        "default": "COMPLETE"
+                      },
+                      "producer": {
+                        "type": "string",
+                        "format": "uri"
+                      }
+                    }
                   }
                 }
               }
@@ -1169,6 +1209,10 @@
                           }
                         }
                       }
+                    },
+                    "openlineage": {
+                      "type": "object",
+                      "description": "OpenLineage RunEvent, present only when OpenLineage options are supplied."
                     }
                   }
                 }

@@ -403,20 +403,22 @@ SQL lineage is functional and tested:
 - SQL parsing via `sqlparser-rs` AST (PostgreSQL, MySQL, BigQuery, Snowflake, and other dialects)
 - TableCatalog integration for bare column resolution and wildcard expansion
 - CTE column propagation
+- OpenLineage RunEvent generation with output `columnLineage` facets
 - Explicit lineage annotations for Python tasks
 - REST API endpoints (`/lineage/sql`, `/lineage/catalog/refresh`)
 - Lineage graph traversal
-- 67 test cases covering real ETL patterns
+- 79 lineage tests covering real ETL patterns, Jinja stripping, views, and OpenLineage emission
 
 ### Known Limitations
-- Jinja/template SQL (`{{ ref('model') }}`) crashes the parser
-- Views cannot be resolved to underlying tables without a recursive catalog
+- Jinja/template SQL is stripped enough for surrounding SQL to parse, but dbt-aware semantic rendering (`ref`, `source`, vars) is not implemented yet
+- View registration exposes view columns, but full recursive source-table substitution is still limited
 - `SELECT * EXCEPT(col)` (BigQuery syntax) not supported
 - LATERAL joins, PIVOT/UNPIVOT, UNNEST not handled
 - Python task lineage is annotation-based only (no static analysis)
 
 ### Planned
-- Jinja pre-processing (strip templates before parsing)
+- OpenLineage HTTP transport / CLI export
+- dbt-aware template rendering
 - Runtime schema capture via `CONDUIT::SCHEMA::` protocol
 - Schema evolution tracking
 - Lineage visualization in the Web UI

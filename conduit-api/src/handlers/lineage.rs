@@ -12,12 +12,16 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use conduit_lineage::{
     parse_sql_type, CatalogColumn, Column, ColumnRef, ColumnType, ContractValidator, LineageGraph,
-    Schema, SchemaChangeDetector, SchemaContract, SqlLineageExtractor, TableCatalog,
+    OpenLineageEventType, OpenLineageRunEvent, OpenLineageSqlEventOptions, Schema,
+    SchemaChangeDetector, SchemaContract, SqlLineageExtractor, TableCatalog,
+    CONDUIT_OPENLINEAGE_PRODUCER,
 };
 use conduit_providers::registry::ProviderInstance;
 
@@ -44,6 +48,38 @@ pub struct SqlLineageRequest {
     /// without needing a live database connection.
     #[serde(default)]
     pub tables: Option<Vec<TableSchemaInput>>,
+    /// Optional OpenLineage metadata. When present, `/lineage/sql` includes
+    /// an OpenLineage RunEvent with a columnLineage output dataset facet.
+    #[serde(default)]
+    pub openlineage: Option<OpenLineageSqlRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct OpenLineageSqlRequest {
+    /// Output dataset name for the event, e.g. `analytics.customer_daily`.
+    pub output_dataset: String,
+    /// Dataset namespace for both input and output datasets. Defaults to the
+    /// requested connection name, then `conduit`.
+    #[serde(default)]
+    pub dataset_namespace: Option<String>,
+    /// OpenLineage job namespace. Defaults to `conduit`.
+    #[serde(default)]
+    pub job_namespace: Option<String>,
+    /// OpenLineage job name. Defaults to `source_task_id`.
+    #[serde(default)]
+    pub job_name: Option<String>,
+    /// OpenLineage run UUID. Defaults to a generated UUID.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Event timestamp. Defaults to the current time.
+    #[serde(default)]
+    pub event_time: Option<String>,
+    /// START, RUNNING, COMPLETE, ABORT, FAIL, or OTHER. Defaults to COMPLETE.
+    #[serde(default)]
+    pub event_type: Option<String>,
+    /// Producer URI for the event and generated facets.
+    #[serde(default)]
+    pub producer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -193,14 +229,27 @@ pub async fn extract_sql_lineage(
         })
         .collect();
 
-    Ok(Json(json!({
+    let openlineage = if let Some(ref opts) = req.openlineage {
+        Some(build_openlineage_event(&req, opts, &lineage)?)
+    } else {
+        None
+    };
+
+    let mut response = json!({
         "source_task_id": req.source_task_id,
         "sql": req.sql,
         "catalog_used": catalog.is_some(),
         "output_columns": output_cols,
         "source_tables": source_tables,
         "column_mappings": mappings,
-    })))
+    });
+
+    if let Some(event) = openlineage {
+        response["openlineage"] =
+            serde_json::to_value(event).map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+
+    Ok(Json(response))
 }
 
 /// POST /api/v1/lineage/catalog/refresh — Rebuild the cached table catalog.
@@ -445,6 +494,77 @@ pub async fn validate_contract(
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
+
+fn build_openlineage_event(
+    req: &SqlLineageRequest,
+    opts: &OpenLineageSqlRequest,
+    lineage: &conduit_lineage::sql_parser::SqlLineage,
+) -> Result<OpenLineageRunEvent, ApiError> {
+    let event_type = opts
+        .event_type
+        .as_deref()
+        .map(|s| {
+            OpenLineageEventType::parse(s).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "Invalid OpenLineage event_type '{}'. Expected START, RUNNING, COMPLETE, ABORT, FAIL, or OTHER",
+                    s
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or(OpenLineageEventType::Complete);
+
+    let event_time = if let Some(ref event_time) = opts.event_time {
+        DateTime::parse_from_rfc3339(event_time).map_err(|_| {
+            ApiError::BadRequest(format!(
+                "Invalid OpenLineage event_time '{}'. Expected RFC3339 timestamp",
+                event_time
+            ))
+        })?;
+        event_time.clone()
+    } else {
+        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    };
+
+    let run_id = if let Some(ref run_id) = opts.run_id {
+        Uuid::parse_str(run_id)
+            .map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "Invalid OpenLineage run_id '{}'. Expected UUID",
+                    run_id
+                ))
+            })?
+            .to_string()
+    } else {
+        Uuid::new_v4().to_string()
+    };
+
+    let options = OpenLineageSqlEventOptions {
+        event_type,
+        event_time,
+        run_id,
+        job_namespace: opts
+            .job_namespace
+            .clone()
+            .unwrap_or_else(|| "conduit".to_string()),
+        job_name: opts
+            .job_name
+            .clone()
+            .unwrap_or_else(|| req.source_task_id.clone()),
+        dataset_namespace: opts
+            .dataset_namespace
+            .clone()
+            .or_else(|| req.connection.clone())
+            .unwrap_or_else(|| "conduit".to_string()),
+        output_dataset: opts.output_dataset.clone(),
+        producer: opts
+            .producer
+            .clone()
+            .unwrap_or_else(|| CONDUIT_OPENLINEAGE_PRODUCER.to_string()),
+    };
+
+    Ok(OpenLineageRunEvent::from_sql_lineage(lineage, options))
+}
 
 /// Build a TableCatalog from inline table schemas in the request.
 fn build_catalog_from_inline(tables: &[TableSchemaInput]) -> TableCatalog {

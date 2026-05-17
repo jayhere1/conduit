@@ -488,17 +488,37 @@ Apply a deployment plan.
 
 ### POST /lineage/sql
 
-Analyze SQL for column-level lineage. Optionally provide inline table schemas for bare column resolution and wildcard expansion.
+Analyze SQL for column-level lineage. Optionally provide inline table schemas for bare column resolution and wildcard expansion. When `openlineage` metadata is provided, the response also includes an OpenLineage RunEvent with a `columnLineage` output dataset facet.
 
 **Request:**
 
 ```json
 {
   "sql": "SELECT c.id, c.name, SUM(o.amount) as total FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.id, c.name",
-  "dialect": "postgres",
-  "tables": {
-    "customers": ["id", "name", "email", "active"],
-    "orders": ["id", "customer_id", "amount", "status"]
+  "source_task_id": "daily_customer_totals",
+  "tables": [
+    {
+      "table": "customers",
+      "columns": [
+        { "name": "id", "data_type": "integer" },
+        { "name": "name", "data_type": "string" }
+      ]
+    },
+    {
+      "table": "orders",
+      "columns": [
+        { "name": "customer_id", "data_type": "integer" },
+        { "name": "amount", "data_type": "float" }
+      ]
+    }
+  ],
+  "openlineage": {
+    "output_dataset": "analytics.customer_totals",
+    "dataset_namespace": "warehouse",
+    "job_namespace": "conduit",
+    "job_name": "daily_etl.daily_customer_totals",
+    "run_id": "550e8400-e29b-41d4-a716-446655440000",
+    "event_type": "COMPLETE"
   }
 }
 ```
@@ -507,22 +527,60 @@ Analyze SQL for column-level lineage. Optionally provide inline table schemas fo
 
 ```json
 {
-  "columns": [
+  "source_task_id": "daily_customer_totals",
+  "catalog_used": true,
+  "output_columns": [
     {
-      "output_column": "id",
-      "sources": [{ "table": "customers", "column": "id" }]
+      "name": "id",
+      "expression": "c.id",
+      "is_computed": false
     },
     {
-      "output_column": "name",
-      "sources": [{ "table": "customers", "column": "name" }]
-    },
-    {
-      "output_column": "total",
-      "sources": [{ "table": "orders", "column": "amount" }],
-      "transform": "Aggregation"
+      "name": "total",
+      "expression": "sum(o.amount)",
+      "is_computed": true
     }
   ],
-  "tables_referenced": ["customers", "orders"]
+  "source_tables": [
+    { "name": "customers", "alias": "c", "schema": null },
+    { "name": "orders", "alias": "o", "schema": null }
+  ],
+  "column_mappings": [
+    {
+      "output": "total",
+      "inputs": [{ "task_id": "orders", "column_name": "amount" }]
+    }
+  ],
+  "openlineage": {
+    "eventType": "COMPLETE",
+    "run": { "runId": "550e8400-e29b-41d4-a716-446655440000" },
+    "job": { "namespace": "conduit", "name": "daily_etl.daily_customer_totals" },
+    "inputs": [
+      { "namespace": "warehouse", "name": "customers" },
+      { "namespace": "warehouse", "name": "orders" }
+    ],
+    "outputs": [
+      {
+        "namespace": "warehouse",
+        "name": "analytics.customer_totals",
+        "facets": {
+          "columnLineage": {
+            "fields": {
+              "total": {
+                "inputFields": [
+                  {
+                    "namespace": "warehouse",
+                    "name": "orders",
+                    "field": "amount"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
 }
 ```
 

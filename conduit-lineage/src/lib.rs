@@ -15,6 +15,7 @@ pub mod catalog;
 pub mod contracts;
 pub mod impact;
 pub mod lineage_graph;
+pub mod openlineage;
 pub mod schema;
 pub mod sql_parser;
 
@@ -22,5 +23,10 @@ pub use catalog::{parse_sql_type, CatalogColumn, TableCatalog};
 pub use contracts::{ContractValidator, ContractViolation, SchemaContract};
 pub use impact::{ChangeKind as SchemaChangeKind, SchemaChange, SchemaChangeDetector};
 pub use lineage_graph::{ColumnRef, LineageEdge, LineageGraph};
+pub use openlineage::{
+    ColumnLineageDatasetFacet, OpenLineageEventType, OpenLineageRunEvent,
+    OpenLineageSqlEventOptions, COLUMN_LINEAGE_FACET_SCHEMA_URL, CONDUIT_OPENLINEAGE_PRODUCER,
+    OPENLINEAGE_RUN_EVENT_SCHEMA_URL,
+};
 pub use schema::{Column, ColumnType, Schema, SchemaRegistry};
 pub use sql_parser::SqlLineageExtractor;
