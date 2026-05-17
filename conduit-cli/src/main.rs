@@ -18,8 +18,9 @@ use std::time::Instant;
 use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+mod tracing_setup;
 
 use conduit_compiler::ConduitPlan;
 use conduit_lineage::{
@@ -585,18 +586,10 @@ enum EnvCommands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
-    let filter = if cli.verbose {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::new("warn")
-    };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
-        .init();
+    // Initialize tracing. With the `otel` feature + `OTEL_EXPORTER_OTLP_ENDPOINT`
+    // set, this also installs an OTLP exporter alongside the fmt subscriber.
+    // See `tracing_setup` for details and Bet 3 in docs/STRATEGIC_DIRECTION.md.
+    tracing_setup::init_tracing(cli.verbose);
 
     // Initialize global Prometheus metrics registry
     conduit_common::metrics::init();
@@ -2137,6 +2130,7 @@ fn cmd_env_history(name: &str, dags_path: &PathBuf) -> Result<()> {
             }
             EnvHistoryReason::Apply { plan_id } => format!("apply (plan {})", plan_id),
             EnvHistoryReason::Manual => "manual".to_string(),
+            EnvHistoryReason::Apply { plan_id } => format!("apply plan {}", plan_id),
         };
         println!(
             "{:>7}  {:<24}  {:>9}  {}",

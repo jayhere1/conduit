@@ -33,6 +33,23 @@ tokio = { workspace = true }
 regex = "1"
 walkdir = "2"
 
+# Optional OpenTelemetry exporter — enabled via the `otel` feature.
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+[features]
+default = []
+# Wire OTLP exporter into the tracing subscriber. Without this feature the
+# binary stays dep-clean and the fmt subscriber is the only sink.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 serde_json = { workspace = true }
