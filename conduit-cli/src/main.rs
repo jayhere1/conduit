@@ -2130,7 +2130,6 @@ fn cmd_env_history(name: &str, dags_path: &PathBuf) -> Result<()> {
             }
             EnvHistoryReason::Apply { plan_id } => format!("apply (plan {})", plan_id),
             EnvHistoryReason::Manual => "manual".to_string(),
-            EnvHistoryReason::Apply { plan_id } => format!("apply plan {}", plan_id),
         };
         println!(
             "{:>7}  {:<24}  {:>9}  {}",
@@ -2602,7 +2601,7 @@ fn cmd_lineage(
     })?;
 
     let (connection, sql) = match &task.task_type {
-        conduit_common::dag::TaskType::Sql { connection, query } => {
+        conduit_common::dag::TaskType::Sql { connection, query, .. } => {
             (connection.as_str(), query.as_str())
         }
         other => {
@@ -3261,6 +3260,7 @@ async fn cmd_preview(
         TaskType::Sql {
             connection: task_conn,
             query,
+            ..
         } => {
             eprintln!("  Task: {}.{}", dag_id, task_id);
             eprintln!(
