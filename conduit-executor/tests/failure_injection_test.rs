@@ -31,6 +31,8 @@ fn make_task(id: &str, command: &str, timeout: Option<&str>) -> Task {
         resources: ResourceLimits::default(),
         incremental: None,
         contracts: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 

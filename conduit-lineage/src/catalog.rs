@@ -12,7 +12,9 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
+use crate::lineage_graph::TaskRef;
 use crate::schema::ColumnType;
 
 /// A column as known from a database catalog (information_schema).
@@ -60,6 +62,11 @@ impl CatalogColumn {
 #[derive(Debug, Clone, Default)]
 pub struct TableCatalog {
     tables: HashMap<(Option<String>, String), Vec<CatalogColumn>>,
+    /// Tracks which task produced each registered dataset (if any). Keyed
+    /// identically to `tables` so look-ups go through the same path.
+    /// Physical tables registered via `register_table` have no producer
+    /// entry; task-produced datasets registered via `register_dataset` do.
+    producers: HashMap<(Option<String>, String), TaskRef>,
 }
 
 impl TableCatalog {
@@ -67,7 +74,99 @@ impl TableCatalog {
     pub fn new() -> Self {
         Self {
             tables: HashMap::new(),
+            producers: HashMap::new(),
         }
+    }
+
+    /// Register a dataset produced by a task. The dataset becomes
+    /// resolvable by downstream SQL `FROM <qualified_name>` and
+    /// `lookup_producer(qualified_name)` returns the originating task.
+    ///
+    /// **Collision policy (within a single DAG):** task-produced datasets
+    /// win over previously registered physical tables. The clobber is
+    /// logged at WARN level so collisions are visible. Across DAGs, the
+    /// caller is responsible for keeping the catalog scoped — `stitch`
+    /// builds a fresh catalog per DAG.
+    pub fn register_dataset(
+        &mut self,
+        qualified_name: &str,
+        columns: Vec<CatalogColumn>,
+        producer: TaskRef,
+    ) {
+        let (schema, table) = split_qualified(qualified_name);
+        let key = (
+            schema.as_ref().map(|s| s.to_lowercase()),
+            table.to_lowercase(),
+        );
+
+        if self.tables.contains_key(&key) && !self.producers.contains_key(&key) {
+            warn!(
+                qualified_name = %qualified_name,
+                producer = %producer,
+                "dataset name collides with a previously registered physical table; task producer wins",
+            );
+        }
+
+        self.tables.insert(key.clone(), columns);
+        self.producers.insert(key, producer);
+    }
+
+    /// Look up the producer task for a dataset by qualified name. Returns
+    /// `None` for physical tables and unknown names.
+    ///
+    /// **Falls back to unqualified match** when the lookup name has no
+    /// schema and exactly one registered dataset has a matching table
+    /// segment. This is necessary because the SQL extractor strips
+    /// schema prefixes when building per-column `ColumnRef`s — without
+    /// the fallback, `FROM staging.orders` would fail to resolve back to
+    /// a producer registered as `"staging.orders"`. If multiple datasets
+    /// share the unqualified name, the lookup returns `None` (ambiguous)
+    /// — callers should warn and treat the column as unresolved.
+    pub fn lookup_producer(&self, qualified_name: &str) -> Option<&TaskRef> {
+        let (schema, table) = split_qualified(qualified_name);
+        let key = (
+            schema.as_ref().map(|s| s.to_lowercase()),
+            table.to_lowercase(),
+        );
+        if let Some(p) = self.producers.get(&key) {
+            return Some(p);
+        }
+        if schema.is_none() {
+            let table_lc = table.to_lowercase();
+            let matches: Vec<&TaskRef> = self
+                .producers
+                .iter()
+                .filter(|((_, t), _)| t == &table_lc)
+                .map(|(_, v)| v)
+                .collect();
+            if matches.len() == 1 {
+                return Some(matches[0]);
+            }
+        }
+        None
+    }
+
+    /// Look up columns by a single qualified name (`"schema.table"` or
+    /// `"table"`). Falls back to unqualified-match like
+    /// [`Self::lookup_producer`] for the same SQL-extractor reason.
+    pub fn lookup_via_qualified(&self, qualified_name: &str) -> Option<&[CatalogColumn]> {
+        let (schema, table) = split_qualified(qualified_name);
+        if let Some(cols) = self.lookup(schema.as_deref(), &table) {
+            return Some(cols);
+        }
+        if schema.is_none() {
+            let table_lc = table.to_lowercase();
+            let matches: Vec<&Vec<CatalogColumn>> = self
+                .tables
+                .iter()
+                .filter(|((_, t), _)| t == &table_lc)
+                .map(|(_, v)| v)
+                .collect();
+            if matches.len() == 1 {
+                return Some(matches[0].as_slice());
+            }
+        }
+        None
     }
 
     /// Register a table's columns. Schema and table name are lowercased.
@@ -171,6 +270,22 @@ impl TableCatalog {
     /// Whether the catalog is empty.
     pub fn is_empty(&self) -> bool {
         self.tables.is_empty()
+    }
+}
+
+/// Split `"schema.table"` into `(Some("schema"), "table")`, or `"table"`
+/// into `(None, "table")`. The catalog is two-tier; multi-level paths like
+/// `catalog.schema.table` are normalised to `(schema, table)`.
+fn split_qualified(name: &str) -> (Option<String>, String) {
+    let parts: Vec<&str> = name.split('.').collect();
+    match parts.as_slice() {
+        [] | [""] => (None, String::new()),
+        [t] => (None, (*t).to_string()),
+        [s, t] => (Some((*s).to_string()), (*t).to_string()),
+        rest => {
+            let n = rest.len();
+            (Some(rest[n - 2].to_string()), rest[n - 1].to_string())
+        }
     }
 }
 
@@ -399,6 +514,68 @@ mod tests {
         assert_eq!(parse_sql_type("float8"), ColumnType::Float);
         matches!(parse_sql_type("numeric(10,2)"), ColumnType::Decimal { .. });
         assert_eq!(parse_sql_type("unknown_type"), ColumnType::Unknown);
+    }
+
+    #[test]
+    fn register_dataset_resolves_producer() {
+        let mut cat = TableCatalog::new();
+        cat.register_dataset(
+            "staging.orders",
+            vec![
+                CatalogColumn::new("id", ColumnType::Integer),
+                CatalogColumn::new("amount", ColumnType::Float),
+            ],
+            TaskRef::new("warehouse", "extract_orders"),
+        );
+
+        let producer = cat.lookup_producer("staging.orders").unwrap();
+        assert_eq!(producer.dag_id, "warehouse");
+        assert_eq!(producer.task_id, "extract_orders");
+
+        // Schema lookups go through the standard `lookup` path.
+        let cols = cat.lookup(Some("staging"), "orders").unwrap();
+        assert_eq!(cols.len(), 2);
+    }
+
+    #[test]
+    fn physical_table_has_no_producer() {
+        let mut cat = TableCatalog::new();
+        cat.register_table(
+            Some("public"),
+            "orders",
+            vec![CatalogColumn::new("id", ColumnType::Integer)],
+        );
+        assert!(cat.lookup_producer("public.orders").is_none());
+    }
+
+    #[test]
+    fn dataset_clobbers_physical_table() {
+        let mut cat = TableCatalog::new();
+        cat.register_table(
+            Some("staging"),
+            "orders",
+            vec![CatalogColumn::new("original", ColumnType::Integer)],
+        );
+        cat.register_dataset(
+            "staging.orders",
+            vec![CatalogColumn::new("new", ColumnType::Integer)],
+            TaskRef::new("d", "t"),
+        );
+
+        let cols = cat.lookup(Some("staging"), "orders").unwrap();
+        assert_eq!(cols[0].name, "new");
+        assert!(cat.lookup_producer("staging.orders").is_some());
+    }
+
+    #[test]
+    fn unqualified_dataset_name() {
+        let mut cat = TableCatalog::new();
+        cat.register_dataset(
+            "scratch",
+            vec![CatalogColumn::new("col", ColumnType::Integer)],
+            TaskRef::new("d", "t"),
+        );
+        assert!(cat.lookup_producer("scratch").is_some());
     }
 
     #[test]

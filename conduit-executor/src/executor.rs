@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 /// Simple task completion state returned by the executor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +170,18 @@ impl TaskExecutor {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        name = "executor.dispatch",
+        skip(self, task, params),
+        fields(
+            dag_id = %dag_id,
+            run_id = %run_id,
+            task_id = %task.id,
+            attempt = attempt,
+            environment = %environment,
+            task_type = %task.task_type.kind()
+        )
+    )]
     async fn handle_dispatch_task(
         &mut self,
         task: Task,
@@ -248,58 +260,84 @@ impl TaskExecutor {
         };
 
         let registry = self.provider_registry.clone();
-        let handle = tokio::spawn(async move {
-            debug!(task_id = %task_id_clone, attempt = attempt, "Task execution started");
+        let span = info_span!(
+            "executor.task",
+            dag_id = %context.dag_id,
+            run_id = %context.run_id,
+            task_id = %context.task_id,
+            attempt = context.attempt,
+            environment = %context.environment,
+            task_type = %task.task_type.kind(),
+        );
+        let handle = tokio::spawn(
+            async move {
+                debug!(task_id = %task_id_clone, attempt = attempt, "Task execution started");
 
-            match Self::execute_task(&task, &context, registry.as_ref().map(|r| r.as_ref())).await {
-                Ok((outcome, xcom, duration)) => {
-                    info!(
-                        task_id = %task_id_clone,
-                        duration_ms = duration.as_millis(),
-                        "Task execution completed"
-                    );
+                match Self::execute_task(&task, &context, registry.as_ref().map(|r| r.as_ref()))
+                    .await
+                {
+                    Ok((outcome, xcom, duration)) => {
+                        info!(
+                            task_id = %task_id_clone,
+                            duration_ms = duration.as_millis(),
+                            outcome = ?outcome,
+                            "Task execution completed"
+                        );
 
-                    // (XCom persistence happens inside ProcessRunner so all
-                    // callers benefit, including the CLI which bypasses
-                    // TaskExecutor and calls ProcessRunner::run directly.)
+                        // (XCom persistence happens inside ProcessRunner so all
+                        // callers benefit, including the CLI which bypasses
+                        // TaskExecutor and calls ProcessRunner::run directly.)
 
-                    let event = ExecutorEvent::TaskCompleted {
-                        task_id: task_id_clone,
-                        run_id: run_id_clone,
-                        attempt,
-                        outcome,
-                        xcom,
-                        duration,
-                    };
+                        let event = ExecutorEvent::TaskCompleted {
+                            task_id: task_id_clone,
+                            run_id: run_id_clone,
+                            attempt,
+                            outcome,
+                            xcom,
+                            duration,
+                        };
 
-                    if let Err(e) = event_tx.send(event) {
-                        error!(error = %e, "Failed to send TaskCompleted event");
+                        if let Err(e) = event_tx.send(event) {
+                            error!(error = %e, "Failed to send TaskCompleted event");
+                        }
                     }
-                }
-                Err(e) => {
-                    error!(
-                        task_id = %task_id_clone,
-                        error = %e,
-                        "Task execution failed"
-                    );
+                    Err(e) => {
+                        error!(
+                            task_id = %task_id_clone,
+                            error = %e,
+                            "Task execution failed"
+                        );
 
-                    let event = ExecutorEvent::TaskFailed {
-                        task_id: task_id_clone,
-                        run_id: run_id_clone,
-                        attempt,
-                        error: e.to_string(),
-                    };
+                        let event = ExecutorEvent::TaskFailed {
+                            task_id: task_id_clone,
+                            run_id: run_id_clone,
+                            attempt,
+                            error: e.to_string(),
+                        };
 
-                    if let Err(send_err) = event_tx.send(event) {
-                        error!(error = %send_err, "Failed to send TaskFailed event");
+                        if let Err(send_err) = event_tx.send(event) {
+                            error!(error = %send_err, "Failed to send TaskFailed event");
+                        }
                     }
                 }
             }
-        });
+            .instrument(span),
+        );
 
         self.active_tasks.insert(task_id, handle);
     }
 
+    #[tracing::instrument(
+        name = "executor.execute_task",
+        skip(task, context, registry),
+        fields(
+            dag_id = %context.dag_id,
+            run_id = %context.run_id,
+            task_id = %context.task_id,
+            attempt = context.attempt,
+            task_type = %task.task_type.kind()
+        )
+    )]
     async fn execute_task(
         task: &Task,
         context: &TaskContext,
@@ -333,6 +371,21 @@ impl TaskExecutor {
                         TaskOutcome::Failed
                     }
                 };
+
+                match outcome {
+                    TaskOutcome::Success => {
+                        info!(duration_ms = duration.as_millis(), "Task succeeded");
+                    }
+                    TaskOutcome::Failed => {
+                        warn!(duration_ms = duration.as_millis(), "Task failed");
+                    }
+                    TaskOutcome::Retry => {
+                        warn!(duration_ms = duration.as_millis(), "Task requested retry");
+                    }
+                    TaskOutcome::Skipped => {
+                        info!(duration_ms = duration.as_millis(), "Task skipped");
+                    }
+                }
 
                 Ok((outcome, output.xcom, duration))
             }

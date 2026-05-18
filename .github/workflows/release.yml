@@ -1,0 +1,171 @@
+name: Release
+
+# Tag-only trigger. No workflow_dispatch — releases must come from a signed,
+# pushed tag (`vX.Y.Z`) to avoid accidental runs from the Actions UI.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: conduit
+  CRATE_NAME: conduit-cli
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            use_cross: true
+          - platform: aarch64-linux
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            use_cross: true
+          - platform: x86_64-macos
+            target: x86_64-apple-darwin
+            runner: macos-latest
+            use_cross: false
+          - platform: aarch64-macos
+            target: aarch64-apple-darwin
+            runner: macos-latest
+            use_cross: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        shell: bash
+        run: |
+          ref="${GITHUB_REF#refs/tags/}"
+          version="${ref#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          # clang/llvm ships with Xcode CLT; rocksdb uses bundled C++ build
+          echo "Using system clang: $(clang --version | head -n1)"
+
+      - name: Install cross (linux musl)
+        if: matrix.use_cross == true
+        shell: bash
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross --locked --rev 99b8069c89
+
+      - name: Build release binary (native)
+        if: matrix.use_cross == false
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} -p ${{ env.CRATE_NAME }}
+
+      - name: Build release binary (cross)
+        if: matrix.use_cross == true
+        shell: bash
+        run: cross build --release --target ${{ matrix.target }} -p ${{ env.CRATE_NAME }}
+
+      - name: Strip binary
+        shell: bash
+        run: |
+          bin_path="target/${{ matrix.target }}/release/${BIN_NAME}"
+          if [ ! -f "$bin_path" ]; then
+            echo "Binary not found at $bin_path" >&2
+            ls -la "target/${{ matrix.target }}/release/" || true
+            exit 1
+          fi
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            strip "$bin_path"
+          else
+            # On linux runners stripping a cross-built aarch64 binary with the
+            # host `strip` works because the format is still ELF; use llvm-strip
+            # if available, otherwise the host strip handles it for x86_64 and
+            # tolerates aarch64 as well on modern binutils.
+            if command -v llvm-strip >/dev/null 2>&1; then
+              llvm-strip "$bin_path" || strip "$bin_path" || true
+            else
+              strip "$bin_path" || true
+            fi
+          fi
+
+      - name: Package tarball
+        id: package
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          platform="${{ matrix.platform }}"
+          archive="${BIN_NAME}-${version}-${platform}.tar.gz"
+          staging="${BIN_NAME}-${version}-${platform}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "$staging/"
+          cp README.md "$staging/" 2>/dev/null || true
+          cp LICENSE "$staging/" 2>/dev/null || true
+          cp LICENSE-MIT "$staging/" 2>/dev/null || true
+          cp LICENSE-APACHE "$staging/" 2>/dev/null || true
+          tar czf "$archive" "$staging"
+          # sha256 for downstream verification
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "${archive}.sha256"
+          else
+            shasum -a 256 "$archive" > "${archive}.sha256"
+          fi
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${archive}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true

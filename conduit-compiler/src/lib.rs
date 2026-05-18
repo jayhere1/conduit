@@ -12,6 +12,7 @@
 pub mod parser;
 pub mod plan;
 pub mod resolver;
+pub mod sql_io_inference;
 pub mod yaml_parser;
 
 pub use parser::DagParser;

@@ -59,6 +59,75 @@ pub struct Dag {
     /// Prevents a flood of runs after extended downtime. None means no limit.
     #[serde(default)]
     pub max_catchup_runs: Option<u32>,
+
+    /// When true, cross-task lineage stitching treats a column read with no
+    /// matching declared upstream column as a compile error rather than a
+    /// warning. Opt-in per DAG; default false to keep existing pipelines
+    /// compiling.
+    #[serde(default)]
+    pub lineage_strict: bool,
+}
+
+/// A column within a [`Dataset`]. The `dtype` is informational — lineage
+/// stitching only matches by name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ColumnSpec {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dtype: Option<String>,
+}
+
+impl ColumnSpec {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            dtype: None,
+        }
+    }
+}
+
+/// A named collection of columns produced or consumed by a task.
+///
+/// Datasets are the cross-task boundary: a Python task declares its outputs
+/// as `Dataset`s, and a downstream SQL task reading a `FROM` clause that
+/// matches the dataset's qualified `name` resolves columns against this
+/// declared schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Dataset {
+    /// Schema-qualified name (e.g. `"staging.orders"`). For anonymous
+    /// datasets the name is the producing task id.
+    pub name: String,
+    pub columns: Vec<ColumnSpec>,
+    /// `true` when the dataset was synthesised from a task id (the SQL had
+    /// no `INSERT INTO` / `CREATE TABLE AS` and the task didn't declare a
+    /// `target`). Anonymous datasets are not resolvable by SQL `FROM`
+    /// clauses; only direct task-graph consumers can see them.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub anonymous: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl Dataset {
+    pub fn new(name: impl Into<String>, columns: Vec<ColumnSpec>) -> Self {
+        Self {
+            name: name.into(),
+            columns,
+            anonymous: false,
+        }
+    }
+
+    /// Build an anonymous dataset keyed on a task id (used as the lineage
+    /// fallback for plain `SELECT` tasks with no declared target).
+    pub fn anonymous(task_id: impl Into<String>) -> Self {
+        Self {
+            name: task_id.into(),
+            columns: Vec::new(),
+            anonymous: true,
+        }
+    }
 }
 
 fn default_catchup() -> bool {
@@ -105,6 +174,18 @@ pub struct Task {
     /// Data quality contracts. Validated during plan/apply — errors block deployment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contracts: Option<TaskContracts>,
+
+    /// Datasets this task reads. Populated either from explicit declarations
+    /// (`@task(inputs=[…])`) or, for SQL tasks, inferred from the query's
+    /// `FROM` / `JOIN` clauses by the compiler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<Dataset>,
+
+    /// Datasets this task writes. Populated from explicit declarations
+    /// (`@task(outputs=[…])`) or, for SQL tasks, inferred from `INSERT INTO`
+    /// / `CREATE TABLE AS` / the YAML `target:` field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<Dataset>,
 }
 
 /// How a task dependency is expressed.
@@ -133,7 +214,16 @@ pub enum TaskType {
     /// Execute a bash command.
     Bash { command: String },
     /// Execute a SQL query.
-    Sql { connection: String, query: String },
+    ///
+    /// `target` names the dataset the query writes to. When `None`, the
+    /// compiler falls back to extracting `INSERT INTO …` / `CREATE TABLE …`
+    /// from the query AST, or to the task id as an anonymous dataset.
+    Sql {
+        connection: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
     /// An external sensor that polls for a condition.
     Sensor {
         sensor_type: String,
@@ -141,6 +231,19 @@ pub enum TaskType {
     },
     /// A generic executable (stdin/stdout protocol).
     Executable { command: String, args: Vec<String> },
+}
+
+impl TaskType {
+    /// Stable task kind label for logs, traces, and metrics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            TaskType::Python { .. } => "python",
+            TaskType::Bash { .. } => "bash",
+            TaskType::Sql { .. } => "sql",
+            TaskType::Sensor { .. } => "sensor",
+            TaskType::Executable { .. } => "executable",
+        }
+    }
 }
 
 /// Resource limits for a task's cgroup.

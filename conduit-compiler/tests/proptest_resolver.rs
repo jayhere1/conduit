@@ -27,6 +27,8 @@ fn make_task(id: &str, deps: &[String]) -> ParsedTask {
         raw_dependencies: deps.to_vec(),
         contracts: None,
         parameters_text: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 
@@ -62,6 +64,7 @@ fn random_parsed_dag(num_tasks: usize, dep_prob: f64, seed: u64) -> ParsedDag {
         on_failure: None,
         tasks,
         source_file: "proptest.rs".to_string(),
+        lineage_strict: false,
     }
 }
 

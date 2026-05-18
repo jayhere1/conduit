@@ -27,8 +27,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Query, Select, SelectItem, SetExpr,
-    Statement, TableFactor, TableWithJoins, WindowSpec, WindowType,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName, Query, Select, SelectItem,
+    SetExpr, Statement, TableFactor, TableWithJoins, WindowSpec, WindowType,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -46,6 +46,12 @@ pub struct SqlLineage {
     pub source_tables: Vec<TableRef>,
     /// Column-level mappings: output column → input columns it depends on.
     pub column_mappings: Vec<ColumnMapping>,
+    /// The table the query writes to, when derivable from the AST.
+    /// `Some` for `INSERT INTO …` and `CREATE TABLE … AS`; `None` for
+    /// bare `SELECT` statements (the caller may then fall back to a
+    /// task-declared or task-id-derived target).
+    #[serde(default)]
+    pub target_table: Option<TableRef>,
 }
 
 /// An output column from a SELECT clause.
@@ -136,19 +142,23 @@ impl SqlLineageExtractor {
             Statement::Query(q) => Self::extract_from_query(q, &HashMap::new(), catalog),
             // INSERT INTO target_table SELECT ... FROM source_tables
             Statement::Insert(insert) => {
-                if let Some(ref source) = insert.source {
+                let mut lineage = if let Some(ref source) = insert.source {
                     Self::extract_from_query(source, &HashMap::new(), catalog)
                 } else {
                     Self::empty()
-                }
+                };
+                lineage.target_table = Some(object_name_to_table_ref(&insert.table_name));
+                lineage
             }
             // CREATE TABLE ... AS SELECT ...
             Statement::CreateTable(ct) => {
-                if let Some(ref query) = ct.query {
+                let mut lineage = if let Some(ref query) = ct.query {
                     Self::extract_from_query(query, &HashMap::new(), catalog)
                 } else {
                     Self::empty()
-                }
+                };
+                lineage.target_table = Some(object_name_to_table_ref(&ct.name));
+                lineage
             }
             _ => Self::empty(),
         }
@@ -159,6 +169,7 @@ impl SqlLineageExtractor {
             output_columns: Vec::new(),
             source_tables: Vec::new(),
             column_mappings: Vec::new(),
+            target_table: None,
         }
     }
 
@@ -252,7 +263,7 @@ impl SqlLineageExtractor {
                     if !existing
                         .inputs
                         .iter()
-                        .any(|i| i.task_id == input.task_id && i.column_name == input.column_name)
+                        .any(|i| i.source == input.source && i.column_name == input.column_name)
                     {
                         existing.inputs.push(input);
                     }
@@ -266,6 +277,7 @@ impl SqlLineageExtractor {
             output_columns,
             source_tables,
             column_mappings,
+            target_table: None,
         }
     }
 
@@ -313,6 +325,7 @@ impl SqlLineageExtractor {
             output_columns,
             source_tables,
             column_mappings,
+            target_table: None,
         }
     }
 
@@ -428,10 +441,10 @@ impl SqlLineageExtractor {
                                     });
                                     mappings.push(ColumnMapping {
                                         output: col_name.clone(),
-                                        inputs: vec![ColumnRef {
-                                            task_id: table.name.clone(),
-                                            column_name: col_name,
-                                        }],
+                                        inputs: vec![ColumnRef::table(
+                                            table.name.clone(),
+                                            col_name,
+                                        )],
                                     });
                                 }
                             }
@@ -447,10 +460,7 @@ impl SqlLineageExtractor {
                         for table in source_tables {
                             mappings.push(ColumnMapping {
                                 output: "*".to_string(),
-                                inputs: vec![ColumnRef {
-                                    task_id: table.name.clone(),
-                                    column_name: "*".to_string(),
-                                }],
+                                inputs: vec![ColumnRef::table(table.name.clone(), "*")],
                             });
                         }
                     }
@@ -478,10 +488,7 @@ impl SqlLineageExtractor {
                                 });
                                 mappings.push(ColumnMapping {
                                     output: col_name.clone(),
-                                    inputs: vec![ColumnRef {
-                                        task_id: resolved.clone(),
-                                        column_name: col_name,
-                                    }],
+                                    inputs: vec![ColumnRef::table(resolved.clone(), col_name)],
                                 });
                             }
                         }
@@ -495,10 +502,7 @@ impl SqlLineageExtractor {
                         });
                         mappings.push(ColumnMapping {
                             output: format!("{}.*", resolved),
-                            inputs: vec![ColumnRef {
-                                task_id: resolved,
-                                column_name: "*".to_string(),
-                            }],
+                            inputs: vec![ColumnRef::table(resolved, "*")],
                         });
                     }
                 }
@@ -593,8 +597,8 @@ impl SqlLineageExtractor {
         let mut refs = Vec::new();
         Self::collect_column_refs(expr, alias_map, tables, catalog, &mut refs);
 
-        refs.sort_by(|a, b| (&a.task_id, &a.column_name).cmp(&(&b.task_id, &b.column_name)));
-        refs.dedup_by(|a, b| a.task_id == b.task_id && a.column_name == b.column_name);
+        refs.sort_by(|a, b| (a.qualifier(), &a.column_name).cmp(&(b.qualifier(), &b.column_name)));
+        refs.dedup_by(|a, b| a.source == b.source && a.column_name == b.column_name);
 
         refs
     }
@@ -628,20 +632,14 @@ impl SqlLineageExtractor {
                         .map(|t| t.name.clone())
                         .unwrap_or_else(|| "unknown".to_string())
                 };
-                refs.push(ColumnRef {
-                    task_id: table_name,
-                    column_name: col_name,
-                });
+                refs.push(ColumnRef::table(table_name, col_name));
             }
             Expr::CompoundIdentifier(parts) => {
                 if parts.len() >= 2 {
                     let table_part = parts[parts.len() - 2].value.to_lowercase();
                     let col_part = parts[parts.len() - 1].value.to_lowercase();
                     let resolved = alias_map.get(&table_part).cloned().unwrap_or(table_part);
-                    refs.push(ColumnRef {
-                        task_id: resolved,
-                        column_name: col_part,
-                    });
+                    refs.push(ColumnRef::table(resolved, col_part));
                 } else if parts.len() == 1 {
                     let col_name = parts[0].value.to_lowercase();
                     let table_name = if let Some(cat) = catalog {
@@ -662,10 +660,7 @@ impl SqlLineageExtractor {
                             .map(|t| t.name.clone())
                             .unwrap_or_else(|| "unknown".to_string())
                     };
-                    refs.push(ColumnRef {
-                        task_id: table_name,
-                        column_name: col_name,
-                    });
+                    refs.push(ColumnRef::table(table_name, col_name));
                 }
             }
             Expr::Function(func) => {
@@ -791,6 +786,27 @@ impl SqlLineageExtractor {
     }
 }
 
+/// Convert a `sqlparser` [`ObjectName`] into a [`TableRef`].
+///
+/// `ObjectName` is a dotted identifier path; we treat the last segment as the
+/// table name and the segment before it (if any) as the schema qualifier.
+/// Three-segment names like `catalog.schema.table` collapse to `schema.table`
+/// — the catalog qualifier is dropped because the lineage model is two-tier.
+fn object_name_to_table_ref(name: &ObjectName) -> TableRef {
+    let parts: Vec<String> = name.0.iter().map(|i| i.value.clone()).collect();
+    let (schema, table) = match parts.as_slice() {
+        [] => (None, String::new()),
+        [t] => (None, t.clone()),
+        [s, t] => (Some(s.clone()), t.clone()),
+        [.., s, t] => (Some(s.clone()), t.clone()),
+    };
+    TableRef {
+        name: table,
+        alias: None,
+        schema,
+    }
+}
+
 /// Replace Jinja template blocks with SQL-safe placeholder identifiers so the
 /// downstream SQL parser doesn't reject otherwise-valid SQL.
 ///
@@ -898,7 +914,7 @@ mod tests {
         assert_eq!(lineage.output_columns[0].name, "*");
 
         assert_eq!(lineage.column_mappings.len(), 1);
-        assert_eq!(lineage.column_mappings[0].inputs[0].task_id, "orders");
+        assert_eq!(lineage.column_mappings[0].inputs[0].qualifier(), "orders");
     }
 
     #[test]
@@ -927,7 +943,7 @@ mod tests {
         assert!(total_mapping
             .inputs
             .iter()
-            .any(|r| r.task_id == "orders" && r.column_name == "total"));
+            .any(|r| r.qualifier() == "orders" && r.column_name == "total"));
     }
 
     #[test]
@@ -1236,7 +1252,7 @@ mod tests {
             active_mapping
                 .inputs
                 .iter()
-                .any(|r| r.task_id == "customers" && r.column_name == "active"),
+                .any(|r| r.qualifier() == "customers" && r.column_name == "active"),
             "active should be resolved to customers, got: {:?}",
             active_mapping.inputs
         );
@@ -1258,7 +1274,10 @@ mod tests {
             .expect("should have mapping for active");
 
         // Without catalog, defaults to first table
-        assert!(active_mapping.inputs.iter().any(|r| r.task_id == "orders"));
+        assert!(active_mapping
+            .inputs
+            .iter()
+            .any(|r| r.qualifier() == "orders"));
     }
 
     #[test]
@@ -1281,7 +1300,7 @@ mod tests {
                 .iter()
                 .find(|m| m.output == *col)
                 .unwrap_or_else(|| panic!("should have mapping for {}", col));
-            assert_eq!(mapping.inputs[0].task_id, "customers");
+            assert_eq!(mapping.inputs[0].qualifier(), "customers");
             assert_eq!(mapping.inputs[0].column_name, *col);
         }
     }
@@ -1354,7 +1373,10 @@ mod tests {
             .find(|m| m.output == "name")
             .expect("should have mapping for name");
         assert!(
-            name_mapping.inputs.iter().any(|r| r.task_id == "customers"),
+            name_mapping
+                .inputs
+                .iter()
+                .any(|r| r.qualifier() == "customers"),
             "name should resolve to customers, got: {:?}",
             name_mapping.inputs
         );
@@ -1369,7 +1391,7 @@ mod tests {
             total_mapping
                 .inputs
                 .iter()
-                .any(|r| r.task_id == "order_summary"),
+                .any(|r| r.qualifier() == "order_summary"),
             "total should resolve to order_summary, got: {:?}",
             total_mapping.inputs
         );
@@ -1390,7 +1412,7 @@ mod tests {
             .find(|m| m.output == "id")
             .expect("should have mapping for id");
         // Ambiguous, falls back to first table
-        assert_eq!(id_mapping.inputs[0].task_id, "orders");
+        assert_eq!(id_mapping.inputs[0].qualifier(), "orders");
     }
 
     #[test]
@@ -1436,5 +1458,42 @@ mod tests {
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(col_names, vec!["id", "amount"]);
+    }
+
+    // ─── target_table extraction (R1) ──────────────────────────────────
+
+    #[test]
+    fn target_table_none_for_plain_select() {
+        let lineage = SqlLineageExtractor::extract("SELECT id, amount FROM orders");
+        assert!(lineage.target_table.is_none());
+    }
+
+    #[test]
+    fn target_table_set_for_insert() {
+        let lineage = SqlLineageExtractor::extract(
+            "INSERT INTO analytics.daily_revenue SELECT id, amount FROM orders",
+        );
+        let t = lineage.target_table.expect("INSERT should yield target");
+        assert_eq!(t.name, "daily_revenue");
+        assert_eq!(t.schema.as_deref(), Some("analytics"));
+    }
+
+    #[test]
+    fn target_table_set_for_ctas() {
+        let lineage = SqlLineageExtractor::extract(
+            "CREATE TABLE staging.cleaned AS SELECT id FROM raw.orders",
+        );
+        let t = lineage.target_table.expect("CTAS should yield target");
+        assert_eq!(t.name, "cleaned");
+        assert_eq!(t.schema.as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn target_table_unqualified_create_or_replace() {
+        let lineage =
+            SqlLineageExtractor::extract("CREATE OR REPLACE TABLE raw_events AS SELECT 1 AS id");
+        let t = lineage.target_table.expect("CTAS should yield target");
+        assert_eq!(t.name, "raw_events");
+        assert!(t.schema.is_none());
     }
 }

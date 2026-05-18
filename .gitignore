@@ -41,3 +41,6 @@ conduit-vscode/*.vsix
 *.cast
 __pycache__/
 *.pyc
+
+# Local dev tooling (Claude Code config, agent worktrees, etc.)
+.claude/

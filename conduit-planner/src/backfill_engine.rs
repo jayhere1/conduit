@@ -243,6 +243,7 @@ mod tests {
             compiled_at: Utc::now(),
             catchup: true,
             max_catchup_runs: None,
+            lineage_strict: false,
         }
     }
 

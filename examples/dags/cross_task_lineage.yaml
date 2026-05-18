@@ -1,0 +1,42 @@
+id: cross_task_lineage_sql
+description: |
+  End-to-end column trace through three SQL tasks. The middle task's
+  GROUP BY tells the lineage extractor that `total` is derived from
+  `amount`, so a trace from `load.total` reaches `seed.amount` through
+  `transform`. Try:
+
+    conduit lineage trace \
+        --dag cross_task_lineage_sql \
+        --column load.total \
+        --dags-path examples/dags
+
+schedule: "@daily"
+tags: [lineage, demo]
+lineage_strict: true
+
+tasks:
+  seed:
+    type: sql
+    connection: warehouse
+    query: |
+      CREATE TABLE staging.orders AS
+      SELECT 1 AS id, 1 AS customer_id, 100 AS amount
+
+  transform:
+    type: sql
+    connection: warehouse
+    depends_on: [seed]
+    query: |
+      INSERT INTO analytics.daily_revenue
+      SELECT customer_id, SUM(amount) AS total
+      FROM staging.orders
+      GROUP BY customer_id
+
+  load:
+    type: sql
+    connection: warehouse
+    depends_on: [transform]
+    query: |
+      INSERT INTO reporting.summary
+      SELECT customer_id, total
+      FROM analytics.daily_revenue

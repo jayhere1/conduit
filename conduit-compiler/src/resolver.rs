@@ -11,6 +11,7 @@ use conduit_common::error::{ConduitError, ConduitResult};
 use tracing::debug;
 
 use crate::parser::ParsedDag;
+use crate::sql_io_inference;
 
 /// Resolves dependencies and produces fully validated DAGs.
 pub struct DependencyResolver;
@@ -108,12 +109,14 @@ impl DependencyResolver {
                     trigger_rule: TriggerRule::default(),
                     incremental: None,
                     contracts: pt.contracts,
+                    inputs: pt.inputs,
+                    outputs: pt.outputs,
                 };
                 (task.id.clone(), task)
             })
             .collect();
 
-        Ok(Dag {
+        let mut dag = Dag {
             id: parsed.id,
             description: parsed.description,
             schedule: parsed.schedule,
@@ -126,7 +129,14 @@ impl DependencyResolver {
             compiled_at: chrono::Utc::now(),
             catchup: true,
             max_catchup_runs: None,
-        })
+            lineage_strict: parsed.lineage_strict,
+        };
+
+        // Infer SQL task dataset I/O so cross-task lineage stitching has a
+        // uniform model. Explicit declarations on the Task are preserved.
+        sql_io_inference::infer_sql_io(&mut dag);
+
+        Ok(dag)
     }
 
     /// Topological sort using Kahn's algorithm.
@@ -217,6 +227,8 @@ mod tests {
             raw_dependencies: deps.into_iter().map(String::from).collect(),
             contracts: None,
             parameters_text: String::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 
@@ -230,6 +242,7 @@ mod tests {
             on_failure: None,
             tasks,
             source_file: "test.py".to_string(),
+            lineage_strict: false,
         }
     }
 

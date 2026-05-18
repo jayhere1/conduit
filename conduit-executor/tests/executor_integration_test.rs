@@ -20,6 +20,8 @@ fn make_bash_task(id: &str, command: &str) -> Task {
         resources: ResourceLimits::default(),
         incremental: None,
         contracts: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 

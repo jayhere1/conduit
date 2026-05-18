@@ -115,6 +115,41 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/lineage/catalog/refresh",
             post(handlers::lineage::refresh_catalog),
         )
+        // ── OpenLineage ingest ───────────────────────────────────
+        // Spec-compliant path so external producers (Airflow/dbt/Spark
+        // OpenLineage exporters) need only swap the base URL.
+        .route(
+            "/openlineage/v1/lineage",
+            post(handlers::openlineage_ingest::ingest_event),
+        )
+        .route(
+            "/openlineage/events",
+            get(handlers::openlineage_ingest::list_events),
+        )
+        .route(
+            "/openlineage/datasets/:namespace/:name",
+            get(handlers::openlineage_ingest::get_dataset),
+        )
+        .route(
+            "/openlineage/stats",
+            get(handlers::openlineage_ingest::stats),
+        )
+        // Unified dataset view: fuses internal Conduit lineage with
+        // ingested OpenLineage events into a single per-dataset
+        // response. This is what the UI Datasets tab consumes.
+        .route(
+            "/lineage/datasets/:namespace/:name/unified",
+            get(handlers::openlineage_ingest::unified_dataset_view),
+        )
+        // Plan + stitched-lineage cache, observed and manually flushed.
+        .route(
+            "/lineage/cache/stats",
+            get(handlers::openlineage_ingest::cache_stats),
+        )
+        .route(
+            "/lineage/cache/invalidate",
+            post(handlers::openlineage_ingest::cache_invalidate),
+        )
         // ── Contracts ────────────────────────────────────────────
         .route("/contracts", get(handlers::contracts::list_contracts))
         .route(

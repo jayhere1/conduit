@@ -30,6 +30,9 @@ pub struct ParsedDag {
     pub on_failure: Option<String>,
     pub tasks: Vec<ParsedTask>,
     pub source_file: String,
+    /// Opt-in: when true, cross-task lineage stitching escalates unresolved
+    /// column references from warnings to compile errors.
+    pub lineage_strict: bool,
 }
 
 /// A task as extracted from the AST (before dependency resolution).
@@ -50,6 +53,10 @@ pub struct ParsedTask {
     /// Used by `extract_default_arg_deps` to discover deps expressed via the
     /// SDK-documented `def fn(param=other_task)` pattern.
     pub parameters_text: String,
+    /// Datasets read by this task, as declared via `@task(inputs=[…])`.
+    pub inputs: Vec<Dataset>,
+    /// Datasets written by this task, as declared via `@task(outputs=[…])`.
+    pub outputs: Vec<Dataset>,
 }
 
 impl DagParser {
@@ -178,6 +185,10 @@ impl DagParser {
             on_failure: dag_args.get("on_failure").cloned(),
             tasks,
             source_file: file_name.to_string(),
+            lineage_strict: dag_args
+                .get("lineage_strict")
+                .map(|v| v.trim().eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         }))
     }
 
@@ -342,6 +353,21 @@ impl DagParser {
             .map(|n| self.node_text(&n, source))
             .unwrap_or_default();
 
+        let inputs = match task_args.get("inputs") {
+            Some(text) => parse_dataset_list(text).map_err(|e| ConduitError::ParseError {
+                file: file_name.to_string(),
+                message: format!("@task '{}': invalid inputs=…: {}", task_id, e),
+            })?,
+            None => Vec::new(),
+        };
+        let outputs = match task_args.get("outputs") {
+            Some(text) => parse_dataset_list(text).map_err(|e| ConduitError::ParseError {
+                file: file_name.to_string(),
+                message: format!("@task '{}': invalid outputs=…: {}", task_id, e),
+            })?,
+            None => Vec::new(),
+        };
+
         Ok(Some(ParsedTask {
             id: task_id,
             task_type,
@@ -359,6 +385,8 @@ impl DagParser {
             raw_dependencies: Vec::new(),
             contracts: None, // Python contracts are extracted via decorator analysis (future)
             parameters_text,
+            inputs,
+            outputs,
         }))
     }
 
@@ -573,6 +601,254 @@ impl Default for DagParser {
     }
 }
 
+// ── Dataset list parser for @task(inputs=…, outputs=…) ────────────────
+//
+// Tree-sitter doesn't give us a typed AST per Python expression — the
+// existing decorator extractor only captures keyword-argument values as
+// verbatim text. We re-parse that text to produce strongly-typed
+// `Dataset` literals, rejecting anything that isn't a static
+// `Dataset(...)` / `ColumnSpec(...)` call.
+
+/// Parse the text following `outputs=` or `inputs=`. Must be a list literal
+/// of `Dataset(...)` calls. Returns an error pointing at the first
+/// non-statically-resolvable construct.
+fn parse_dataset_list(text: &str) -> Result<Vec<Dataset>, String> {
+    let inner = strip_list_brackets(text)?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    for raw_item in DagParser::split_args(inner) {
+        let item = raw_item.trim();
+        let (ctor, args_inner) = parse_call(item)?;
+        if ctor != "Dataset" {
+            return Err(format!(
+                "expected `Dataset(...)`, got `{}(…)` (lineage decorators may only use Dataset/ColumnSpec literals)",
+                ctor
+            ));
+        }
+        out.push(parse_dataset_args(args_inner)?);
+    }
+    Ok(out)
+}
+
+fn parse_dataset_args(text: &str) -> Result<Dataset, String> {
+    let parts = DagParser::split_args(text);
+    if parts.is_empty() {
+        return Err("Dataset() requires a name argument".to_string());
+    }
+
+    let mut name: Option<String> = None;
+    let mut columns: Vec<ColumnSpec> = Vec::new();
+
+    for (idx, raw) in parts.iter().enumerate() {
+        let part = raw.trim();
+        if let Some(eq) = top_level_eq_pos(part) {
+            let key = part[..eq].trim();
+            let val = part[eq + 1..].trim();
+            match key {
+                "name" => name = Some(parse_string_literal(val)?),
+                "columns" => columns = parse_column_list(val)?,
+                other => return Err(format!("Dataset has no field `{}`", other)),
+            }
+        } else if idx == 0 {
+            name = Some(parse_string_literal(part)?);
+        } else {
+            return Err(format!("unexpected positional Dataset arg: `{}`", part));
+        }
+    }
+
+    let name = name.ok_or_else(|| "Dataset(...) missing name".to_string())?;
+    Ok(Dataset::new(name, columns))
+}
+
+fn parse_column_list(text: &str) -> Result<Vec<ColumnSpec>, String> {
+    let inner = strip_list_brackets(text)?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for raw_item in DagParser::split_args(inner) {
+        let item = raw_item.trim();
+        let (ctor, args_inner) = parse_call(item)?;
+        if ctor != "ColumnSpec" {
+            return Err(format!(
+                "expected `ColumnSpec(...)` in columns=…, got `{}(…)`",
+                ctor
+            ));
+        }
+        out.push(parse_columnspec_args(args_inner)?);
+    }
+    Ok(out)
+}
+
+fn parse_columnspec_args(text: &str) -> Result<ColumnSpec, String> {
+    let parts = DagParser::split_args(text);
+    if parts.is_empty() {
+        return Err("ColumnSpec() requires a name argument".to_string());
+    }
+
+    let mut name: Option<String> = None;
+    let mut dtype: Option<String> = None;
+
+    for (idx, raw) in parts.iter().enumerate() {
+        let part = raw.trim();
+        if let Some(eq) = top_level_eq_pos(part) {
+            let key = part[..eq].trim();
+            let val = part[eq + 1..].trim();
+            match key {
+                "name" => name = Some(parse_string_literal(val)?),
+                "dtype" => dtype = Some(parse_string_literal(val)?),
+                other => return Err(format!("ColumnSpec has no field `{}`", other)),
+            }
+        } else if idx == 0 {
+            name = Some(parse_string_literal(part)?);
+        } else {
+            return Err(format!("unexpected positional ColumnSpec arg: `{}`", part));
+        }
+    }
+
+    let name = name.ok_or_else(|| "ColumnSpec(...) missing name".to_string())?;
+    Ok(ColumnSpec { name, dtype })
+}
+
+/// Split `Constructor(arg, arg, …)` into `("Constructor", "arg, arg, …")`.
+fn parse_call(text: &str) -> Result<(&str, &str), String> {
+    let open = text.find('(').ok_or_else(|| {
+        format!(
+            "expected a constructor call like `Dataset(...)`, got `{}`",
+            text
+        )
+    })?;
+    if !text.ends_with(')') {
+        return Err(format!("unterminated call expression: `{}`", text));
+    }
+    let ctor = text[..open].trim();
+    let inner = &text[open + 1..text.len() - 1];
+    Ok((ctor, inner))
+}
+
+/// Strip `[ … ]` from a list literal. Returns the inner text.
+fn strip_list_brackets(text: &str) -> Result<&str, String> {
+    let trimmed = text.trim();
+    let stripped = trimmed
+        .strip_prefix('[')
+        .ok_or_else(|| format!("expected `[`, got `{}`", trimmed))?;
+    let stripped = stripped
+        .strip_suffix(']')
+        .ok_or_else(|| format!("expected `]`, got `{}`", trimmed))?;
+    Ok(stripped)
+}
+
+/// Find the position of `=` at bracket-depth 0 (skipping `==`).
+fn top_level_eq_pos(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut quote = b'"';
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == quote {
+                in_string = false;
+            }
+        } else {
+            match c {
+                b'"' | b'\'' => {
+                    in_string = true;
+                    quote = c;
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b'=' if depth == 0 => {
+                    let next = bytes.get(i + 1).copied();
+                    if next != Some(b'=') {
+                        return Some(i);
+                    } else {
+                        i += 1; // skip ==
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse a Python string literal — must be a static `"..."` or `'...'`.
+/// Rejects f-strings, concatenations, identifiers, etc.
+fn parse_string_literal(text: &str) -> Result<String, String> {
+    let s = text.trim();
+    if s.len() < 2 {
+        return Err(format!("expected string literal, got `{}`", s));
+    }
+    let first = s.as_bytes()[0];
+    let last = s.as_bytes()[s.len() - 1];
+    if (first != b'"' && first != b'\'') || first != last {
+        return Err(format!(
+            "expected static string literal, got `{}` (no f-strings, concatenations, or names)",
+            s
+        ));
+    }
+    // Reject f-strings / raw-strings by ensuring the literal isn't prefixed.
+    // (We see the literal in isolation here, so any prefix would already have
+    // been consumed by the leading quote check above — but if a future tree
+    // reshape changes that, this is the place to harden.)
+    Ok(s[1..s.len() - 1].to_string())
+}
+
+#[cfg(test)]
+mod parser_lineage_tests {
+    use super::*;
+
+    #[test]
+    fn empty_list_ok() {
+        let v = parse_dataset_list("[]").unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn single_dataset_no_columns() {
+        let v = parse_dataset_list(r#"[Dataset("staging.orders")]"#).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "staging.orders");
+        assert!(v[0].columns.is_empty());
+    }
+
+    #[test]
+    fn dataset_with_columns_and_dtype() {
+        let v = parse_dataset_list(
+            r#"[Dataset("staging.orders", columns=[ColumnSpec("id"), ColumnSpec("amount", dtype="DECIMAL")])]"#,
+        )
+        .unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].columns.len(), 2);
+        assert_eq!(v[0].columns[1].dtype.as_deref(), Some("DECIMAL"));
+    }
+
+    #[test]
+    fn rejects_non_dataset_call() {
+        let err = parse_dataset_list(r#"[NotADataset("x")]"#).unwrap_err();
+        assert!(err.contains("Dataset"));
+    }
+
+    #[test]
+    fn rejects_identifier_as_name() {
+        // `some_var` is not a static string literal.
+        let err = parse_dataset_list(r#"[Dataset(some_var)]"#).unwrap_err();
+        assert!(err.contains("string literal"));
+    }
+
+    #[test]
+    fn rejects_unknown_kwarg() {
+        let err = parse_dataset_list(r#"[Dataset("x", schema="weird")]"#).unwrap_err();
+        assert!(err.contains("Dataset has no field"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +948,73 @@ def daily_warehouse_refresh(date: Param[str] = "{{ ds }}"):
             DagParser::split_args(r#"schedule="0 6 * * *", tags=["etl", "warehouse"], max=3"#);
         assert_eq!(args.len(), 3);
         assert!(args[1].contains("["));
+    }
+
+    const LINEAGE_DAG: &str = r#"
+from conduit_sdk import dag, task, Dataset, ColumnSpec
+
+@dag(schedule="@daily", lineage_strict=True)
+def cross_task_demo():
+    @task(outputs=[Dataset("staging.orders", columns=[ColumnSpec("id"), ColumnSpec("amount", dtype="DECIMAL")])])
+    def extract_orders():
+        pass
+
+    @task(inputs=[Dataset("analytics.daily_revenue", columns=[ColumnSpec("customer_id"), ColumnSpec("total")])])
+    def push_to_warehouse(data=extract_orders):
+        pass
+"#;
+
+    #[test]
+    fn parses_lineage_strict_and_dataset_decorators() {
+        let mut parser = DagParser::new().unwrap();
+        let dags = parser.parse_source(LINEAGE_DAG, "lineage.py").unwrap();
+        assert_eq!(dags.len(), 1);
+        let dag = &dags[0];
+        assert!(dag.lineage_strict);
+
+        let extract = dag.tasks.iter().find(|t| t.id == "extract_orders").unwrap();
+        assert_eq!(extract.outputs.len(), 1);
+        assert_eq!(extract.outputs[0].name, "staging.orders");
+        assert_eq!(extract.outputs[0].columns.len(), 2);
+        assert_eq!(
+            extract.outputs[0].columns[1].dtype.as_deref(),
+            Some("DECIMAL")
+        );
+        assert!(extract.inputs.is_empty());
+
+        let push = dag
+            .tasks
+            .iter()
+            .find(|t| t.id == "push_to_warehouse")
+            .unwrap();
+        assert_eq!(push.inputs.len(), 1);
+        assert_eq!(push.inputs[0].name, "analytics.daily_revenue");
+        let cols: Vec<&str> = push.inputs[0]
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(cols, vec!["customer_id", "total"]);
+    }
+
+    #[test]
+    fn parser_rejects_non_static_dataset_arg() {
+        let src = r#"
+from conduit_sdk import dag, task, Dataset
+
+@dag()
+def bad():
+    @task(outputs=[Dataset(some_var)])
+    def t():
+        pass
+"#;
+        let mut parser = DagParser::new().unwrap();
+        let err = parser.parse_source(src, "bad.py").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("string literal") || msg.contains("invalid outputs"),
+            "unexpected error: {}",
+            msg
+        );
     }
 }

@@ -101,11 +101,7 @@ async fn post_with_auth(
     (status, json)
 }
 
-async fn put_json(
-    router: &axum::Router,
-    path: &str,
-    body: &Value,
-) -> (StatusCode, Value) {
+async fn put_json(router: &axum::Router, path: &str, body: &Value) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("PUT")
         .uri(path)
@@ -305,6 +301,174 @@ async fn env_promotion_policy_blocks_wrong_source() {
     assert_eq!(body["promotionPolicy"]["requireSource"], "staging");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// OpenLineage ingest
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn openlineage_ingest_records_event() {
+    let (router, state) = app(false);
+
+    let payload = json!({
+        "eventTime": "2026-05-17T12:00:00Z",
+        "producer": "https://github.com/apache/airflow",
+        "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json#/$defs/RunEvent",
+        "eventType": "COMPLETE",
+        "run": { "runId": "test-run-abc" },
+        "job": { "namespace": "airflow", "name": "etl.extract_orders" },
+        "inputs": [{ "namespace": "postgres", "name": "raw.orders" }],
+        "outputs": [{
+            "namespace": "warehouse",
+            "name": "staging.orders",
+            "facets": {
+                "schema": {
+                    "_producer": "https://github.com/apache/airflow",
+                    "_schemaURL": "https://openlineage.io/spec/facets/1-0-0/SchemaDatasetFacet.json",
+                    "fields": [
+                        {"name": "id", "type": "INTEGER"},
+                        {"name": "amount", "type": "DECIMAL"}
+                    ]
+                }
+            }
+        }]
+    });
+
+    let (status, body) = post(&router, "/api/v1/openlineage/v1/lineage", &payload).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {:?}", body);
+    assert_eq!(body["runId"], "test-run-abc");
+    assert_eq!(body["inputsRecorded"], 1);
+    assert_eq!(body["outputsRecorded"], 1);
+
+    // The ingest is reflected via the read API.
+    let (_, dataset_body) = get(
+        &router,
+        "/api/v1/openlineage/datasets/warehouse/staging.orders",
+    )
+    .await;
+    assert_eq!(dataset_body["summary"]["namespace"], "warehouse");
+    assert_eq!(dataset_body["summary"]["name"], "staging.orders");
+    let cols = dataset_body["summary"]["columns"].as_array().unwrap();
+    assert_eq!(cols.len(), 2);
+    assert_eq!(cols[0]["name"], "id");
+
+    // And in the recent-events listing.
+    let (_, events) = get(&router, "/api/v1/openlineage/events?limit=10").await;
+    assert_eq!(events["total"], 1);
+
+    // Stats reflect the ingest.
+    let (_, stats) = get(&router, "/api/v1/openlineage/stats").await;
+    assert_eq!(stats["eventCount"], 1);
+    assert_eq!(stats["datasetCount"], 2); // input + output
+    let _ = state;
+}
+
+#[tokio::test]
+async fn openlineage_dataset_not_found_returns_404() {
+    let (router, _) = app(false);
+    let (status, _) = get(&router, "/api/v1/openlineage/datasets/ns/never_seen").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn plan_cache_stats_and_invalidate() {
+    let (router, _) = app(false);
+
+    // Initial stats should be zeros.
+    let (status, body) = get(&router, "/api/v1/lineage/cache/stats").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["hits"], 0);
+    assert_eq!(body["misses"], 0);
+
+    // Hitting the unified endpoint (even on an unknown dataset) drives
+    // a cache compile attempt — at least one miss is recorded.
+    let _ = get(&router, "/api/v1/lineage/datasets/ns/ghost/unified").await;
+    let (_, body) = get(&router, "/api/v1/lineage/cache/stats").await;
+    // The test AppState's dags dir is empty, so compile returns 0 DAGs
+    // but still counts as a miss. cached_dag_count stays 0.
+    assert!(
+        body["misses"].as_u64().unwrap_or(0) >= 1,
+        "stats: {:?}",
+        body
+    );
+
+    // Invalidate clears the cache state.
+    let (status, body) = post(
+        &router,
+        "/api/v1/lineage/cache/invalidate",
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["invalidated"], true);
+}
+
+#[tokio::test]
+async fn openlineage_unified_view_fuses_external_and_404s_unknown() {
+    let (router, _) = app(false);
+
+    // Unknown dataset → 404.
+    let (status, _) = get(&router, "/api/v1/lineage/datasets/ns/ghost/unified").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Ingest an event then query the unified view: it should show
+    // external producer, schema, and recent events.
+    let payload = json!({
+        "eventTime": "2026-05-17T12:00:00Z",
+        "producer": "https://github.com/apache/airflow",
+        "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json#/$defs/RunEvent",
+        "eventType": "COMPLETE",
+        "run": { "runId": "unified-test" },
+        "job": { "namespace": "airflow", "name": "etl.warehouse_load" },
+        "inputs": [],
+        "outputs": [{
+            "namespace": "warehouse",
+            "name": "staging.orders",
+            "facets": {
+                "schema": {
+                    "_producer": "https://github.com/apache/airflow",
+                    "_schemaURL": "https://openlineage.io/spec/facets/1-0-0/SchemaDatasetFacet.json",
+                    "fields": [{"name": "id", "type": "INTEGER"}]
+                }
+            }
+        }]
+    });
+    let (status, _) = post(&router, "/api/v1/openlineage/v1/lineage", &payload).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = get(
+        &router,
+        "/api/v1/lineage/datasets/warehouse/staging.orders/unified",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["namespace"], "warehouse");
+    assert_eq!(body["name"], "staging.orders");
+    assert_eq!(body["schema"]["source"], "external");
+    let cols = body["schema"]["columns"].as_array().unwrap();
+    assert_eq!(cols.len(), 1);
+    assert_eq!(cols[0]["name"], "id");
+    assert!(body["producers"]["external"].is_object());
+    assert_eq!(
+        body["producers"]["external"]["jobName"],
+        "etl.warehouse_load"
+    );
+    assert_eq!(body["producers"]["internal"], serde_json::Value::Null);
+    assert!(body["recentEvents"].as_array().unwrap().len() >= 1);
+}
+
+#[tokio::test]
+async fn openlineage_invalid_payload_returns_400_ish() {
+    let (router, _) = app(false);
+    // Missing required `run`, `job`, etc.
+    let bogus = json!({ "eventTime": "2026-05-17T12:00:00Z" });
+    let (status, _) = post(&router, "/api/v1/openlineage/v1/lineage", &bogus).await;
+    assert!(
+        status.is_client_error(),
+        "expected client error, got {}",
+        status
+    );
+}
+
 #[tokio::test]
 async fn env_history_and_rollback_round_trip() {
     let (router, state) = app(false);
@@ -345,12 +509,7 @@ async fn env_history_and_rollback_round_trip() {
     assert_eq!(body["currentVersion"], 1);
 
     // Rollback the last mutation.
-    let (status, body) = post(
-        &router,
-        "/api/v1/environments/staging/rollback",
-        &json!({}),
-    )
-    .await;
+    let (status, body) = post(&router, "/api/v1/environments/staging/rollback", &json!({})).await;
     assert_eq!(status, StatusCode::OK, "rollback failed: {:?}", body);
     assert_eq!(body["newVersion"], 2);
 

@@ -87,6 +87,11 @@ pub struct YamlDag {
 
     /// Task definitions.
     pub tasks: HashMap<String, YamlTask>,
+
+    /// Opt-in: strict cross-task lineage stitching (compile error on
+    /// unresolved column references).
+    #[serde(default)]
+    pub lineage_strict: bool,
 }
 
 fn default_max_active_runs() -> u32 {
@@ -120,6 +125,12 @@ pub struct YamlTask {
     /// SQL query (for type: sql).
     #[serde(default)]
     pub query: Option<String>,
+
+    /// Optional dataset name this SQL task writes to. Used by cross-task
+    /// lineage when the query is a plain `SELECT` (no `INSERT INTO` /
+    /// `CREATE TABLE AS` to infer from).
+    #[serde(default)]
+    pub target: Option<String>,
 
     /// Sensor type (for type: sensor).
     #[serde(default)]
@@ -406,6 +417,8 @@ impl YamlDagParser {
                 raw_dependencies: yaml_task.depends_on.clone(),
                 contracts,
                 parameters_text: String::new(),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
             });
         }
 
@@ -418,6 +431,7 @@ impl YamlDagParser {
             on_failure: yaml.on_failure,
             tasks,
             source_file: source_path.display().to_string(),
+            lineage_strict: yaml.lineage_strict,
         })
     }
 
@@ -454,7 +468,11 @@ impl YamlDagParser {
                     file: source_path.display().to_string(),
                     message: format!("Task '{}': sql task requires 'query' field", task_id),
                 })?;
-                Ok(TaskType::Sql { connection, query })
+                Ok(TaskType::Sql {
+                    connection,
+                    query,
+                    target: task.target.clone(),
+                })
             }
 
             "sensor" => {

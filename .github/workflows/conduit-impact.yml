@@ -1,0 +1,154 @@
+name: Schema impact
+
+# Runs on every PR. Compiles DAGs at the base branch and the PR's head,
+# runs `conduit impact`, and posts (or updates) a single sticky PR comment
+# with the schema-impact report. Optionally fails the check when breaking
+# changes are present unless the PR carries the `allow-breaking` label.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - 'dags/**'
+      - 'conduit-lineage/**'
+      - 'conduit-common/src/dag.rs'
+      - 'conduit-compiler/**'
+      - 'sdk/python/**'
+      - '.github/workflows/conduit-impact.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel earlier runs on the same PR when a new commit lands — we only
+# care about the latest impact picture.
+concurrency:
+  group: schema-impact-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Sticky-comment marker: the post step finds/updates a comment containing
+  # this exact string. Change cautiously — old PRs lose update-in-place.
+  COMMENT_MARKER: '<!-- conduit-schema-impact-bot -->'
+
+jobs:
+  impact:
+    name: Compute schema impact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          # Full history so `git worktree add <base-sha>` succeeds.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: schema-impact
+
+      - name: Build conduit CLI
+        run: cargo build --release -p conduit-cli
+
+      - name: Determine base ref
+        id: base
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+          echo "Base sha: $base"
+
+      # Use git mode with WORKING for the head side — fast and avoids a
+      # second worktree for the PR head we already have checked out.
+      - name: Run conduit impact
+        id: impact
+        run: |
+          set -o pipefail
+          mkdir -p impact-out
+          ./target/release/conduit impact \
+            --base "${{ steps.base.outputs.sha }}" \
+            --head WORKING \
+            --dags-path dags \
+            --format markdown \
+            --output impact-out/report.md \
+          || echo "impact_exit=$?" >> "$GITHUB_OUTPUT"
+
+          # Capture the JSON form too for downstream gating logic.
+          ./target/release/conduit impact \
+            --base "${{ steps.base.outputs.sha }}" \
+            --head WORKING \
+            --dags-path dags \
+            --format json \
+            --output impact-out/report.json \
+          || true
+
+          # Extract the breaking count (fall back to 0 if jq absent/bad json).
+          breaking=$(jq -r '.summary.total_breaking_changes // 0' impact-out/report.json 2>/dev/null || echo 0)
+          echo "breaking=$breaking" >> "$GITHUB_OUTPUT"
+          echo "Total breaking changes: $breaking"
+
+      - name: Upload impact report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-impact-report
+          path: impact-out/
+
+      - name: Post or update PR comment
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          MARKER: ${{ env.COMMENT_MARKER }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = process.env.MARKER;
+
+            let body;
+            try {
+              const report = fs.readFileSync('impact-out/report.md', 'utf8');
+              body = `${marker}\n${report}`;
+            } catch (e) {
+              body = `${marker}\n## Schema impact: report unavailable\n\nThe \`conduit impact\` run did not produce a report (see job logs).`;
+            }
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const existing = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 }
+            );
+            const prior = existing.find(c => c.body && c.body.includes(marker));
+
+            if (prior) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: prior.id, body
+              });
+              core.info(`Updated comment ${prior.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body
+              });
+              core.info('Posted new comment');
+            }
+
+      # The merge gate. Fails when breaking changes are present and the PR
+      # has NOT been labelled `allow-breaking`. PR authors apply the label
+      # to acknowledge the break and unblock merge.
+      - name: Enforce breaking-change gate
+        if: steps.impact.outputs.breaking != '0'
+        env:
+          BREAKING: ${{ steps.impact.outputs.breaking }}
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          echo "$LABELS" | grep -q '"allow-breaking"' && allow=1 || allow=0
+          if [ "$allow" = "1" ]; then
+            echo "::notice::$BREAKING breaking change(s) present, gate bypassed via 'allow-breaking' label."
+            exit 0
+          fi
+          echo "::error::$BREAKING breaking schema change(s) detected. Apply the 'allow-breaking' label to merge."
+          exit 1

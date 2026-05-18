@@ -39,6 +39,8 @@ fn task(id: &str, deps: &[&str], retries: u32) -> Task {
         trigger_rule: TriggerRule::AllSuccess,
         incremental: None,
         contracts: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 
@@ -83,6 +85,7 @@ fn random_dag(num_tasks: usize, dep_prob: f64, rng_seed: u64) -> Dag {
         compiled_at: Utc::now(),
         catchup: false,
         max_catchup_runs: None,
+        lineage_strict: false,
     }
 }
 

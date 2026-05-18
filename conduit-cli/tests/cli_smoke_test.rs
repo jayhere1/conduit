@@ -81,6 +81,36 @@ tasks:
     dags
 }
 
+/// Three-task SQL pipeline that exercises cross-task lineage stitching:
+/// `seed → transform → load`. Each task declares its target via `INSERT
+/// INTO` / `CREATE TABLE AS`, which `infer_sql_io` lifts into Task I/O.
+fn write_cross_task_sql_dag(dir: &TempDir) -> std::path::PathBuf {
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+
+    let dag = r#"
+id: cross_task_demo
+description: Three-task SQL pipeline for cross-task lineage tests
+tasks:
+  seed:
+    type: sql
+    connection: warehouse
+    query: "CREATE TABLE staging.orders AS SELECT 1 AS customer_id, 100 AS amount"
+  transform:
+    type: sql
+    connection: warehouse
+    query: "INSERT INTO analytics.daily_revenue SELECT customer_id, SUM(amount) AS total FROM staging.orders GROUP BY customer_id"
+    depends_on: [seed]
+  load:
+    type: sql
+    connection: warehouse
+    query: "INSERT INTO reporting.summary SELECT customer_id, total FROM analytics.daily_revenue"
+    depends_on: [transform]
+"#;
+    fs::write(dags.join("cross_task_demo.yaml"), dag).unwrap();
+    dags
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -235,6 +265,7 @@ fn cli_lineage_outputs_native_json_for_sql_task() {
 
     let output = conduit()
         .arg("lineage")
+        .arg("extract")
         .arg("sql_lineage.summarize_orders")
         .arg("--dags-path")
         .arg(dags.to_str().unwrap())
@@ -257,6 +288,7 @@ fn cli_lineage_can_emit_openlineage_event() {
 
     let output = conduit()
         .arg("lineage")
+        .arg("extract")
         .arg("sql_lineage.summarize_orders")
         .arg("--dags-path")
         .arg(dags.to_str().unwrap())
@@ -281,4 +313,93 @@ fn cli_lineage_can_emit_openlineage_event() {
             ["transformations"][0]["subtype"],
         "AGGREGATION"
     );
+}
+
+#[test]
+fn cli_lineage_trace_walks_cross_task_chain_text() {
+    let tmp = TempDir::new().unwrap();
+    let dags = write_cross_task_sql_dag(&tmp);
+
+    let output = conduit()
+        .arg("lineage")
+        .arg("trace")
+        .arg("--dag")
+        .arg("cross_task_demo")
+        .arg("--column")
+        .arg("load.total")
+        .arg("--dags-path")
+        .arg(dags.to_str().unwrap())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8_lossy(&output);
+    // Default direction is upstream; the trace should walk back through
+    // transform and reach seed via the catalog-resolved dataset chain.
+    assert!(text.contains("upstream trace"), "got: {}", text);
+    assert!(
+        text.contains("cross_task_demo::transform"),
+        "expected transform in trace, got: {}",
+        text
+    );
+    assert!(
+        text.contains("cross_task_demo::seed"),
+        "expected seed in trace, got: {}",
+        text
+    );
+    // Per-line task-kind annotation should mark SQL tasks.
+    assert!(text.contains("[sql]"), "expected [sql] tag, got: {}", text);
+}
+
+#[test]
+fn cli_lineage_trace_json_output() {
+    let tmp = TempDir::new().unwrap();
+    let dags = write_cross_task_sql_dag(&tmp);
+
+    let output = conduit()
+        .arg("lineage")
+        .arg("trace")
+        .arg("--dag")
+        .arg("cross_task_demo")
+        .arg("--column")
+        .arg("load.total")
+        .arg("--dags-path")
+        .arg(dags.to_str().unwrap())
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["dag"], "cross_task_demo");
+    assert_eq!(parsed["origin"]["task"], "load");
+    assert_eq!(parsed["origin"]["column"], "total");
+    assert_eq!(parsed["direction"], "upstream");
+    assert!(parsed["columns"].as_array().unwrap().len() >= 2);
+}
+
+#[test]
+fn cli_lineage_trace_unknown_column_fails() {
+    let tmp = TempDir::new().unwrap();
+    let dags = write_cross_task_sql_dag(&tmp);
+
+    conduit()
+        .arg("lineage")
+        .arg("trace")
+        .arg("--dag")
+        .arg("cross_task_demo")
+        .arg("--column")
+        .arg("load.does_not_exist")
+        .arg("--dags-path")
+        .arg(dags.to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "not found in the merged lineage graph",
+        ));
 }

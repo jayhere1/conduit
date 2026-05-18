@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::catalog::TableCatalog;
 use crate::sql_parser::{OutputColumn, SqlLineage, TableRef};
 
 /// OpenLineage RunEvent schema URL used by generated events.
@@ -20,8 +21,21 @@ pub const OPENLINEAGE_RUN_EVENT_SCHEMA_URL: &str =
 pub const COLUMN_LINEAGE_FACET_SCHEMA_URL: &str =
     "https://openlineage.io/spec/facets/1-2-0/ColumnLineageDatasetFacet.json";
 
+/// Schema URL for Conduit's custom `conduit_task_lineage` facet, which
+/// names the upstream tasks that produced each output column. Not part
+/// of the OpenLineage spec.
+pub const CONDUIT_TASK_LINEAGE_FACET_SCHEMA_URL: &str =
+    "https://conduit.dev/schemas/conduit_task_lineage/v1";
+
 /// Default producer URI for Conduit-generated OpenLineage metadata.
 pub const CONDUIT_OPENLINEAGE_PRODUCER: &str = "https://github.com/conduit-orchestrator/conduit";
+
+/// Format the OpenLineage namespace used for task-produced datasets:
+/// `conduit://<dag_id>`. Physical-table inputs keep the caller-supplied
+/// namespace; only datasets resolved back to a task get this scheme.
+pub fn conduit_task_namespace(dag_id: &str) -> String {
+    format!("conduit://{}", dag_id)
+}
 
 /// Run state transition for an OpenLineage RunEvent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,29 +162,92 @@ pub struct OpenLineageTransformation {
     pub masking: bool,
 }
 
+/// Conduit-specific facet (not in the OpenLineage spec) recording which
+/// upstream tasks produced each output column. This is the cross-task
+/// lineage bit that OpenLineage's table-centric model can't express.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConduitTaskLineageFacet {
+    #[serde(rename = "_producer")]
+    pub producer: String,
+    #[serde(rename = "_schemaURL")]
+    pub schema_url: String,
+    /// One entry per output column.
+    pub fields: BTreeMap<String, Vec<ConduitProducerTask>>,
+}
+
+/// An upstream task that contributed a column to an output field.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConduitProducerTask {
+    pub dag_id: String,
+    pub task_id: String,
+    pub column: String,
+}
+
 impl OpenLineageRunEvent {
     /// Build an OpenLineage RunEvent with an output columnLineage facet.
     pub fn from_sql_lineage(lineage: &SqlLineage, options: OpenLineageSqlEventOptions) -> Self {
+        Self::from_sql_lineage_inner(lineage, options, None)
+    }
+
+    /// Like [`Self::from_sql_lineage`], but resolves SQL-extracted column
+    /// references against `catalog` so that:
+    /// 1. Input `namespace` becomes `conduit://<dag_id>` for columns whose
+    ///    source table is actually a task-produced dataset.
+    /// 2. A `conduit_task_lineage` facet is attached to the output
+    ///    dataset, listing each producer task per column.
+    ///
+    /// Physical-table inputs are unaffected — they keep the
+    /// caller-supplied `dataset_namespace`.
+    pub fn from_sql_lineage_with_catalog(
+        lineage: &SqlLineage,
+        options: OpenLineageSqlEventOptions,
+        catalog: &TableCatalog,
+    ) -> Self {
+        Self::from_sql_lineage_inner(lineage, options, Some(catalog))
+    }
+
+    fn from_sql_lineage_inner(
+        lineage: &SqlLineage,
+        options: OpenLineageSqlEventOptions,
+        catalog: Option<&TableCatalog>,
+    ) -> Self {
         let mut input_names = BTreeSet::new();
         for table in &lineage.source_tables {
             input_names.insert(dataset_name_for_table(table));
         }
 
-        let inputs = input_names
+        let inputs: Vec<OpenLineageDataset> = input_names
             .into_iter()
-            .map(|name| OpenLineageDataset {
-                namespace: options.dataset_namespace.clone(),
-                name,
-                facets: BTreeMap::new(),
+            .map(|name| {
+                let producer = catalog.and_then(|c| c.lookup_producer(&name));
+                let namespace = match producer {
+                    Some(p) => conduit_task_namespace(&p.dag_id),
+                    None => options.dataset_namespace.clone(),
+                };
+                OpenLineageDataset {
+                    namespace,
+                    name,
+                    facets: BTreeMap::new(),
+                }
             })
             .collect();
 
-        let column_lineage = build_column_lineage_facet(lineage, &options);
+        let column_lineage = build_column_lineage_facet(lineage, &options, catalog);
         let mut output_facets = BTreeMap::new();
         output_facets.insert(
             "columnLineage".to_string(),
             serde_json::to_value(column_lineage).expect("column lineage facet serializes"),
         );
+
+        if let Some(cat) = catalog {
+            if let Some(facet) = build_conduit_task_lineage_facet(lineage, &options, cat) {
+                output_facets.insert(
+                    "conduit_task_lineage".to_string(),
+                    serde_json::to_value(facet).expect("task lineage facet serializes"),
+                );
+            }
+        }
 
         let outputs = vec![OpenLineageDataset {
             namespace: options.dataset_namespace.clone(),
@@ -199,6 +276,7 @@ impl OpenLineageRunEvent {
 fn build_column_lineage_facet(
     lineage: &SqlLineage,
     options: &OpenLineageSqlEventOptions,
+    catalog: Option<&TableCatalog>,
 ) -> ColumnLineageDatasetFacet {
     let source_tables: HashMap<&str, &TableRef> = lineage
         .source_tables
@@ -241,6 +319,7 @@ fn build_column_lineage_facet(
                     &source_tables,
                     &options.dataset_namespace,
                     transform.clone(),
+                    catalog,
                 )
             }));
             continue;
@@ -261,6 +340,7 @@ fn build_column_lineage_facet(
                     &source_tables,
                     &options.dataset_namespace,
                     transform.clone(),
+                    catalog,
                 )
             })
             .collect();
@@ -303,18 +383,77 @@ fn input_field_for_ref(
     source_tables: &HashMap<&str, &TableRef>,
     dataset_namespace: &str,
     transform: OpenLineageTransformation,
+    catalog: Option<&TableCatalog>,
 ) -> OpenLineageInputField {
+    let qualifier = input.qualifier();
     let dataset_name = source_tables
-        .get(input.task_id.as_str())
+        .get(qualifier.as_str())
         .map(|table| dataset_name_for_table(table))
-        .unwrap_or_else(|| input.task_id.clone());
+        .unwrap_or_else(|| qualifier.clone());
+
+    // If the catalog identifies this dataset as task-produced, switch
+    // the namespace to `conduit://<dag_id>` so downstream OL consumers
+    // see this column came from a Conduit pipeline rather than a
+    // physical warehouse table.
+    let namespace = match catalog.and_then(|c| c.lookup_producer(&dataset_name)) {
+        Some(p) => conduit_task_namespace(&p.dag_id),
+        None => dataset_namespace.to_string(),
+    };
 
     OpenLineageInputField {
-        namespace: dataset_namespace.to_string(),
+        namespace,
         name: dataset_name,
         field: input.column_name.clone(),
         transformations: vec![transform],
     }
+}
+
+/// Build the Conduit-specific `conduit_task_lineage` facet: per output
+/// column, the list of `{dagId, taskId, column}` producers. Returns
+/// `None` when no input column resolves to a task producer (so the
+/// facet stays absent for purely physical-table-driven SQL).
+fn build_conduit_task_lineage_facet(
+    lineage: &SqlLineage,
+    options: &OpenLineageSqlEventOptions,
+    catalog: &TableCatalog,
+) -> Option<ConduitTaskLineageFacet> {
+    let mut fields: BTreeMap<String, Vec<ConduitProducerTask>> = BTreeMap::new();
+
+    for mapping in &lineage.column_mappings {
+        if !include_output_field(&mapping.output) {
+            continue;
+        }
+        for input in &mapping.inputs {
+            let qualifier = input.qualifier();
+            let Some(producer) = catalog.lookup_producer(&qualifier) else {
+                continue;
+            };
+            fields
+                .entry(mapping.output.clone())
+                .or_default()
+                .push(ConduitProducerTask {
+                    dag_id: producer.dag_id.clone(),
+                    task_id: producer.task_id.clone(),
+                    column: input.column_name.clone(),
+                });
+        }
+    }
+
+    if fields.is_empty() {
+        return None;
+    }
+
+    // Dedupe + stable order so the facet is deterministic across runs.
+    for v in fields.values_mut() {
+        v.sort();
+        v.dedup();
+    }
+
+    Some(ConduitTaskLineageFacet {
+        producer: options.producer.clone(),
+        schema_url: CONDUIT_TASK_LINEAGE_FACET_SCHEMA_URL.to_string(),
+        fields,
+    })
 }
 
 fn transformation_for_output(output: Option<&OutputColumn>) -> OpenLineageTransformation {
@@ -400,6 +539,72 @@ mod tests {
         assert_eq!(
             facet["dataset"][0]["transformations"][0]["subtype"],
             "FILTER"
+        );
+    }
+
+    #[test]
+    fn conduit_task_lineage_facet_lists_producer_tasks() {
+        use crate::catalog::{CatalogColumn, TableCatalog};
+        use crate::lineage_graph::TaskRef;
+        use crate::schema::ColumnType;
+
+        // Build a catalog where staging.orders is produced by a task.
+        let mut catalog = TableCatalog::new();
+        catalog.register_dataset(
+            "staging.orders",
+            vec![
+                CatalogColumn::new("customer_id", ColumnType::Integer),
+                CatalogColumn::new("amount", ColumnType::Float),
+            ],
+            TaskRef::new("warehouse", "extract_orders"),
+        );
+
+        let lineage = SqlLineageExtractor::extract_with_catalog(
+            "SELECT customer_id, SUM(amount) AS total FROM staging.orders GROUP BY customer_id",
+            &catalog,
+        );
+
+        let mut o = opts();
+        o.output_dataset = "analytics.daily_revenue".to_string();
+        o.job_name = "warehouse.transform".to_string();
+
+        let event = OpenLineageRunEvent::from_sql_lineage_with_catalog(&lineage, o, &catalog);
+        let json = serde_json::to_value(event).unwrap();
+
+        // Input namespace promoted to conduit://<dag_id>.
+        assert_eq!(json["inputs"][0]["namespace"], "conduit://warehouse");
+        assert_eq!(json["inputs"][0]["name"], "staging.orders");
+
+        // conduit_task_lineage facet is present and lists the producer.
+        let facet = &json["outputs"][0]["facets"]["conduit_task_lineage"];
+        assert_eq!(facet["_schemaURL"], CONDUIT_TASK_LINEAGE_FACET_SCHEMA_URL);
+        let producers = &facet["fields"]["total"];
+        assert!(producers.is_array(), "expected array of producers");
+        let entry = &producers[0];
+        assert_eq!(entry["dagId"], "warehouse");
+        assert_eq!(entry["taskId"], "extract_orders");
+        assert_eq!(entry["column"], "amount");
+
+        // columnLineage input field's namespace was also promoted.
+        let cl_input =
+            &json["outputs"][0]["facets"]["columnLineage"]["fields"]["total"]["inputFields"][0];
+        assert_eq!(cl_input["namespace"], "conduit://warehouse");
+        assert_eq!(cl_input["name"], "staging.orders");
+        assert_eq!(cl_input["field"], "amount");
+    }
+
+    #[test]
+    fn task_lineage_facet_absent_when_no_producer() {
+        use crate::catalog::TableCatalog;
+        let catalog = TableCatalog::new();
+        let lineage = SqlLineageExtractor::extract("SELECT a FROM public.t");
+        let event = OpenLineageRunEvent::from_sql_lineage_with_catalog(&lineage, opts(), &catalog);
+        let json = serde_json::to_value(event).unwrap();
+        assert!(
+            json["outputs"][0]["facets"]
+                .get("conduit_task_lineage")
+                .is_none(),
+            "facet should be omitted when no input resolves to a task producer"
         );
     }
 

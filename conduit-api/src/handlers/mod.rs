@@ -11,6 +11,7 @@ pub mod envs;
 pub mod events;
 pub mod lineage;
 pub mod metrics;
+pub mod openlineage_ingest;
 pub mod plan;
 pub mod prometheus;
 pub mod runs;

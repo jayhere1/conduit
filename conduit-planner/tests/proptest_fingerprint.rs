@@ -37,6 +37,8 @@ fn make_task(id: &str, deps: Vec<&str>, command: &str) -> (String, Task) {
             },
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         },
     )
 }
@@ -55,6 +57,7 @@ fn make_dag(tasks: Vec<(String, Task)>, order: Vec<&str>) -> Dag {
         compiled_at: chrono::Utc::now(),
         catchup: false,
         max_catchup_runs: None,
+        lineage_strict: false,
     }
 }
 

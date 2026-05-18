@@ -365,7 +365,7 @@ pub async fn trace_upstream(
         },
         "direction": "upstream",
         "columns": trace.columns.iter().map(|c| json!({
-            "task_id": &c.task_id,
+            "task_id": c.qualifier(),
             "column_name": &c.column_name,
         })).collect::<Vec<_>>(),
         "depth": trace.columns.len(),
@@ -388,7 +388,7 @@ pub async fn trace_downstream(
         },
         "direction": "downstream",
         "columns": trace.columns.iter().map(|c| json!({
-            "task_id": &c.task_id,
+            "task_id": c.qualifier(),
             "column_name": &c.column_name,
         })).collect::<Vec<_>>(),
         "depth": trace.columns.len(),

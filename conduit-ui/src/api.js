@@ -219,6 +219,30 @@ export const updateEnvPolicy = (name, policy) =>
     min_age_secs: policy.minAgeSecs ?? null,
   });
 
+// ─── OpenLineage ingest + unified datasets view ─────────────────────────────
+
+export const ingestOpenLineageEvent = (event) =>
+  post('/openlineage/v1/lineage', event);
+
+export const listOpenLineageEvents = (filters = {}) => {
+  const params = new URLSearchParams();
+  if (filters.namespace) params.set('namespace', filters.namespace);
+  if (filters.dataset) params.set('dataset', filters.dataset);
+  if (filters.limit != null) params.set('limit', String(filters.limit));
+  const qs = params.toString();
+  return get(`/openlineage/events${qs ? `?${qs}` : ''}`).then(r => r.events || []);
+};
+
+export const getOpenLineageStats = () => get('/openlineage/stats');
+
+export const getUnifiedDatasetView = (namespace, name) =>
+  get(`/lineage/datasets/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/unified`);
+
+export const getPlanCacheStats = () => get('/lineage/cache/stats');
+
+export const invalidatePlanCache = () =>
+  post('/lineage/cache/invalidate', {});
+
 // ─── Plan / Apply ────────────────────────────────────────────────────────────
 
 export const generatePlan = (env = 'production') =>

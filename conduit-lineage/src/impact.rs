@@ -480,12 +480,12 @@ mod tests {
         assert_eq!(impact.breaking_count, 1);
         assert_eq!(impact.affected_downstream.len(), 2); // transform.total_amount + aggregate.daily_total
 
-        let affected_tasks: Vec<&str> = impact
+        let affected_tasks: Vec<String> = impact
             .affected_downstream
             .iter()
-            .map(|c| c.task_id.as_str())
+            .map(|c| c.qualifier())
             .collect();
-        assert!(affected_tasks.contains(&"transform"));
-        assert!(affected_tasks.contains(&"aggregate"));
+        assert!(affected_tasks.iter().any(|s| s == "transform"));
+        assert!(affected_tasks.iter().any(|s| s == "aggregate"));
     }
 }

@@ -42,6 +42,7 @@ Note:
 __version__ = "0.1.0"
 
 from conduit_sdk.decorators import dag, task
+from conduit_sdk.lineage import Dataset, ColumnSpec
 from conduit_sdk.xcom import xcom_push, xcom_pull
 from conduit_sdk.context import get_context, TaskContext
 from conduit_sdk.incremental import get_incremental_context, emit_watermark, IncrementalContext
@@ -78,6 +79,8 @@ from conduit_sdk.hooks import (
 __all__ = [
     "dag",
     "task",
+    "Dataset",
+    "ColumnSpec",
     "xcom_push",
     "xcom_pull",
     "get_context",

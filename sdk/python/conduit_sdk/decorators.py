@@ -21,6 +21,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from conduit_sdk.lineage import Dataset
+
 
 def _runtime_mode_active() -> bool:
     """True when the SDK is imported by the Conduit executor to run a single
@@ -53,6 +55,8 @@ class TaskDefinition:
     tags: list[str] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
     doc: Optional[str] = None
+    inputs: list[Dataset] = field(default_factory=list)
+    outputs: list[Dataset] = field(default_factory=list)
 
     def __call__(self, *args, **kwargs):
         """Call the task. In Conduit runtime mode, suppress the call so that
@@ -79,6 +83,7 @@ class DagDefinition:
     on_failure: Optional[str] = None
     tasks: dict[str, TaskDefinition] = field(default_factory=dict)
     doc: Optional[str] = None
+    lineage_strict: bool = False
 
     def __repr__(self):
         return f"<DAG '{self.id}' ({len(self.tasks)} tasks)>"
@@ -93,6 +98,7 @@ def dag(
     tags: Optional[list[str]] = None,
     max_active_runs: int = 1,
     on_failure: Optional[str] = None,
+    lineage_strict: bool = False,
 ):
     """
     Decorator that marks a function as a Conduit DAG definition.
@@ -123,6 +129,7 @@ def dag(
             max_active_runs=max_active_runs,
             on_failure=on_failure,
             doc=inspect.getdoc(func),
+            lineage_strict=lineage_strict,
         )
 
         # Execute the function body to collect @task definitions. In runtime
@@ -158,6 +165,8 @@ def task(
     priority: int = 0,
     trigger_rule: str = "all_success",
     tags: Optional[list[str]] = None,
+    inputs: Optional[list[Dataset]] = None,
+    outputs: Optional[list[Dataset]] = None,
 ):
     """
     Decorator that marks a function as a Conduit task within a DAG.
@@ -190,6 +199,8 @@ def task(
             trigger_rule=trigger_rule,
             tags=tags or [],
             doc=inspect.getdoc(func),
+            inputs=inputs or [],
+            outputs=outputs or [],
         )
 
         # Register with current DAG context (if any)

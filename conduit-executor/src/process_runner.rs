@@ -89,6 +89,18 @@ impl ProcessRunner {
     }
 
     /// Execute a task with an optional provider registry for native SQL execution.
+    #[tracing::instrument(
+        name = "executor.process",
+        skip(task, context, registry),
+        fields(
+            dag_id = %context.dag_id,
+            run_id = %context.run_id,
+            task_id = %context.task_id,
+            attempt = context.attempt,
+            environment = %context.environment,
+            task_type = %task.task_type.kind()
+        )
+    )]
     pub async fn run_with_providers(
         task: &Task,
         context: &TaskContext,
@@ -111,7 +123,10 @@ impl ProcessRunner {
         );
 
         // For SQL tasks, try to use a native provider first
-        if let TaskType::Sql { connection, query } = &task.task_type {
+        if let TaskType::Sql {
+            connection, query, ..
+        } = &task.task_type
+        {
             if let Some(reg) = registry {
                 if let Some(ProviderInstance::Sql(sql_provider)) = reg.get(connection) {
                     return Self::execute_sql_native(
@@ -167,6 +182,17 @@ impl ProcessRunner {
     }
 
     /// Execute a task as a subprocess (the common path for Python, Bash, SQL, Executable).
+    #[tracing::instrument(
+        name = "executor.process.subprocess",
+        skip(task, context),
+        fields(
+            dag_id = %context.dag_id,
+            run_id = %context.run_id,
+            task_id = %context.task_id,
+            attempt = context.attempt,
+            task_type = %task.task_type.kind()
+        )
+    )]
     async fn run_subprocess(task: &Task, context: &TaskContext) -> ConduitResult<ProcessOutput> {
         let start = std::time::Instant::now();
 
@@ -225,6 +251,17 @@ impl ProcessRunner {
     /// Runs the sensor's check command repeatedly at `poke_interval` until it
     /// exits with code 0 (success) or the task timeout is reached.
     /// Default poke interval: 30 seconds. Default timeout: 1 hour.
+    #[tracing::instrument(
+        name = "executor.process.sensor",
+        skip(task, context),
+        fields(
+            dag_id = %context.dag_id,
+            run_id = %context.run_id,
+            task_id = %context.task_id,
+            attempt = context.attempt,
+            task_type = %task.task_type.kind()
+        )
+    )]
     async fn run_sensor_with_polling(
         task: &Task,
         context: &TaskContext,
@@ -330,6 +367,17 @@ impl ProcessRunner {
     }
 
     /// Execute a SQL query via a native provider (no child process).
+    #[tracing::instrument(
+        name = "executor.process.sql_native",
+        skip(provider, context),
+        fields(
+            dag_id = %context.dag_id,
+            run_id = %context.run_id,
+            task_id = %context.task_id,
+            attempt = context.attempt,
+            connection = %connection_name
+        )
+    )]
     async fn execute_sql_native(
         provider: &dyn conduit_providers::traits::SqlProvider,
         connection_name: &str,
@@ -651,6 +699,8 @@ mod tests {
             trigger_rule: TriggerRule::default(),
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 

@@ -1,0 +1,53 @@
+# Local Marquez for the OpenLineage round-trip integration test.
+#
+# Usage:
+#   docker compose -f docker-compose.marquez.yml up -d
+#   MARQUEZ_URL=http://localhost:5000 \
+#     cargo test -p conduit-lineage --test marquez_roundtrip -- --ignored --nocapture
+#   docker compose -f docker-compose.marquez.yml down -v
+#
+# This file is *only* for the Bet 2.1 round-trip test; Marquez is not a
+# runtime dependency of Conduit. Pinned image versions: the OpenLineage
+# wire format is stable across Marquez minor versions, but the read API
+# response shape can drift — the test asserts on the persistent fields,
+# not on incidental wrapper structure.
+
+services:
+  marquez-db:
+    image: postgres:14
+    container_name: conduit-marquez-db
+    environment:
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: marquez
+      POSTGRES_DB: marquez
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marquez -d marquez"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  marquez:
+    image: marquezproject/marquez:0.49.0
+    container_name: conduit-marquez
+    depends_on:
+      marquez-db:
+        condition: service_healthy
+    environment:
+      MARQUEZ_PORT: 5000
+      MARQUEZ_ADMIN_PORT: 5001
+      POSTGRES_HOST: marquez-db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: marquez
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: marquez
+      SEARCH_ENABLED: "false"
+    ports:
+      - "5000:5000"   # API
+      - "5001:5001"   # admin / health
+    # Wait for the migration to settle before reporting healthy.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5001/healthcheck"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

@@ -182,6 +182,8 @@ mod tests {
                     trigger_rule: TriggerRule::AllSuccess,
                     incremental: None,
                     contracts: None,
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
                 },
             );
             execution_order.push(task_id);
@@ -200,6 +202,7 @@ mod tests {
             compiled_at: Utc::now(),
             catchup: true,
             max_catchup_runs: None,
+            lineage_strict: false,
         }
     }
 

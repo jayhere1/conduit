@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "Column-level lineage extraction, schema validation, and breaking change detection"
 
+[features]
+# `testing` exposes cross-crate test helpers (conformance suite, fixture
+# builders). Enabled by `conduit-state` in its dev-dependencies so the
+# RocksDB backend can run the same assertions as the in-memory one.
+testing = []
+
 [dependencies]
 conduit-common = { path = "../conduit-common" }
 serde = { workspace = true }
@@ -13,3 +19,10 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 sqlparser = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+urlencoding = "2"
+uuid = { workspace = true }

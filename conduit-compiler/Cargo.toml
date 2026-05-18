@@ -7,6 +7,7 @@ description = "DAG compiler: parses Python definitions via tree-sitter, resolves
 
 [dependencies]
 conduit-common = { path = "../conduit-common" }
+conduit-lineage = { path = "../conduit-lineage" }
 tree-sitter = { workspace = true }
 tree-sitter-python = { workspace = true }
 serde = { workspace = true }

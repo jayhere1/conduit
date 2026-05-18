@@ -82,8 +82,17 @@ impl PlanFingerprinter {
             TaskType::Bash { command } => {
                 format!("bash:{}", command)
             }
-            TaskType::Sql { connection, query } => {
-                format!("sql:{}:{}", connection, query)
+            TaskType::Sql {
+                connection,
+                query,
+                target,
+            } => {
+                format!(
+                    "sql:{}:{}:{}",
+                    connection,
+                    query,
+                    target.as_deref().unwrap_or("")
+                )
             }
             TaskType::Sensor {
                 sensor_type,
@@ -147,6 +156,8 @@ mod tests {
             trigger_rule: TriggerRule::default(),
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 
@@ -168,6 +179,7 @@ mod tests {
             compiled_at: Utc::now(),
             catchup: true,
             max_catchup_runs: None,
+            lineage_strict: false,
         }
     }
 

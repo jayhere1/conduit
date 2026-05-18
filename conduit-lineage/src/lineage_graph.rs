@@ -10,27 +10,115 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-/// A reference to a specific column in a specific task.
+/// Identifies a task by (dag, task) so cross-task lineage edges can be
+/// emitted unambiguously across multiple DAGs sharing the same task id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskRef {
+    pub dag_id: String,
+    pub task_id: String,
+}
+
+impl TaskRef {
+    pub fn new(dag_id: impl Into<String>, task_id: impl Into<String>) -> Self {
+        Self {
+            dag_id: dag_id.into(),
+            task_id: task_id.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for TaskRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}::{}", self.dag_id, self.task_id)
+    }
+}
+
+/// Where the column lives — either a (physical or virtual) table named in
+/// SQL, or a specific task in the compiled DAG.
+///
+/// The SQL extractor only sees identifiers, so it always emits
+/// `ColumnSource::Table`. The cross-task stitcher promotes those to
+/// `ColumnSource::Task` once it has resolved a table name to a producer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ColumnSource {
+    Table(String),
+    Task(TaskRef),
+}
+
+impl ColumnSource {
+    /// Display-form qualifier (`"table"` or `"dag::task"`). Useful for
+    /// callers that just need a string key and don't care which variant.
+    pub fn qualifier(&self) -> String {
+        match self {
+            ColumnSource::Table(t) => t.clone(),
+            ColumnSource::Task(t) => t.to_string(),
+        }
+    }
+
+    /// Returns `Some(&task_id)` only when the column lives on a task.
+    pub fn task_id(&self) -> Option<&str> {
+        match self {
+            ColumnSource::Task(t) => Some(&t.task_id),
+            ColumnSource::Table(_) => None,
+        }
+    }
+
+    /// Returns `Some(&table_name)` only when the column lives on a table.
+    pub fn table(&self) -> Option<&str> {
+        match self {
+            ColumnSource::Table(t) => Some(t),
+            ColumnSource::Task(_) => None,
+        }
+    }
+}
+
+/// A reference to a specific column in a specific task or table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ColumnRef {
-    /// The task (or table) that owns this column.
-    pub task_id: String,
+    /// Where the column lives.
+    pub source: ColumnSource,
     /// The column name.
     pub column_name: String,
 }
 
 impl ColumnRef {
-    pub fn new(task_id: impl Into<String>, column_name: impl Into<String>) -> Self {
+    /// Construct a column ref against a *table* (the default for SQL
+    /// extractor output). Most existing call sites want this — when the
+    /// SQL parser sees `FROM orders`, it doesn't yet know which task
+    /// produced `orders`.
+    pub fn new(table_or_task_id: impl Into<String>, column_name: impl Into<String>) -> Self {
         Self {
-            task_id: task_id.into(),
+            source: ColumnSource::Table(table_or_task_id.into()),
             column_name: column_name.into(),
         }
+    }
+
+    /// Explicit table-scoped column.
+    pub fn table(table_name: impl Into<String>, column_name: impl Into<String>) -> Self {
+        Self {
+            source: ColumnSource::Table(table_name.into()),
+            column_name: column_name.into(),
+        }
+    }
+
+    /// Task-scoped column (used after cross-task stitching).
+    pub fn task(task: TaskRef, column_name: impl Into<String>) -> Self {
+        Self {
+            source: ColumnSource::Task(task),
+            column_name: column_name.into(),
+        }
+    }
+
+    /// Display-form qualifier (table name or `dag::task`).
+    pub fn qualifier(&self) -> String {
+        self.source.qualifier()
     }
 }
 
 impl std::fmt::Display for ColumnRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}", self.task_id, self.column_name)
+        write!(f, "{}.{}", self.qualifier(), self.column_name)
     }
 }
 
@@ -67,6 +155,7 @@ pub enum TransformType {
 /// This is a directed graph where:
 /// - Nodes are `ColumnRef` (task.column)
 /// - Edges are `LineageEdge` (source → target with transform info)
+#[derive(Debug)]
 pub struct LineageGraph {
     /// Forward edges: source → list of targets.
     forward: HashMap<ColumnRef, Vec<LineageEdge>>,
@@ -172,17 +261,25 @@ impl LineageGraph {
         }
     }
 
-    /// Get all columns for a given task.
-    pub fn columns_for_task(&self, task_id: &str) -> Vec<&ColumnRef> {
+    /// Get all columns for a given qualifier (table name or task id).
+    ///
+    /// Matches both `ColumnSource::Table(name)` and
+    /// `ColumnSource::Task(task)` whose `task_id` equals the supplied
+    /// value — convenient for callers that don't care about the
+    /// distinction (visualisation, "all columns on X").
+    pub fn columns_for_task(&self, qualifier: &str) -> Vec<&ColumnRef> {
         self.columns
             .iter()
-            .filter(|c| c.task_id == task_id)
+            .filter(|c| match &c.source {
+                ColumnSource::Table(t) => t == qualifier,
+                ColumnSource::Task(t) => t.task_id == qualifier,
+            })
             .collect()
     }
 
-    /// Get all unique tasks in the graph.
-    pub fn tasks(&self) -> HashSet<&str> {
-        self.columns.iter().map(|c| c.task_id.as_str()).collect()
+    /// Get all unique qualifier names (tables + tasks) in the graph.
+    pub fn tasks(&self) -> HashSet<String> {
+        self.columns.iter().map(|c| c.qualifier()).collect()
     }
 
     /// Get all edges in the graph.
@@ -207,9 +304,13 @@ impl LineageGraph {
             .iter()
             .map(|col| {
                 serde_json::json!({
-                    "id": format!("{}.{}", col.task_id, col.column_name),
-                    "task": col.task_id,
+                    "id": col.to_string(),
+                    "task": col.qualifier(),
                     "column": col.column_name,
+                    "kind": match &col.source {
+                        ColumnSource::Table(_) => "table",
+                        ColumnSource::Task(_) => "task",
+                    },
                 })
             })
             .collect();
@@ -219,8 +320,8 @@ impl LineageGraph {
             .iter()
             .map(|edge| {
                 serde_json::json!({
-                    "source": format!("{}.{}", edge.source.task_id, edge.source.column_name),
-                    "target": format!("{}.{}", edge.target.task_id, edge.target.column_name),
+                    "source": edge.source.to_string(),
+                    "target": edge.target.to_string(),
                     "transform": format!("{:?}", edge.transform_type),
                 })
             })
@@ -345,11 +446,11 @@ mod tests {
         assert!(trace
             .columns
             .iter()
-            .any(|c| c.task_id == "transform" && c.column_name == "total_amount"));
+            .any(|c| c.qualifier() == "transform" && c.column_name == "total_amount"));
         assert!(trace
             .columns
             .iter()
-            .any(|c| c.task_id == "extract_orders" && c.column_name == "total"));
+            .any(|c| c.qualifier() == "extract_orders" && c.column_name == "total"));
         assert_eq!(trace.edges.len(), 2);
     }
 
@@ -363,11 +464,11 @@ mod tests {
         assert!(trace
             .columns
             .iter()
-            .any(|c| c.task_id == "transform" && c.column_name == "total_amount"));
+            .any(|c| c.qualifier() == "transform" && c.column_name == "total_amount"));
         assert!(trace
             .columns
             .iter()
-            .any(|c| c.task_id == "aggregate" && c.column_name == "daily_total"));
+            .any(|c| c.qualifier() == "aggregate" && c.column_name == "daily_total"));
     }
 
     #[test]

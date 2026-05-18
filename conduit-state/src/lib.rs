@@ -9,9 +9,11 @@
 pub mod env_history_store;
 pub mod environment_manager;
 pub mod event_store;
+pub mod external_lineage_store;
 pub mod snapshot_store;
 
 pub use env_history_store::EnvHistoryStore;
 pub use environment_manager::EnvironmentManager;
 pub use event_store::{spawn_compaction_task, CompactionResult, EventStore, RetentionPolicy};
+pub use external_lineage_store::RocksExternalLineageBackend;
 pub use snapshot_store::SnapshotStore;

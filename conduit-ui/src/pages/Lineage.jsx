@@ -6,6 +6,10 @@ import {
   lineageGraph,
   schemaDiff,
   validateContract,
+  getUnifiedDatasetView,
+  getOpenLineageStats,
+  getPlanCacheStats,
+  invalidatePlanCache,
 } from '../api';
 import Card from '../components/Card';
 import StatusBadge from '../components/StatusBadge';
@@ -73,6 +77,63 @@ export default function Lineage() {
   const [contractNoUnknownTypes, setContractNoUnknownTypes] = useState(false);
   const [contractResult, setContractResult] = useState(null);
   const [contractLoading, setContractLoading] = useState(false);
+
+  // Datasets Tab State
+  const [datasetNamespace, setDatasetNamespace] = useState('');
+  const [datasetName, setDatasetName] = useState('');
+  const [datasetView, setDatasetView] = useState(null);
+  const [datasetLoading, setDatasetLoading] = useState(false);
+  const [datasetError, setDatasetError] = useState(null);
+  const [datasetStats, setDatasetStats] = useState(null);
+  const [planCacheStats, setPlanCacheStats] = useState(null);
+  const [invalidating, setInvalidating] = useState(false);
+
+  const refreshCacheStats = useCallback(() => {
+    getPlanCacheStats().then(setPlanCacheStats).catch(() => {});
+  }, []);
+
+  const handleInvalidateCache = useCallback(async () => {
+    setInvalidating(true);
+    try {
+      await invalidatePlanCache();
+      refreshCacheStats();
+    } catch (err) {
+      // Non-fatal; surface in console for now.
+      console.error('Cache invalidate failed:', err);
+    } finally {
+      setInvalidating(false);
+    }
+  }, [refreshCacheStats]);
+
+  const handleLoadDatasetView = useCallback(async () => {
+    if (!datasetNamespace.trim() || !datasetName.trim()) {
+      setDatasetError('Both namespace and name are required.');
+      return;
+    }
+    setDatasetLoading(true);
+    setDatasetError(null);
+    setDatasetView(null);
+    try {
+      const view = await getUnifiedDatasetView(
+        datasetNamespace.trim(),
+        datasetName.trim()
+      );
+      setDatasetView(view);
+      // Refresh cache stats after the query so users can see hit-rate.
+      refreshCacheStats();
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setDatasetLoading(false);
+    }
+  }, [datasetNamespace, datasetName, refreshCacheStats]);
+
+  // Load store stats + cache stats when the Datasets tab is opened.
+  useEffect(() => {
+    if (tabIndex !== 4) return;
+    getOpenLineageStats().then(setDatasetStats).catch(() => {});
+    refreshCacheStats();
+  }, [tabIndex, refreshCacheStats]);
 
   // SQL Lineage Handlers
   const handleExtractLineage = useCallback(async () => {
@@ -386,6 +447,7 @@ export default function Lineage() {
     { label: 'Column Trace', icon: Network },
     { label: 'Schema Diff', icon: GitCompare },
     { label: 'Contracts', icon: Shield },
+    { label: 'Datasets', icon: Database },
   ];
 
   return (
@@ -1363,6 +1425,274 @@ export default function Lineage() {
           )}
         </div>
       )}
+
+      {/* Tab 5: Datasets — unified internal + external lineage view */}
+      {tabIndex === 4 && (
+        <div className="space-y-4">
+          <Card className="space-y-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Database size={20} className="text-conduit-accent" />
+                <h3 className="text-lg font-semibold text-conduit-light">
+                  Cross-system dataset view
+                </h3>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-conduit-light/60">
+                {datasetStats && (
+                  <span>
+                    store: {datasetStats.eventCount} events · {datasetStats.datasetCount} datasets · {datasetStats.edgeCount} edges
+                  </span>
+                )}
+                {planCacheStats && (
+                  <span title={`last compile: ${planCacheStats.lastCompileMs}ms`}>
+                    cache: {planCacheStats.hits}H / {planCacheStats.misses}M · {planCacheStats.stitchedDagCount}/{planCacheStats.cachedDagCount} DAGs
+                  </span>
+                )}
+                <button
+                  onClick={handleInvalidateCache}
+                  disabled={invalidating}
+                  className="px-2 py-0.5 rounded border border-conduit-accent/30 text-conduit-accent hover:bg-conduit-accent/10 disabled:opacity-50 transition"
+                  title="Force a plan recompile on the next request"
+                >
+                  {invalidating ? 'flushing…' : 'flush cache'}
+                </button>
+              </div>
+            </div>
+
+            <p className="text-sm text-conduit-light/70">
+              Search any dataset (by OpenLineage namespace + name) to see its
+              producers, schema, and column-level upstream/downstream — fused
+              across Conduit's compiled DAGs and ingested OpenLineage events
+              from foreign systems.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_auto] gap-3">
+              <input
+                type="text"
+                value={datasetNamespace}
+                onChange={(e) => setDatasetNamespace(e.target.value)}
+                placeholder="namespace (e.g. warehouse)"
+                className="px-3 py-2 bg-conduit-dark border border-conduit-accent/30 rounded-md text-conduit-light placeholder-conduit-light/40 focus:outline-none focus:border-conduit-accent"
+              />
+              <input
+                type="text"
+                value={datasetName}
+                onChange={(e) => setDatasetName(e.target.value)}
+                placeholder="dataset name (e.g. staging.orders)"
+                className="px-3 py-2 bg-conduit-dark border border-conduit-accent/30 rounded-md text-conduit-light placeholder-conduit-light/40 focus:outline-none focus:border-conduit-accent"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleLoadDatasetView();
+                }}
+              />
+              <Button onClick={handleLoadDatasetView} loading={datasetLoading}>
+                <Search size={14} />
+                Inspect
+              </Button>
+            </div>
+
+            {datasetError && (
+              <div className="p-3 bg-red-900/20 border border-red-700/50 rounded text-red-200 text-sm">
+                {datasetError}
+              </div>
+            )}
+          </Card>
+
+          {datasetView && (
+            <Card className="space-y-5">
+              <div className="flex items-center justify-between border-b border-conduit-accent/20 pb-3">
+                <div>
+                  <h3 className="text-lg font-semibold text-conduit-light">
+                    {datasetView.namespace}/{datasetView.name}
+                  </h3>
+                  <p className="text-xs text-conduit-light/60 mt-1">
+                    schema source: <span className="font-mono">{datasetView.schema?.source}</span>
+                  </p>
+                </div>
+              </div>
+
+              {/* Producers */}
+              <div>
+                <h4 className="text-sm font-semibold text-conduit-light mb-2 flex items-center gap-2">
+                  <Table2 size={14} /> Producers
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="p-3 bg-conduit-dark/40 border border-conduit-accent/20 rounded">
+                    <div className="text-xs text-conduit-accent uppercase tracking-wide mb-1">
+                      Internal (Conduit)
+                    </div>
+                    {datasetView.producers?.internal ? (
+                      <div className="text-sm text-conduit-light font-mono">
+                        {datasetView.producers.internal.dagId}.{datasetView.producers.internal.taskId}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-conduit-light/50">(none)</div>
+                    )}
+                  </div>
+                  <div className="p-3 bg-conduit-dark/40 border border-conduit-accent/20 rounded">
+                    <div className="text-xs text-conduit-accent uppercase tracking-wide mb-1">
+                      External (Ingested)
+                    </div>
+                    {datasetView.producers?.external ? (
+                      <div className="text-sm text-conduit-light">
+                        <div className="font-mono">
+                          {datasetView.producers.external.jobNamespace}/{datasetView.producers.external.jobName}
+                        </div>
+                        <div className="text-xs text-conduit-light/60 mt-1">
+                          latest run: {datasetView.producers.external.runId}
+                          {' · '}
+                          {datasetView.producers.externalEventCount} event(s)
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-conduit-light/50">(none)</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Schema */}
+              {datasetView.schema?.columns?.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-semibold text-conduit-light mb-2 flex items-center gap-2">
+                    <Columns size={14} /> Schema ({datasetView.schema.columns.length} columns)
+                  </h4>
+                  <div className="bg-conduit-dark/40 border border-conduit-accent/20 rounded p-2">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-xs text-conduit-light/60 uppercase">
+                          <th className="text-left py-1 px-2">Name</th>
+                          <th className="text-left py-1 px-2">Type</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {datasetView.schema.columns.map((c, i) => (
+                          <tr key={i} className="border-t border-conduit-accent/10">
+                            <td className="py-1 px-2 font-mono text-conduit-light">{c.name}</td>
+                            <td className="py-1 px-2 text-conduit-light/70">{c.dtype || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Upstream */}
+              <div>
+                <h4 className="text-sm font-semibold text-conduit-light mb-2 flex items-center gap-2">
+                  <ArrowUp size={14} /> Upstream
+                </h4>
+                <UpstreamDownstreamPanel
+                  internal={datasetView.upstream?.internal || []}
+                  external={datasetView.upstream?.external || []}
+                  direction="upstream"
+                />
+              </div>
+
+              {/* Downstream */}
+              <div>
+                <h4 className="text-sm font-semibold text-conduit-light mb-2 flex items-center gap-2">
+                  <ArrowDown size={14} /> Downstream
+                </h4>
+                <UpstreamDownstreamPanel
+                  internal={datasetView.downstream?.internal || []}
+                  external={datasetView.downstream?.external || []}
+                  direction="downstream"
+                />
+              </div>
+
+              {/* Recent events */}
+              {datasetView.recentEvents?.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-semibold text-conduit-light mb-2">
+                    Recent ingested events ({datasetView.recentEvents.length})
+                  </h4>
+                  <div className="bg-conduit-dark/40 border border-conduit-accent/20 rounded p-2 max-h-64 overflow-y-auto">
+                    {datasetView.recentEvents.map((e, i) => (
+                      <div
+                        key={i}
+                        className="py-2 px-2 border-b border-conduit-accent/10 last:border-b-0 text-xs"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-conduit-light">
+                            {e.jobNamespace}/{e.jobName}
+                          </span>
+                          <span className="text-conduit-light/50">
+                            {new Date(e.receivedAt).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="text-conduit-light/60 mt-1">
+                          run {e.runId} · {e.eventType} ·{' '}
+                          {e.inputs.length} in / {e.outputs.length} out
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Card>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// Renders the internal+external split for upstream/downstream sections.
+function UpstreamDownstreamPanel({ internal, external, direction }) {
+  if (internal.length === 0 && external.length === 0) {
+    return (
+      <div className="p-3 bg-conduit-dark/30 border border-conduit-accent/10 rounded text-sm text-conduit-light/50">
+        No {direction} dependencies recorded.
+      </div>
+    );
+  }
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="p-3 bg-conduit-dark/40 border border-conduit-accent/20 rounded">
+        <div className="text-xs text-conduit-accent uppercase tracking-wide mb-2">
+          Internal ({internal.length})
+        </div>
+        {internal.length === 0 ? (
+          <div className="text-sm text-conduit-light/50">(none)</div>
+        ) : (
+          <ul className="space-y-1">
+            {internal.map((r, i) => (
+              <li key={i} className="text-sm font-mono text-conduit-light">
+                {r.kind === 'task'
+                  ? `${r.dagId}.${r.taskId}.${r.column}`
+                  : `${r.table}.${r.column}`}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="p-3 bg-conduit-dark/40 border border-conduit-accent/20 rounded">
+        <div className="text-xs text-conduit-accent uppercase tracking-wide mb-2">
+          External ({external.length})
+        </div>
+        {external.length === 0 ? (
+          <div className="text-sm text-conduit-light/50">(none)</div>
+        ) : (
+          <ul className="space-y-1">
+            {external.map((e, i) => (
+              <li key={i} className="text-sm font-mono text-conduit-light">
+                {direction === 'upstream' ? (
+                  <>
+                    {e.sourceDataset}.{e.sourceColumn}
+                    <span className="text-conduit-light/40"> → {e.targetColumn}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-conduit-light/40">{e.sourceColumn} → </span>
+                    {e.targetDataset}.{e.targetColumn}
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

@@ -7,6 +7,10 @@ description = "Event store, snapshot manager, and virtual environment management
 
 [dependencies]
 conduit-common = { path = "../conduit-common" }
+# `testing` feature exposes the conformance suite. The cost is a few
+# unused helpers in release builds; the win is one source of truth for
+# backend correctness across in-memory and persistent implementations.
+conduit-lineage = { path = "../conduit-lineage", features = ["testing"] }
 rocksdb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

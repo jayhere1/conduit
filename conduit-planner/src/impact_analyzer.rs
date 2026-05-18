@@ -281,6 +281,8 @@ mod tests {
             trigger_rule: TriggerRule::default(),
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 
@@ -302,6 +304,7 @@ mod tests {
             compiled_at: Utc::now(),
             catchup: true,
             max_catchup_runs: None,
+            lineage_strict: false,
         };
         let mut dags = HashMap::new();
         dags.insert(dag_id.to_string(), dag);
@@ -432,6 +435,7 @@ mod tests {
             compiled_at: Utc::now(),
             catchup: true,
             max_catchup_runs: None,
+            lineage_strict: false,
         };
 
         let all_tasks: HashSet<_> = vec!["a", "b", "c", "d"]

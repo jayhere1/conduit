@@ -55,6 +55,8 @@ fn make_etl_dag() -> Dag {
             trigger_rule: TriggerRule::NoDeps,
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         },
     );
 
@@ -78,6 +80,8 @@ fn make_etl_dag() -> Dag {
             trigger_rule: TriggerRule::AllSuccess,
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         },
     );
 
@@ -101,6 +105,8 @@ fn make_etl_dag() -> Dag {
             trigger_rule: TriggerRule::AllSuccess,
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         },
     );
 
@@ -121,6 +127,7 @@ fn make_etl_dag() -> Dag {
         compiled_at: Utc::now(),
         catchup: true,
         max_catchup_runs: None,
+        lineage_strict: false,
     }
 }
 
@@ -150,6 +157,8 @@ fn make_diamond_dag() -> Dag {
             trigger_rule: TriggerRule::NoDeps,
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         },
     );
 
@@ -174,6 +183,8 @@ fn make_diamond_dag() -> Dag {
                 trigger_rule: TriggerRule::AllSuccess,
                 incremental: None,
                 contracts: None,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
             },
         );
     }
@@ -204,6 +215,8 @@ fn make_diamond_dag() -> Dag {
             trigger_rule: TriggerRule::AllSuccess,
             incremental: None,
             contracts: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         },
     );
 
@@ -225,6 +238,7 @@ fn make_diamond_dag() -> Dag {
         compiled_at: Utc::now(),
         catchup: true,
         max_catchup_runs: None,
+        lineage_strict: false,
     }
 }
 
