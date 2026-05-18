@@ -91,6 +91,109 @@ pub trait AlertHook: Send + Sync + 'static {
     }
 }
 
+/// `AlertHook` that POSTs the `AlertEvent` JSON to a webhook URL. The
+/// default transport for `Dag.on_failure` URLs configured on individual
+/// DAGs — internal teams who want PagerDuty / Slack / Opsgenie wire
+/// their own `impl AlertHook`, but a plain HTTP POST is the lowest
+/// common denominator and finally makes the long-parsed
+/// `Dag.on_failure` field do something.
+///
+/// Timeouts and retries: a single POST with the configured timeout. No
+/// in-trait retry — alert delivery is fire-and-forget by design (the
+/// trait contract is "swallowed on error"). If you need durable
+/// delivery, wrap a queue in your own `impl AlertHook` rather than
+/// piling retry logic into this struct.
+pub struct WebhookAlertHook {
+    url: String,
+    client: reqwest::Client,
+}
+
+impl WebhookAlertHook {
+    /// Default request timeout for the webhook POST. Picked to be
+    /// short enough that a hung receiver can't queue up tokio tasks
+    /// indefinitely, but long enough to survive a slow TLS handshake.
+    pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Build a webhook hook from a URL. Errors if the reqwest client
+    /// can't be built — usually a TLS config issue at link time.
+    pub fn new(url: impl Into<String>) -> Result<Self, reqwest::Error> {
+        Self::with_timeout(url, Self::DEFAULT_TIMEOUT)
+    }
+
+    /// Like `new` but with an explicit timeout. Use for tests that
+    /// shouldn't wait `DEFAULT_TIMEOUT` seconds for a fake server to
+    /// hang.
+    pub fn with_timeout(
+        url: impl Into<String>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder().timeout(timeout).build()?;
+        Ok(Self {
+            url: url.into(),
+            client,
+        })
+    }
+}
+
+#[async_trait]
+impl AlertHook for WebhookAlertHook {
+    async fn fire(&self, event: &AlertEvent) -> Result<(), String> {
+        // serde_json::to_value is infallible for `AlertEvent` since it's
+        // entirely Serialize-derive — `.expect` is the documented use.
+        let resp = self
+            .client
+            .post(&self.url)
+            .json(event)
+            .send()
+            .await
+            .map_err(|e| format!("POST {} failed: {}", self.url, e))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "POST {} returned non-2xx status {}",
+                self.url,
+                resp.status()
+            ));
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "webhook"
+    }
+}
+
+/// Wraps another `AlertHook` so it only fires for events whose `dag_id`
+/// matches. Used to scope a `WebhookAlertHook` built from a single
+/// `Dag.on_failure` URL to that DAG only — without this, every webhook
+/// would receive every DAG's failure.
+pub struct ScopedHook<H: AlertHook> {
+    dag_id: conduit_common::dag::DagId,
+    inner: H,
+}
+
+impl<H: AlertHook> ScopedHook<H> {
+    pub fn new(dag_id: impl Into<conduit_common::dag::DagId>, inner: H) -> Self {
+        Self {
+            dag_id: dag_id.into(),
+            inner,
+        }
+    }
+}
+
+#[async_trait]
+impl<H: AlertHook> AlertHook for ScopedHook<H> {
+    async fn fire(&self, event: &AlertEvent) -> Result<(), String> {
+        if event.dag_id != self.dag_id {
+            return Ok(()); // Not our DAG; silently no-op.
+        }
+        self.inner.fire(event).await
+    }
+
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use super::*;
@@ -154,5 +257,121 @@ mod tests {
         let calls = hook.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].failed_tasks[0].1, "boom");
+    }
+
+    fn sample_event(dag_id: &str) -> AlertEvent {
+        AlertEvent {
+            dag_id: dag_id.to_string(),
+            run_id: "r1".to_string(),
+            status: AlertStatus::Failed,
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            failed_tasks: vec![("t".to_string(), "boom".to_string())],
+            config: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_hook_filters_by_dag_id() {
+        // The scoped wrapper around a recording hook only fires for the
+        // configured dag_id. Other DAGs' events flow past it without
+        // being recorded.
+        let inner = test_helpers::RecordingHook::new();
+        let scoped = ScopedHook::new("etl".to_string(), inner.clone());
+
+        scoped.fire(&sample_event("etl")).await.unwrap();
+        scoped.fire(&sample_event("other")).await.unwrap();
+
+        let calls = inner.calls();
+        assert_eq!(calls.len(), 1, "only the matching dag_id should fire");
+        assert_eq!(calls[0].dag_id, "etl");
+    }
+
+    // The webhook round-trip is an in-process listener so the test runs
+    // anywhere without external infra. Binds to 127.0.0.1:0, accepts one
+    // connection, parses the HTTP body, and returns 204. Captures the
+    // request body back through a oneshot channel so the test asserts
+    // on what the webhook actually sent.
+    async fn one_shot_webhook_server() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}/webhook", addr);
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::with_capacity(2048);
+            // Read until we've consumed the request body. HTTP/1.1 with a
+            // small POST body — we just slurp what's available; reqwest
+            // sends the body in the same write as the headers for small
+            // payloads, so a single read is enough in practice.
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = sock.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                // Naive end-of-body detection: stop once we see the
+                // closing `}` after the headers. Good enough for a
+                // JSON payload under a few KiB.
+                if buf.windows(4).any(|w| w == b"\r\n\r\n")
+                    && buf.last().copied() == Some(b'}')
+                {
+                    break;
+                }
+            }
+            // Split off the body (after the first CRLFCRLF).
+            let body = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                Some(p) => String::from_utf8_lossy(&buf[p + 4..]).into_owned(),
+                None => String::new(),
+            };
+            let _ = tx.send(body);
+            let _ = sock
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+
+        (url, rx)
+    }
+
+    #[tokio::test]
+    async fn webhook_hook_posts_event_as_json() {
+        let (url, rx) = one_shot_webhook_server().await;
+        let hook =
+            WebhookAlertHook::with_timeout(url, std::time::Duration::from_secs(5)).unwrap();
+        let event = sample_event("etl");
+
+        hook.fire(&event).await.unwrap();
+
+        let body = rx.await.expect("server should receive the POST body");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("body must be JSON");
+        assert_eq!(parsed["dag_id"], "etl");
+        assert_eq!(parsed["run_id"], "r1");
+        assert_eq!(parsed["status"], "failed");
+        assert_eq!(parsed["failed_tasks"][0][0], "t");
+    }
+
+    #[tokio::test]
+    async fn webhook_hook_reports_error_on_unreachable_url() {
+        // Bound but unreachable — we never accept the connection so the
+        // POST times out (or refuses, depending on the platform).
+        // Either way the hook returns Err, which is the contract.
+        let hook = WebhookAlertHook::with_timeout(
+            "http://127.0.0.1:1/never_listens".to_string(),
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+        let event = sample_event("etl");
+        let err = hook.fire(&event).await.unwrap_err();
+        assert!(
+            err.contains("POST") && err.contains("never_listens"),
+            "error message should mention the URL: {}",
+            err
+        );
     }
 }

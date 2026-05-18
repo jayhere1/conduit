@@ -25,7 +25,7 @@ pub mod scheduler;
 pub mod trigger;
 
 // Re-export key types
-pub use alerts::{AlertEvent, AlertHook, AlertStatus};
+pub use alerts::{AlertEvent, AlertHook, AlertStatus, ScopedHook, WebhookAlertHook};
 pub use cron::CronSchedule;
 pub use pool_manager::PoolManager;
 pub use scheduler::{

@@ -219,6 +219,48 @@ impl Scheduler {
         self
     }
 
+    /// Scan every DAG with a `Dag.on_failure` webhook URL set and
+    /// auto-register a scoped `WebhookAlertHook` for it. Each hook only
+    /// fires for its own DAG (via `ScopedHook`), so multiple DAGs with
+    /// different webhooks each get their own notifications.
+    ///
+    /// Webhook construction failures (TLS config errors, malformed URLs
+    /// rejected by reqwest's client builder) are logged and skipped —
+    /// the scheduler still starts, just without the alert path for that
+    /// DAG. Same fail-quiet posture as the rest of the hook surface.
+    ///
+    /// Closes the long-standing gap where `Dag.on_failure` was parsed by
+    /// the compiler since the first lineage commit but never wired to
+    /// actually fire anything.
+    pub fn with_dag_failure_webhooks(mut self) -> Self {
+        for (dag_id, dag) in &self.plans {
+            let Some(url) = dag.on_failure.as_ref() else {
+                continue;
+            };
+            match crate::alerts::WebhookAlertHook::new(url.clone()) {
+                Ok(webhook) => {
+                    let scoped = crate::alerts::ScopedHook::new(dag_id.clone(), webhook);
+                    self.alert_hooks
+                        .push(Arc::new(scoped) as Arc<dyn crate::alerts::AlertHook>);
+                    info!(
+                        dag_id = %dag_id,
+                        url = %url,
+                        "Registered DAG-failure webhook alert"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        dag_id = %dag_id,
+                        url = %url,
+                        error = %e,
+                        "Failed to build webhook client; DAG's on_failure URL will not fire"
+                    );
+                }
+            }
+        }
+        self
+    }
+
     /// Send a command to the executor, logging and recording metrics on failure.
     fn send_command(&self, cmd: SchedulerCommand) {
         if let Err(e) = self.command_tx.send(cmd) {
