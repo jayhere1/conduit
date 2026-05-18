@@ -1,7 +1,7 @@
 # Conduit: Strategic Direction Review
 
-**Date:** 2026-05-15 (refreshed)
-**Status:** Working notes — premise review, feasibility assessment, and direction recommendations. Updated after a ~10-commit progress check.
+**Date:** 2026-05-18 (refreshed)
+**Status:** Working notes — premise review, feasibility assessment, and direction recommendations. Updated after a ~10-commit progress check, then again after the Bet 5 (plan/apply) and Bet 3 (observability finish) work landed.
 **Assumptions for this version:** team expertise is available, internal users already depend on the platform, deletion is off the table.
 
 ---
@@ -10,6 +10,12 @@
 
 Shipped between the first draft of this doc and this refresh:
 
+- **Bet 5 — plan/apply workflow (rollback + partial apply + readable diff) — shipped.** Three coordinated slices that take plan/apply from demoable to CI-grade. **Rollback** (`5948960`, `2fb20b4`): `cmd_apply` no longer mutates a local `Environment` clone that never made it back through `env_manager`. The new `EnvironmentManager::apply_snapshot_map(env, new_map, plan_id)` write-through captures the prior `snapshot_map` as a history entry tagged `EnvHistoryReason::Apply { plan_id }` before mutating, so `conduit env rollback <env>` reverts the most recent apply with the same mechanism that already covered promotions. The CLI prints the captured version on success with the exact rollback command the operator can run; `conduit env history` and the UI's Environments history modal both render `apply (plan <plan_id>)` rows. Tests `apply_snapshot_map_captures_prior_state` + `apply_then_rollback_round_trips` + `apply_without_history_store_still_mutates` in `conduit-state/src/environment_manager.rs`. **Partial apply** (`15b7890`, `2fb20b4`): `DeploymentPlan::filtered_to(&plan, &selectors) -> Result<…, PartialApplyError>` narrows a plan to selected `(dag_id, task_id)` pairs plus the transitive upstream Execute / Reuse / Remove they depend on; Skip upstream are dropped (no-op, no point including). `PartialApplyError::EmptySelection` and `UnknownSelectors(Vec<(dag, task)>)` surface operator errors instead of silent no-ops. CLI: `conduit apply <env> --only DAG.TASK` (repeatable). Tests `filtered_to_selects_single_task_and_auto_includes_upstream` + `filtered_to_skips_unchanged_upstream` + `filtered_to_errors_on_unknown_selector` + `filtered_to_rejects_empty_selection` + `filtered_to_preserves_plan_id_and_target` in `conduit-planner/src/deployment_plan.rs`. **Readable diff** (`014aaa8`): rewrote `ChangeSet::Display` to group changes by DAG (BTreeMap for deterministic order), label each kind in words ("new task", "task changed", "upstream changed", "task removed"), and render fingerprint deltas per kind — Added shows `(fp <new>)`, Removed shows `(was fp <old>)`, Modified / UpstreamInvalidated shows `(fp <old> → <new>)`. When nothing differs, the diff says so explicitly. Tests `display_groups_changes_by_dag_with_fingerprints` + `display_renders_old_to_new_fingerprint_for_modified` + `display_reports_clean_when_nothing_changed` in `conduit-planner/src/change_detector.rs`.
+- **Bet 3 — observability finish — shipped.** The three remaining Bet 3 items from the prior revision (OTel exporter, alert hook surface, structured run logs queryable from UI) all landed. **OTLP tracing exporter** (`e04afff`): new `conduit-cli/src/tracing_setup.rs` module with `pub fn init_tracing(verbose: bool)` replacing the previous 5-line `tracing_subscriber::fmt().init()` call. Gated behind a default-off `otel` cargo feature on `conduit-cli` so the standard build pulls no new deps. Under the feature, `OTEL_EXPORTER_OTLP_ENDPOINT` (env var, no CLI flag) activates the exporter with service name `"conduit"` on the OTel `Resource`, W3C `TraceContextPropagator` installed for distributed-trace context, and graceful fmt-only fallback if the exporter init fails (so a misconfigured collector can't kill the CLI). Crate versions: `opentelemetry 0.27` + `opentelemetry_sdk 0.27` + `opentelemetry-otlp 0.27` + `tracing-opentelemetry 0.28` (the matching counterpart for otel 0.27 — `tracing-opentelemetry`'s version lags by one minor). Both `cargo check --workspace` (no feature) and `cargo check -p conduit-cli --features otel` are clean. **Alert hook surface** (`1abe114`): `Dag.on_failure: Option<String>` was previously parsed by both the Python decorator AST extractor and the YAML parser but never fired. New `conduit-scheduler/src/alerts.rs` defines `AlertEvent` (dag_id, run_id, status, started_at, completed_at, failed_tasks: `Vec<(TaskId, String)>`, config), `AlertStatus` (Failed | Cancelled — Success has no mapping by design so impls have a closed set), and an `AlertHook` async trait with `fire(&self, &AlertEvent) -> Result<(), String>`. `Scheduler::with_alert_hook(Arc<dyn AlertHook>)` registers hooks at build time; `check_dag_run_complete` builds the event and spawns each hook on the tokio runtime so a slow PagerDuty / Slack call can't stall the scheduler. Hook errors are logged and swallowed — alert delivery is never load-bearing. No transport impl ships in-tree (internal teams plug their own); a `WebhookAlertHook` reading the `Dag.on_failure` URL is the natural next slice but deferred until a real internal user asks. Tests `alert_hook_fires_on_dag_failure` + `alert_hook_does_not_fire_on_success` in `conduit-scheduler/tests/scheduler_integration_test.rs` (capturing-hook fixture). **Structured run logs queryable from UI** (`612f3a6`): `GET /api/v1/events` and `GET /api/v1/events/:sequence` have been placeholders since the API crate landed — they returned empty arrays with a "Event store query will be backed by RocksDB" note. Meanwhile the executor / scheduler / plan-apply paths have been writing structured `EventKind` records into `state_dir/events` the whole time, and the UI's `Events.jsx` plus per-run views have been consuming those empty placeholders. Wired now: `AppState` gains `event_store: Option<Arc<EventStore>>` opened in `with_options` from `state_dir/events` (open failures log and degrade to `None`, so the endpoint reports an empty result rather than 500-ing on a fresh box); `list_events` reads from the real store via `range(from, to)` and accepts new filter params `run_id`, `dag_id`, `task_id` alongside the existing `event_type`. Event-type matching is case-insensitive (`?event_type=taskfailed` ≡ `TaskFailed`). Response shape adds `total` / `returned` / `current_sequence` so the UI can paginate properly. `get_event` queries `store.get(sequence)` and 404s on missing. Tests `run_id_filter_matches_task_and_dag_events` + `event_type_filter_is_case_insensitive` + `task_id_filter_drops_non_task_events` + `event_type_name_matches_serde_tag` in `conduit-api/src/handlers/events.rs`.
+- **OpenLineage ingest (Bet 2.1) — shipped.** Conduit now both emits and ingests OpenLineage. `POST /api/v1/openlineage/v1/lineage` accepts spec-shaped `RunEvent`s — any compliant producer (Airflow, dbt, Spark) points at it with just a base URL change. Read surface: `GET /api/v1/openlineage/events`, `GET /api/v1/openlineage/datasets/:ns/:name`, `GET /api/v1/openlineage/stats`. **Persistence is the default**: ingested events are durable in a dedicated RocksDB instance at `{state_dir}/external_lineage_db` (column families: `events` keyed by inverted-nanos for newest-first iteration; `datasets`; `edges_by_target`/`edges_by_source` for symmetric prefix scans; `stats` for counters). The store is trait-based — `conduit_lineage::ExternalLineageBackend` has an in-memory implementation in `conduit-lineage` and the durable RocksDB implementation in `conduit-state::RocksExternalLineageBackend`; both pass the same conformance suite. **Unified dataset view**: `GET /api/v1/lineage/datasets/:ns/:name/unified` fuses internal lineage (via `cross_task::stitch` over the compiled DAGs) with ingested external events into one response — producers (internal + external), schema, upstream + downstream column edges from both planes, recent events. The **Lineage page's Datasets tab** in `conduit-ui/src/pages/Lineage.jsx` renders this as the canonical cross-system lineage UI: an operator can type `warehouse / staging.orders` and see "Airflow produces this, Conduit's `transform` task consumes it, Spark reads downstream" in one glance. **Plan + stitched-lineage cache**: `conduit_api::plan_cache::PlanCache` keeps `Arc<ConduitPlan>` and per-DAG `Arc<CrossTaskLineage>` in-process; invalidation is signature-keyed (per-file `(path, mtime_nanos, size)` hash filtering editor noise) with an optional TTL ceiling; double-checked locking prevents thundering-herd recompiles. The unified view's two former compile-on-every-request paths now share one cache lookup. Observability + manual flush: `GET /api/v1/lineage/cache/stats` (hits, misses, last_compile_ms, cached/stitched DAG counts), `POST /api/v1/lineage/cache/invalidate`, and a hits/misses badge + "flush cache" button on the UI Datasets tab. The architecture chose a side store over a third `ColumnSource::Foreign` variant so Bet 2.2's stitcher and the impact analyzer stay untouched. **Marquez round-trip** at `conduit-lineage/tests/marquez_roundtrip.rs` (env-gated) validates emit → Marquez ingest → Marquez read-back end-to-end, including the `conduit_task_lineage` facet survival. `docker-compose.marquez.yml` ships for local validation. Docs: `conduit-lineage/README.md` § "OpenLineage ingest and the cross-system view".
+- **Bet 7 — impact analysis as a CI gate — shipped.** New `conduit impact` CLI: `--base-plan <p> --head-plan <p>` (plan-file mode, paths auto-detect compiled JSON vs DAGs directory) and `--base <ref> --head <ref|WORKING>` (git mode, uses `git worktree`; `WORKING` token compiles uncommitted working tree). Diffs `Task.outputs` per task across plans via `SchemaChangeDetector`, traces downstream blast via `cross_task::stitch`. Markdown + JSON output formats with `lineage_coverage` metric. GH Action at `.github/workflows/conduit-impact.yml` — sticky PR comment via `actions/github-script`, merge gate on `allow-breaking` label. Release-binary infra: `.github/workflows/release.yml` (tag-only `v*`, 4-target matrix musl + native darwins via pinned `cross`, `.sha256` sidecars), `scripts/install.sh` (POSIX, `$HOME/.local/bin`, no sudo). Tarball convention: `conduit-{version}-{platform}.tar.gz`.
+- **Bet 1 — virtual environments experience layer — shipped (1.1–1.6).** `Environment::diff()` + `EnvironmentDiff` types; `conduit env diff <a> <b>` (git-style); `EnvHistoryStore` (file-per-version under `.conduit/env_history/{env}/{version:06}.json`, atomic write); `EnvironmentManager::promote()` captures prior `snapshot_map`; `rollback(env, to_version)` with `EnvironmentRolledBack` events; `conduit env history` + `conduit env rollback`; promotion policies (`require_source`, `min_age_secs` with "newest snapshot bake time" semantics) wired through CLI + API; `environment` filter on `/runs`; UI Environments page gains history modal + rollback button + policy editor + Runs link; per-run env column on Runs table with click-to-filter.
+- **Cross-task lineage (Bet 2.2) — shipped.** Python → SQL → Python column-level lineage stitched through the task graph. New `Dataset` / `ColumnSpec` model on `Task`, `@task(inputs=…, outputs=…)` + `@dag(lineage_strict=…)` in the SDK, decorator-AST extraction in the Python parser, SQL I/O inference (`INSERT INTO` / `CREATE TABLE AS` AST + YAML `target:` + anonymous fallback), `TableCatalog::register_dataset` + `lookup_producer`, `cross_task::stitch(dag) -> CrossTaskLineage`. `ColumnRef` now wraps `ColumnSource::Table | Task`. New CLI `conduit lineage trace --dag X --column task.col [--upstream|--downstream] [--format text|json]`. OpenLineage emit gains a `conduit_task_lineage` facet referencing producer tasks; input dataset namespaces become `conduit://<dag_id>` when the source is a task-produced dataset. Examples: `examples/dags/cross_task_lineage.yaml` (full SQL chain — `load.total → transform.total → seed.amount`) and `examples/dags/cross_task_lineage.py` (declarative Python form). Plan: `docs/CROSS_TASK_LINEAGE_PLAN.md`.
 - **OpenLineage emit** — `conduit-lineage/src/openlineage.rs` (414 LOC, 2 tests). Builds spec-shaped `RunEvent`s with columnLineage facets. CLI + API expose `--openlineage`. No transport layer yet — caller forwards to Marquez/DataHub.
 - **Jinja stripping in SQL parser** — regex placeholder substitution so `sqlparser-rs` doesn't choke on dbt-style templated SQL. *Not* semantically template-aware: no `ref()`/`source()` resolution, no macro context, no variable binding.
 - **View resolution in `TableCatalog`** — `register_view()` extracts output columns from a defining SQL statement and registers the view as a pseudo-table for downstream `SELECT *` expansion and bare-column resolution. Single-level (views cannot reference views).
@@ -23,6 +29,7 @@ Shipped between the first draft of this doc and this refresh:
 - **End-to-end `conduit run`** now actually works.
 - **Lineage benchmarks** — `conduit-bench/benches/lineage_bench.rs` (criterion, parameterized 10–500 tasks/columns).
 - **Prometheus `/metrics`** endpoint live at `conduit-api/src/handlers/prometheus.rs`.
+- **Bet 3 observability slice — shipped.** The existing Prometheus registry now exposes labeled task lifecycle throughput (`conduit_task_events_total{dag_id,task_id,status}`), per-task latency histograms (`conduit_task_duration_by_task_seconds{dag_id,task_id}`), and DAG run latency histograms (`conduit_dag_run_duration_seconds{dag_id}`). The scheduler records dispatch/completion/failure/retry/skip events plus DAG completion durations. Executor and `ProcessRunner` paths emit structured `tracing` spans around dispatch, task execution, subprocess execution, sensor polling, native SQL execution, success, failure, timeout, and retry request events; these are ready for an OpenTelemetry layer when the runtime wires one in.
 - **Lineage size now ~3,200 LOC** across 8 files, 69 unit tests (sql_parser alone is 1,440 LOC).
 
 The shape of the work is encouraging: most commits are *depth* (reliability, correctness, completeness in existing crates), not new surfaces.
@@ -117,14 +124,13 @@ The data layer is in place (`Environment`, `fork`, `promote_into`, `diff_count`,
 #### Bet 2 — Lineage depth (the compounding bet)
 Detailed below in §4. The recalibration: OpenLineage *emit* has shipped, so the next leverage is **OpenLineage ingest + a Marquez round-trip integration test** and **cross-task lineage (Python→SQL→Python)**. Jinja semantic awareness and dialect support stay on the roadmap but drop in priority — stripping is "good enough" for now and the bigger wins are integration + cross-task stitching.
 
-#### Bet 3 — Observability: finish what was started
-The Prometheus scrape endpoint exists; the rest does not. OpenTelemetry is in `Cargo.toml` but no spans are emitted, and there are no per-task latency histograms. Next slice:
-- OTel spans through the executor task lifecycle (start / end / error / retry)
-- Per-task and per-DAG latency + throughput histograms exported via the existing `/metrics` endpoint
-- Structured run logs queryable from the UI
-- Alert hook surface (so internal teams can wire to their existing alerting)
+#### Bet 3 — Observability: finish what was started — **shipped**
+All three items from the prior revision landed (see §0):
+- Wire an actual OpenTelemetry exporter/layer in the runtime configuration → `e04afff` (default-off `otel` cargo feature, OTLP gRPC, env-var activated).
+- Structured run logs queryable from the UI → `612f3a6` (`/api/v1/events` now backed by the real event store with `run_id` / `dag_id` / `task_id` / `event_type` filters; the existing UI pages were already wired to the placeholder endpoint and start working the moment the API returns real data).
+- Alert hook surface so internal teams can wire to their existing alerting → `1abe114` (`AlertHook` trait + scheduler integration; no transport impl in-tree by design).
 
-This is the smallest unit of work with the biggest credibility return.
+Was the smallest unit of work with the biggest credibility return — and it shipped, so the credibility is now realized.
 
 #### Bet 4 — One provider category to deep maturity
 The provider count is now honest (12 real / 20 stub, with a CLI warn at compile time when DAGs route through stubs — good). Next: pick the 2-3 internal teams actually use (likely Postgres + S3 + one warehouse) and drive them to "you'd bet a production workload on them":
@@ -134,13 +140,13 @@ The provider count is now honest (12 real / 20 stub, with a CLI warn at compile 
 - Credential rotation
 - Observability hooks (ties into Bet 3)
 
-#### Bet 5 — Plan/apply workflow: partial apply, rollback, human-readable diff
-The plan/apply core works; the operator-experience layer doesn't. Three additions take it from demoable to CI-grade:
-- Human-readable diff in the plan output (the change kinds are tracked internally, not rendered)
-- Partial apply (select a subset of actions to apply)
-- Rollback (revert to a prior snapshot pointer)
+#### Bet 5 — Plan/apply workflow: partial apply, rollback, human-readable diff — **shipped**
+All three additions landed (see §0):
+- Human-readable diff in the plan output → `014aaa8` (`ChangeSet::Display` rewritten — grouped by DAG, kind labelled in words, fingerprint `old → new` slug per Modified / UpstreamInvalidated change).
+- Partial apply → `15b7890` + `2fb20b4` (`DeploymentPlan::filtered_to` planner API + `conduit apply --only DAG.TASK` CLI flag with upstream auto-include).
+- Rollback → `5948960` + `2fb20b4` (`EnvironmentManager::apply_snapshot_map` write-through captures pre-apply state as `EnvHistoryReason::Apply { plan_id }`, revertible via the existing `conduit env rollback`).
 
-Policy checks / approval gates are a follow-up after these three.
+Policy checks / approval gates remain as the follow-up.
 
 #### Bet 6 — Distributed runtime: soak testing, not new RPCs
 Eager re-dispatch and SIGTERM-aware shutdown are real progress. The one remaining concern is whether days-long runs hold up. Build a soak harness against internal workloads. No new RPCs.
@@ -227,26 +233,27 @@ Since deletion is off the table:
 
 ## 6. 90-day execution sketch (refreshed)
 
-| Weeks | Focus | Outcome |
-|------|-------|---------|
-| 1-2  | Crate-by-crate internal-usage audit | Clear map of load-bearing vs scaffolding |
-| 1-4  | Virtual envs experience layer: env-aware planner, diff, rollback, policies | Brief workflow demoable end-to-end |
-| 2-6  | OTel spans through executor + per-task latency histograms | Internal runs show up in existing dashboards |
-| 4-8  | Cross-task lineage MVP (Python→SQL→Python) | The novel claim becomes demoable |
-| 6-10 | OpenLineage **ingest** + Marquez round-trip integration test | End-to-end ecosystem participation |
-| 8-12 | Distributed soak-test harness | Confidence in days-long runs |
-| 8-12 | Plan/apply: human-readable diff + partial apply + rollback | Plan/apply is CI-grade |
-| Ongoing | One provider category hardened to production grade | First "you'd bet a workload on it" tier |
-| Stretch | Impact analysis as a GitHub Action; dbt-aware template resolution; dialect coverage | Each is small + high-evangelism |
+| Weeks | Focus | Outcome | Status |
+|------|-------|---------|--------|
+| 1-2  | Crate-by-crate internal-usage audit | Clear map of load-bearing vs scaffolding | pending |
+| 1-4  | Virtual envs experience layer: env-aware planner, diff, rollback, policies | Brief workflow demoable end-to-end | ✓ shipped (Bet 1.1–1.6, prior refresh) |
+| 2-6  | OTel spans through executor + per-task latency histograms + OTel exporter wiring | Internal runs show up in existing dashboards | ✓ shipped (executor spans + histograms prior; OTel exporter `e04afff`) |
+| 4-8  | Cross-task lineage MVP (Python→SQL→Python) | The novel claim becomes demoable | ✓ shipped (Bet 2.2) |
+| 6-10 | OpenLineage **ingest** + Marquez round-trip integration test | End-to-end ecosystem participation | ✓ shipped (Bet 2.1) |
+| 8-12 | Distributed soak-test harness | Confidence in days-long runs | pending (blocked on real internal workloads) |
+| 8-12 | Plan/apply: human-readable diff + partial apply + rollback | Plan/apply is CI-grade | ✓ shipped (Bet 5 — `5948960`, `15b7890`, `014aaa8`, `2fb20b4`) |
+| 8-12 | Alert hook surface + structured run logs queryable from UI | Bet 3 finished — operator credibility piece | ✓ shipped (`1abe114`, `612f3a6`) |
+| Ongoing | One provider category hardened to production grade | First "you'd bet a workload on it" tier | pending (blocked on knowing which 2-3 providers internal teams actually use) |
+| Stretch | Impact analysis as a GitHub Action; dbt-aware template resolution; dialect coverage | Each is small + high-evangelism | Impact GH Action ✓ (Bet 7); dbt template + dialects pending |
 
 ---
 
 ## 7. Summary
 
-- **Premise:** kernel has a real idea; product wrapper is far more surface than depth. The virtual-env primitives exist; the experience layer on top doesn't yet.
+- **Premise:** kernel has a real idea; product wrapper is far more surface than depth. The virtual-env primitives now have their experience layer; plan/apply is CI-grade; lineage participates in the OpenLineage ecosystem; observability spans + alerts are wired.
 - **Feasibility:** competing head-on with Airflow/Dagster/SQLMesh as a platform is not feasible; deepening specific defensible wedges is. Recent commits are the right shape — depth, not new surfaces.
-- **Direction:** finish the virtual-env experience first (env-aware planner + diff + rollback + policies). Then lineage as the flagship (OpenLineage *ingest* + cross-task), observability finished (OTel spans + histograms), one provider category deep, plan/apply made CI-grade, distributed runtime soak-tested.
-- **Lineage:** OpenLineage emit shipped — next compounding bets are **ingest + Marquez round-trip** and **cross-task (Python→SQL→Python) lineage**.
+- **Direction:** Bets 1, 2.1, 2.2, 3, 5, 7 are all shipped. The two remaining strategic bets are blocked on external input: Bet 4 (one provider category to production grade) needs to know which 2-3 providers internal teams actually use, and Bet 6 (distributed soak harness) needs real internal workloads to soak against. Stretch items remaining: dbt-aware template resolution and dialect-specific SQL parsing.
+- **Lineage:** OpenLineage emit + ingest + Marquez round-trip + cross-task (Python→SQL→Python) lineage all shipped. Next compounding bets here are dbt template semantic awareness (lineage stops at the template boundary today) and dialect-specific parsing (Snowflake `COPY INTO`, BigQuery `UNNEST`, Redshift `DISTSTYLE`).
 
 ---
 
@@ -302,6 +309,7 @@ Single-commit doc change; takes 5 minutes. Pair with publishing the lineage benc
 ### 8.7 Underlying discipline
 - **No claim in the brief that doesn't trace back to a file path or commit.** Future stakeholder-brief edits should fail review if they add a feature description without a code link.
 - Add a `docs/CLAIMS.md` that is the inverse of this section — a living index of every notable feature claim with its evidence link. Generated where possible (provider table, test counts, LOC), hand-curated where not.
-
+- **`cargo check --workspace` must pass on every commit.** If pre-existing errors block that, fix them in the same commit with a note in the body — don't ship additive work on top of an existing break. Evidence this matters: `TaskType::Sql` got a `target: Option<String>` field added in `030d676` but two destructuring patterns in `conduit-cli/src/main.rs` (`cmd_lineage`, `cmd_preview`) weren't updated; the workspace was non-buildable for ~10 commits because individual contributors ran `cargo check -p <their-crate>` instead of the workspace. Caught only when the OTel cherry-pick (`e04afff`) forced a workspace check; cleaned up in `9764d65`. The fix is a one-line `..` per pattern — the discipline is to never let it ship in the first place.
+- **A commit that adds a field to a public type sweeps every destructure.** `cargo check --workspace` enforces this for free; rely on it. Field additions look additive at the type level but are breaking at every destructure site — and `serde(default)` doesn't save you from `E0027`.
 
 
