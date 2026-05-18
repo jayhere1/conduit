@@ -38,6 +38,7 @@ use sqlparser::dialect::{
 use sqlparser::parser::Parser;
 
 use crate::catalog::{CatalogColumn, TableCatalog};
+use crate::dbt_manifest::DbtManifest;
 use crate::lineage_graph::ColumnRef;
 use crate::schema::ColumnType;
 
@@ -180,14 +181,14 @@ impl SqlLineageExtractor {
     /// Extract lineage from a SQL query string with the default
     /// (`Generic`) dialect. Backwards-compatible entry point.
     pub fn extract(sql: &str) -> SqlLineage {
-        Self::extract_inner(sql, None, SqlDialect::Generic)
+        Self::extract_inner(sql, None, SqlDialect::Generic, None)
     }
 
     /// Extract lineage with a specific dialect. Use for warehouse-specific
     /// syntax (Snowflake `COPY INTO`, BigQuery `UNNEST`, Redshift
     /// `DISTSTYLE`) where `Generic` would silently produce an empty result.
     pub fn extract_with_dialect(sql: &str, dialect: SqlDialect) -> SqlLineage {
-        Self::extract_inner(sql, None, dialect)
+        Self::extract_inner(sql, None, dialect, None)
     }
 
     /// Extract lineage with a table catalog for enhanced resolution.
@@ -199,7 +200,7 @@ impl SqlLineageExtractor {
     /// - CTE output columns are registered as virtual tables, enabling
     ///   column-level lineage propagation through CTEs
     pub fn extract_with_catalog(sql: &str, catalog: &TableCatalog) -> SqlLineage {
-        Self::extract_inner(sql, Some(catalog), SqlDialect::Generic)
+        Self::extract_inner(sql, Some(catalog), SqlDialect::Generic, None)
     }
 
     /// Extract lineage with both catalog and dialect — the fullest entry
@@ -210,20 +211,39 @@ impl SqlLineageExtractor {
         catalog: &TableCatalog,
         dialect: SqlDialect,
     ) -> SqlLineage {
-        Self::extract_inner(sql, Some(catalog), dialect)
+        Self::extract_inner(sql, Some(catalog), dialect, None)
+    }
+
+    /// Extract lineage with full context: catalog for column resolution,
+    /// dialect for warehouse-specific syntax, and a dbt manifest so
+    /// `{{ ref('x') }}` / `{{ source('s', 't') }}` calls are resolved
+    /// to real table identifiers before parsing.
+    ///
+    /// `manifest = None` is identical to `extract_with_catalog_and_dialect`
+    /// — refs fall through to the placeholder behaviour that shipped
+    /// with the Jinja-stripping work, so non-dbt projects are unaffected.
+    pub fn extract_with_full_context(
+        sql: &str,
+        catalog: Option<&TableCatalog>,
+        dialect: SqlDialect,
+        manifest: Option<&DbtManifest>,
+    ) -> SqlLineage {
+        Self::extract_inner(sql, catalog, dialect, manifest)
     }
 
     fn extract_inner(
         sql: &str,
         catalog: Option<&TableCatalog>,
         dialect: SqlDialect,
+        manifest: Option<&DbtManifest>,
     ) -> SqlLineage {
         // Replace Jinja `{{ ... }}` and `{% ... %}` blocks with safe SQL
         // placeholders so the underlying sqlparser doesn't choke on templated
-        // SQL (dbt projects, Airflow macros). The placeholders are valid
-        // identifiers so they parse as bare column references or aliases —
-        // close enough that the column-level dataflow is still discoverable.
-        let sql_owned = strip_jinja(sql);
+        // SQL (dbt projects, Airflow macros). With a manifest, `{{ ref(...) }}`
+        // and `{{ source(...) }}` resolve to qualified table identifiers
+        // first — only unresolved blocks fall through to the
+        // `__conduit_jinja_N__` placeholder.
+        let sql_owned = strip_jinja_with_manifest(sql, manifest);
         let sql = sql_owned.as_str();
 
         let dialect_box = dialect.as_box();
@@ -925,7 +945,25 @@ fn object_name_to_table_ref(name: &ObjectName) -> TableRef {
 /// We just want the surrounding SQL to parse so column-level lineage can be
 /// extracted from the parts we DO understand. Placeholders are unique per
 /// occurrence so an extractor can still produce sensible TableRefs.
-pub(crate) fn strip_jinja(sql: &str) -> String {
+/// Strip Jinja control flow and substitute resolved dbt refs.
+///
+/// When a `DbtManifest` is supplied, `{{ ref('name') }}` and
+/// `{{ source('s', 't') }}` calls resolve to their qualified table
+/// identifiers before falling back to the placeholder substitution.
+///
+/// Resolved refs become real dotted identifiers (`database.schema.alias`)
+/// in the rewritten SQL, so the downstream sqlparser pass sees the same
+/// thing it would have seen if a human had inlined the table name. The
+/// lineage extractor then attributes columns to the resolved table
+/// rather than to an opaque `__conduit_jinja_N__` placeholder, and
+/// `cross_task::stitch` can connect dbt-produced tables to their
+/// downstream consumers.
+///
+/// Unresolved refs (manifest doesn't list them, or `manifest` is
+/// `None`) fall through to placeholder behaviour — the same shape
+/// pre-dbt projects have always had. No fail-loud: partial dbt
+/// adoption still parses.
+pub(crate) fn strip_jinja_with_manifest(sql: &str, manifest: Option<&DbtManifest>) -> String {
     let mut out = String::with_capacity(sql.len());
     let mut chars = sql.char_indices().peekable();
     let mut placeholder_n: usize = 0;
@@ -934,13 +972,26 @@ pub(crate) fn strip_jinja(sql: &str) -> String {
         if c == '{' {
             let next = sql[i + 1..].chars().next();
             match next {
-                // {{ expr }}  → replace with placeholder identifier
+                // {{ expr }}  → try ref()/source() resolution; placeholder otherwise
                 Some('{') => {
                     if let Some(end) = sql[i + 2..].find("}}") {
-                        out.push_str(&format!("__conduit_jinja_{}__", placeholder_n));
-                        placeholder_n += 1;
-                        // Advance past the closing `}}`
+                        let inner = &sql[i + 2..i + 2 + end];
                         let advance_to = i + 2 + end + 2;
+
+                        // Manifest-aware resolution first; fall through
+                        // to placeholder if no manifest, no match, or
+                        // the block isn't ref()/source() shaped.
+                        let resolved = manifest.and_then(|m| resolve_dbt_call(inner, m));
+                        match resolved {
+                            Some(qualified) => {
+                                out.push_str(&qualified);
+                            }
+                            None => {
+                                out.push_str(&format!("__conduit_jinja_{}__", placeholder_n));
+                                placeholder_n += 1;
+                            }
+                        }
+
                         while let Some(&(j, _)) = chars.peek() {
                             if j >= advance_to {
                                 break;
@@ -970,6 +1021,91 @@ pub(crate) fn strip_jinja(sql: &str) -> String {
         chars.next();
     }
     out
+}
+
+/// Parse the contents of a `{{ ... }}` block and, if it's a recognised
+/// dbt call, resolve it against the manifest.
+///
+/// Supported forms:
+///   ref('name')
+///   ref("name")
+///   ref('package', 'name')         # two-arg form
+///   source('source_name', 'table_name')
+///
+/// Whitespace inside the parens is tolerated. Anything we don't
+/// recognise returns `None`, which falls through to placeholder
+/// behaviour in the caller.
+fn resolve_dbt_call(inner: &str, manifest: &DbtManifest) -> Option<String> {
+    let trimmed = inner.trim();
+
+    if let Some(args) = strip_call(trimmed, "ref") {
+        let parts = parse_string_args(args);
+        match parts.as_slice() {
+            [name] => manifest.resolve_ref(None, name),
+            [package, name] => manifest.resolve_ref(Some(package), name),
+            _ => None,
+        }
+    } else if let Some(args) = strip_call(trimmed, "source") {
+        let parts = parse_string_args(args);
+        match parts.as_slice() {
+            [source_name, table_name] => manifest.resolve_source(source_name, table_name),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// If `s` is `<name>(<inner>)` (with optional surrounding whitespace),
+/// return `Some(<inner>)`. Otherwise `None`. Used to recognise
+/// `ref(...)` / `source(...)` shapes without pulling in a parser.
+fn strip_call<'a>(s: &'a str, name: &str) -> Option<&'a str> {
+    let s = s.trim_start();
+    let rest = s.strip_prefix(name)?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let rest = rest.strip_suffix(')')?;
+    Some(rest)
+}
+
+/// Parse a comma-separated list of single- or double-quoted string
+/// literals. Returns the unquoted contents in order. Whitespace around
+/// commas and arguments is ignored. Anything malformed yields an empty
+/// vec so the caller falls back to placeholder behaviour.
+fn parse_string_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = s.chars().peekable();
+    loop {
+        // Skip whitespace and a leading comma between args.
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() || c == ',' {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let quote = match chars.peek() {
+            Some(&c) if c == '\'' || c == '"' => {
+                chars.next();
+                c
+            }
+            None => return out,
+            // Non-quote, non-whitespace, non-comma — bail.
+            _ => return Vec::new(),
+        };
+        let mut buf = String::new();
+        let mut closed = false;
+        for c in chars.by_ref() {
+            if c == quote {
+                closed = true;
+                break;
+            }
+            buf.push(c);
+        }
+        if !closed {
+            return Vec::new();
+        }
+        out.push(buf);
+    }
 }
 
 #[cfg(test)]
@@ -1672,6 +1808,153 @@ mod tests {
             !bq.output_columns.is_empty(),
             "BigQuery dialect must parse UNNEST and surface output columns; got {:?}",
             bq
+        );
+    }
+
+    // ─── dbt ref / source resolution ────────────────────────────────
+
+    fn manifest_with_users_and_stripe() -> DbtManifest {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "model.demo.users".to_string(),
+            crate::dbt_manifest::DbtNode {
+                name: "users".to_string(),
+                resource_type: "model".to_string(),
+                database: Some("analytics".to_string()),
+                schema: "marts".to_string(),
+                alias: Some("dim_users".to_string()),
+                package_name: Some("demo".to_string()),
+            },
+        );
+        let mut sources = HashMap::new();
+        sources.insert(
+            "source.demo.stripe.charges".to_string(),
+            crate::dbt_manifest::DbtSource {
+                source_name: "stripe".to_string(),
+                name: "charges".to_string(),
+                database: Some("raw".to_string()),
+                schema: "stripe".to_string(),
+                identifier: None,
+            },
+        );
+        DbtManifest { nodes, sources }
+    }
+
+    #[test]
+    fn jinja_ref_resolves_to_qualified_table_in_extracted_lineage() {
+        let m = manifest_with_users_and_stripe();
+        let sql = "SELECT id, name FROM {{ ref('users') }}";
+        let lineage = SqlLineageExtractor::extract_with_full_context(
+            sql,
+            None,
+            SqlDialect::Generic,
+            Some(&m),
+        );
+        // The source table should be the resolved qualified identifier,
+        // not an opaque placeholder.
+        let sources: Vec<&str> = lineage
+            .source_tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert!(
+            sources.iter().any(|n| n.contains("dim_users")),
+            "ref('users') should resolve to a name containing the alias, got sources: {:?}",
+            sources
+        );
+        assert!(
+            !sources.iter().any(|n| n.contains("__conduit_jinja_")),
+            "no placeholder should remain when ref is resolved, got sources: {:?}",
+            sources
+        );
+    }
+
+    #[test]
+    fn jinja_source_resolves_to_qualified_table() {
+        let m = manifest_with_users_and_stripe();
+        let sql = "SELECT amount FROM {{ source('stripe', 'charges') }}";
+        let lineage = SqlLineageExtractor::extract_with_full_context(
+            sql,
+            None,
+            SqlDialect::Generic,
+            Some(&m),
+        );
+        let sources: Vec<&str> = lineage
+            .source_tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert!(
+            sources.iter().any(|n| n.contains("charges")),
+            "source(stripe, charges) should resolve to a name containing 'charges': {:?}",
+            sources
+        );
+    }
+
+    #[test]
+    fn jinja_ref_without_manifest_falls_back_to_placeholder() {
+        // Backwards-compat contract: nothing changes when callers don't
+        // pass a manifest. The pre-dbt projects that have been relying
+        // on placeholder behaviour for SQL parse-ability must keep
+        // working.
+        let sql = "SELECT id FROM {{ ref('users') }}";
+        let lineage = SqlLineageExtractor::extract(sql);
+        let sources: Vec<&str> = lineage
+            .source_tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert!(
+            sources.iter().any(|n| n.contains("__conduit_jinja_")),
+            "without a manifest, the ref must stay a placeholder; got: {:?}",
+            sources
+        );
+    }
+
+    #[test]
+    fn jinja_unknown_ref_falls_back_to_placeholder() {
+        // Manifest exists but doesn't list the model — don't fail-loud,
+        // fall through. Partial dbt adoption is a real scenario.
+        let m = manifest_with_users_and_stripe();
+        let sql = "SELECT id FROM {{ ref('not_in_manifest') }}";
+        let lineage = SqlLineageExtractor::extract_with_full_context(
+            sql,
+            None,
+            SqlDialect::Generic,
+            Some(&m),
+        );
+        let sources: Vec<&str> = lineage
+            .source_tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert!(
+            sources.iter().any(|n| n.contains("__conduit_jinja_")),
+            "unknown ref should fall back to placeholder, got: {:?}",
+            sources
+        );
+    }
+
+    #[test]
+    fn jinja_resolution_handles_double_quotes_and_whitespace() {
+        // dbt linters often canonicalise to double quotes; tolerate both.
+        let m = manifest_with_users_and_stripe();
+        let sql = r#"SELECT id FROM {{   ref( "users" )   }}"#;
+        let lineage = SqlLineageExtractor::extract_with_full_context(
+            sql,
+            None,
+            SqlDialect::Generic,
+            Some(&m),
+        );
+        let sources: Vec<&str> = lineage
+            .source_tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert!(
+            sources.iter().any(|n| n.contains("dim_users")),
+            "ref with double quotes + extra whitespace should still resolve: {:?}",
+            sources
         );
     }
 
