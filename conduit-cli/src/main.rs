@@ -555,6 +555,13 @@ enum LineageCommands {
         /// Output format
         #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
+
+        /// Path to a dbt `target/manifest.json` to resolve
+        /// `{{ ref('x') }}` and `{{ source('s', 'x') }}` against. When
+        /// omitted, unresolved Jinja blocks stay as placeholders (the
+        /// historical behaviour, suitable for non-dbt projects).
+        #[arg(long, value_name = "PATH")]
+        dbt_manifest: Option<PathBuf>,
     },
 }
 
@@ -756,7 +763,15 @@ fn main() -> Result<()> {
                 dags_path,
                 direction,
                 format,
-            } => cmd_lineage_trace(&dag, &column, &dags_path, &direction, &format),
+                dbt_manifest,
+            } => cmd_lineage_trace(
+                &dag,
+                &column,
+                &dags_path,
+                &direction,
+                &format,
+                dbt_manifest.as_deref(),
+            ),
         },
 
         Commands::Backfill {
@@ -2739,9 +2754,10 @@ fn cmd_lineage_trace(
     dags_path: &PathBuf,
     direction: &str,
     format: &str,
+    dbt_manifest_path: Option<&Path>,
 ) -> Result<()> {
     use conduit_common::dag::TaskType;
-    use conduit_lineage::{cross_task, ColumnSource};
+    use conduit_lineage::{cross_task, ColumnSource, DbtManifest};
     use serde_json::json;
 
     // Column form is `task_id.column_name` — same shape as the existing
@@ -2768,9 +2784,18 @@ fn cmd_lineage_trace(
         .get(dag_id)
         .ok_or_else(|| anyhow::anyhow!("DAG '{}' not found in compiled plan", dag_id))?;
 
+    // Load the dbt manifest if the operator passed one. Failure to read
+    // / parse is loud (the caller asked for resolution, give them a real
+    // error rather than silently degrading to placeholders).
+    let manifest = match dbt_manifest_path {
+        Some(p) => Some(DbtManifest::load_from_file(p)?),
+        None => None,
+    };
+
     // Stitch cross-task lineage. Bubble strict-mode errors up so the
     // operator sees the unresolved-ref list and fixes their declarations.
-    let stitched = cross_task::stitch(dag).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let stitched = cross_task::stitch_with_dbt_manifest(dag, manifest.as_ref())
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Resolve the origin ColumnRef in the merged graph. After stitching,
     // task-owned columns live under `ColumnSource::Task(TaskRef)`. Match by

@@ -34,7 +34,8 @@ pub mod sql_parser;
 pub use catalog::{parse_sql_type, CatalogColumn, TableCatalog};
 pub use contracts::{ContractValidator, ContractViolation, SchemaContract};
 pub use cross_task::{
-    stitch, CrossTaskLineage, LineageStrictError, UnresolvedReason, UnresolvedRef,
+    stitch, stitch_with_dbt_manifest, CrossTaskLineage, LineageStrictError, UnresolvedReason,
+    UnresolvedRef,
 };
 pub use impact::{ChangeKind as SchemaChangeKind, SchemaChange, SchemaChangeDetector};
 pub use impact_report::{

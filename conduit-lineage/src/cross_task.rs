@@ -77,6 +77,23 @@ pub struct LineageStrictError {
 /// unresolved refs) or `Err(LineageStrictError)` if the DAG declared
 /// `lineage_strict = true` and any consumer column couldn't be resolved.
 pub fn stitch(dag: &Dag) -> Result<CrossTaskLineage, LineageStrictError> {
+    stitch_with_dbt_manifest(dag, None)
+}
+
+/// Like [`stitch`], but resolves `{{ ref(...) }}` and `{{ source(...) }}`
+/// calls inside SQL tasks against the supplied dbt manifest before
+/// parsing. The resolved qualified table identifiers flow into the
+/// catalog and downstream column-level edges, so a dbt model produced
+/// by another DAG (or by dbt itself) becomes a real producer node in
+/// the cross-task graph instead of an opaque `__conduit_jinja_N__`
+/// placeholder.
+///
+/// Passing `None` is identical to `stitch` — no behaviour change for
+/// non-dbt projects.
+pub fn stitch_with_dbt_manifest(
+    dag: &Dag,
+    manifest: Option<&crate::dbt_manifest::DbtManifest>,
+) -> Result<CrossTaskLineage, LineageStrictError> {
     let mut graph = LineageGraph::new();
     let mut catalog = TableCatalog::new();
     let mut unresolved: Vec<UnresolvedRef> = Vec::new();
@@ -108,13 +125,19 @@ pub fn stitch(dag: &Dag) -> Result<CrossTaskLineage, LineageStrictError> {
         // Redshift workloads then parse correctly through warehouse
         // extensions that `Generic` can't see. Unknown connection types
         // fall back to `Generic`, which is the historical behaviour.
+        // When a dbt manifest is supplied, `{{ ref(...) }}` and
+        // `{{ source(...) }}` are resolved to real table identifiers
+        // before parsing.
         if let TaskType::Sql {
             query, connection, ..
         } = &task.task_type
         {
             let dialect = crate::sql_parser::SqlDialect::from_connection_type(connection);
-            let lineage = SqlLineageExtractor::extract_with_catalog_and_dialect(
-                query, &catalog, dialect,
+            let lineage = SqlLineageExtractor::extract_with_full_context(
+                query,
+                Some(&catalog),
+                dialect,
+                manifest,
             );
             for mapping in &lineage.column_mappings {
                 // Skip the synthetic `__where__` sentinel — it tracks
