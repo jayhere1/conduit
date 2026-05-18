@@ -339,46 +339,10 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// Extract SQL lineage for a task
+    /// Lineage: extract per-task SQL lineage, trace cross-task column flow
     Lineage {
-        /// Task reference in the form dag_id.task_id
-        task_ref: String,
-
-        /// Path to DAG definitions
-        #[arg(short, long, default_value = "./dags")]
-        dags_path: PathBuf,
-
-        /// Emit an OpenLineage RunEvent instead of Conduit's native lineage JSON
-        #[arg(long)]
-        openlineage: bool,
-
-        /// OpenLineage output dataset name, e.g. analytics.customer_totals
-        #[arg(long)]
-        output_dataset: Option<String>,
-
-        /// OpenLineage dataset namespace for input and output datasets
-        #[arg(long)]
-        dataset_namespace: Option<String>,
-
-        /// OpenLineage job namespace
-        #[arg(long, default_value = "conduit")]
-        job_namespace: String,
-
-        /// OpenLineage job name. Defaults to dag_id.task_id
-        #[arg(long)]
-        job_name: Option<String>,
-
-        /// OpenLineage run UUID. Defaults to a generated UUID
-        #[arg(long)]
-        run_id: Option<String>,
-
-        /// OpenLineage event timestamp. Defaults to now
-        #[arg(long)]
-        event_time: Option<String>,
-
-        /// OpenLineage event type
-        #[arg(long, default_value = "COMPLETE")]
-        event_type: String,
+        #[command(subcommand)]
+        command: LineageCommands,
     },
 
     /// Backfill a DAG across a range of dates/partitions
@@ -521,6 +485,76 @@ enum ClusterCommands {
         /// Coordinator address
         #[arg(short, long, default_value = "localhost:9400")]
         coordinator: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum LineageCommands {
+    /// Extract SQL lineage for a single task (the native JSON output, or an
+    /// OpenLineage RunEvent under `--openlineage`).
+    Extract {
+        /// Task reference in the form dag_id.task_id
+        task_ref: String,
+
+        /// Path to DAG definitions
+        #[arg(short, long, default_value = "./dags")]
+        dags_path: PathBuf,
+
+        /// Emit an OpenLineage RunEvent instead of Conduit's native lineage JSON
+        #[arg(long)]
+        openlineage: bool,
+
+        /// OpenLineage output dataset name, e.g. analytics.customer_totals
+        #[arg(long)]
+        output_dataset: Option<String>,
+
+        /// OpenLineage dataset namespace for input and output datasets
+        #[arg(long)]
+        dataset_namespace: Option<String>,
+
+        /// OpenLineage job namespace
+        #[arg(long, default_value = "conduit")]
+        job_namespace: String,
+
+        /// OpenLineage job name. Defaults to dag_id.task_id
+        #[arg(long)]
+        job_name: Option<String>,
+
+        /// OpenLineage run UUID. Defaults to a generated UUID
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// OpenLineage event timestamp. Defaults to now
+        #[arg(long)]
+        event_time: Option<String>,
+
+        /// OpenLineage event type
+        #[arg(long, default_value = "COMPLETE")]
+        event_type: String,
+    },
+
+    /// Trace a column's lineage across task boundaries via the cross-task
+    /// stitched graph (Python → SQL → Python).
+    Trace {
+        /// DAG to trace within
+        #[arg(long)]
+        dag: String,
+
+        /// Column to trace, in the form `task_id.column_name`
+        #[arg(long)]
+        column: String,
+
+        /// Path to DAG definitions
+        #[arg(short, long, default_value = "./dags")]
+        dags_path: PathBuf,
+
+        /// Trace direction
+        #[arg(long, default_value = "upstream", value_parser = ["upstream", "downstream"])]
+        direction: String,
+
+        /// Output format
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
     },
 }
 
@@ -692,29 +726,38 @@ fn main() -> Result<()> {
             dry_run,
         } => cmd_migrate(&source, &output, dry_run),
 
-        Commands::Lineage {
-            task_ref,
-            dags_path,
-            openlineage,
-            output_dataset,
-            dataset_namespace,
-            job_namespace,
-            job_name,
-            run_id,
-            event_time,
-            event_type,
-        } => cmd_lineage(
-            &task_ref,
-            &dags_path,
-            openlineage,
-            output_dataset.as_deref(),
-            dataset_namespace.as_deref(),
-            &job_namespace,
-            job_name.as_deref(),
-            run_id.as_deref(),
-            event_time.as_deref(),
-            &event_type,
-        ),
+        Commands::Lineage { command } => match command {
+            LineageCommands::Extract {
+                task_ref,
+                dags_path,
+                openlineage,
+                output_dataset,
+                dataset_namespace,
+                job_namespace,
+                job_name,
+                run_id,
+                event_time,
+                event_type,
+            } => cmd_lineage(
+                &task_ref,
+                &dags_path,
+                openlineage,
+                output_dataset.as_deref(),
+                dataset_namespace.as_deref(),
+                &job_namespace,
+                job_name.as_deref(),
+                run_id.as_deref(),
+                event_time.as_deref(),
+                &event_type,
+            ),
+            LineageCommands::Trace {
+                dag,
+                column,
+                dags_path,
+                direction,
+                format,
+            } => cmd_lineage_trace(&dag, &column, &dags_path, &direction, &format),
+        },
 
         Commands::Backfill {
             dag_id,
@@ -2683,6 +2726,153 @@ fn parse_task_ref(task_ref: &str) -> Result<(&str, &str)> {
         );
     }
     Ok((dag_id, task_id))
+}
+
+// ─── conduit lineage trace ───────────────────────────────────────────────────
+// Walks the cross-task stitched lineage graph from a column to find every
+// column that transitively feeds into it (or depends on it). Demos the
+// Bet 2.2 cross-task lineage as an operator-facing command.
+
+fn cmd_lineage_trace(
+    dag_id: &str,
+    column: &str,
+    dags_path: &PathBuf,
+    direction: &str,
+    format: &str,
+) -> Result<()> {
+    use conduit_common::dag::TaskType;
+    use conduit_lineage::{cross_task, ColumnSource};
+    use serde_json::json;
+
+    // Column form is `task_id.column_name` — same shape as the existing
+    // `dag_id.task_id` parser. Split on the first `.` so column names with
+    // embedded underscores stay intact; column names with literal dots are
+    // not supported (matches the rest of the CLI surface).
+    let (task_id, column_name) = column.split_once('.').ok_or_else(|| {
+        anyhow::anyhow!(
+            "--column must be 'task_id.column_name', got '{}'",
+            column
+        )
+    })?;
+
+    // Compile and pick the DAG.
+    let (plan, stats) = ConduitPlan::compile(dags_path)?;
+    if !stats.errors.is_empty() {
+        for err in &stats.errors {
+            eprintln!("Compilation error: {}", err);
+        }
+        anyhow::bail!("Compilation failed");
+    }
+    let dag = plan
+        .dags
+        .get(dag_id)
+        .ok_or_else(|| anyhow::anyhow!("DAG '{}' not found in compiled plan", dag_id))?;
+
+    // Stitch cross-task lineage. Bubble strict-mode errors up so the
+    // operator sees the unresolved-ref list and fixes their declarations.
+    let stitched = cross_task::stitch(dag).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Resolve the origin ColumnRef in the merged graph. After stitching,
+    // task-owned columns live under `ColumnSource::Task(TaskRef)`. Match by
+    // task_id (dag scope is implicit — we already picked the dag) +
+    // column_name.
+    let origin = stitched
+        .graph
+        .columns_for_task(task_id)
+        .into_iter()
+        .find(|c| c.column_name == column_name)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Column '{}.{}' not found in the merged lineage graph for DAG '{}'",
+                task_id,
+                column_name,
+                dag_id
+            )
+        })?;
+
+    let trace = match direction {
+        "downstream" => stitched.graph.trace_downstream(&origin),
+        _ => stitched.graph.trace_upstream(&origin),
+    };
+
+    // Look up task kind for the `[sql]` / `[python]` / `[bash]` annotation
+    // used in text-mode output. Tasks that don't live in this DAG (rare —
+    // would be a stitched cross-DAG edge) get no annotation.
+    let kind_for = |task_id: &str| -> &'static str {
+        match dag.tasks.get(task_id).map(|t| &t.task_type) {
+            Some(TaskType::Sql { .. }) => "[sql]",
+            Some(TaskType::Python { .. }) => "[python]",
+            Some(TaskType::Bash { .. }) => "[bash]",
+            Some(TaskType::Sensor { .. }) => "[sensor]",
+            Some(TaskType::Executable { .. }) => "[executable]",
+            None => "",
+        }
+    };
+
+    if format == "json" {
+        let columns: Vec<serde_json::Value> = trace
+            .columns
+            .iter()
+            .map(|c| {
+                let (task, table) = match &c.source {
+                    ColumnSource::Task(t) => (Some(t.task_id.clone()), None),
+                    ColumnSource::Table(t) => (None, Some(t.clone())),
+                };
+                json!({
+                    "qualifier": c.qualifier(),
+                    "task": task,
+                    "table": table,
+                    "column": c.column_name,
+                })
+            })
+            .collect();
+
+        let origin_task = match &origin.source {
+            ColumnSource::Task(t) => t.task_id.clone(),
+            ColumnSource::Table(t) => t.clone(),
+        };
+
+        let payload = json!({
+            "dag": dag_id,
+            "origin": {
+                "task": origin_task,
+                "column": origin.column_name,
+            },
+            "direction": direction,
+            "columns": columns,
+            "edge_count": trace.edges.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        // Text mode — readable for human inspection. Format mirrors the
+        // shape the integration tests expect: a header line containing
+        // "upstream trace" / "downstream trace", the origin, then one line
+        // per reached column with task-kind annotation.
+        let header = match direction {
+            "downstream" => "downstream trace",
+            _ => "upstream trace",
+        };
+        println!("{} from {}", header, origin);
+        for col in &trace.columns {
+            match &col.source {
+                ColumnSource::Task(t) => {
+                    let kind = kind_for(&t.task_id);
+                    println!("  {}.{} {}", t, col.column_name, kind);
+                }
+                ColumnSource::Table(t) => {
+                    println!("  {}.{}", t, col.column_name);
+                }
+            }
+        }
+        println!(
+            "({} columns reached via {} edges)",
+            trace.columns.len(),
+            trace.edges.len()
+        );
+    }
+
+    Ok(())
 }
 
 // ─── conduit backfill ────────────────────────────────────────────────────────
