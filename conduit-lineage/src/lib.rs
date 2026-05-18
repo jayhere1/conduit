@@ -61,4 +61,4 @@ pub use plan_impact::{
 #[cfg(feature = "testing")]
 pub use openlineage_ingest::testing;
 pub use schema::{Column, ColumnType, Schema, SchemaRegistry};
-pub use sql_parser::SqlLineageExtractor;
+pub use sql_parser::{SqlDialect, SqlLineageExtractor};

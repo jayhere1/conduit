@@ -103,9 +103,19 @@ pub fn stitch(dag: &Dag) -> Result<CrossTaskLineage, LineageStrictError> {
         let consumer = TaskRef::new(&dag.id, task_id);
 
         // SQL tasks: re-parse with the populated catalog so column
-        // resolution can find upstream-registered datasets.
-        if let TaskType::Sql { query, .. } = &task.task_type {
-            let lineage = SqlLineageExtractor::extract_with_catalog(query, &catalog);
+        // resolution can find upstream-registered datasets. Dialect is
+        // inferred from the connection string — Snowflake / BigQuery /
+        // Redshift workloads then parse correctly through warehouse
+        // extensions that `Generic` can't see. Unknown connection types
+        // fall back to `Generic`, which is the historical behaviour.
+        if let TaskType::Sql {
+            query, connection, ..
+        } = &task.task_type
+        {
+            let dialect = crate::sql_parser::SqlDialect::from_connection_type(connection);
+            let lineage = SqlLineageExtractor::extract_with_catalog_and_dialect(
+                query, &catalog, dialect,
+            );
             for mapping in &lineage.column_mappings {
                 // Skip the synthetic `__where__` sentinel — it tracks
                 // filter dependencies, not output columns.

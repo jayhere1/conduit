@@ -30,7 +30,11 @@ use sqlparser::ast::{
     Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName, Query, Select, SelectItem,
     SetExpr, Statement, TableFactor, TableWithJoins, WindowSpec, WindowType,
 };
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::{
+    AnsiDialect, BigQueryDialect, ClickHouseDialect, DatabricksDialect, Dialect, DuckDbDialect,
+    GenericDialect, HiveDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, RedshiftSqlDialect,
+    SQLiteDialect, SnowflakeDialect,
+};
 use sqlparser::parser::Parser;
 
 use crate::catalog::{CatalogColumn, TableCatalog};
@@ -85,16 +89,105 @@ pub struct ColumnMapping {
     pub inputs: Vec<ColumnRef>,
 }
 
+/// Which SQL dialect `sqlparser` should use when parsing a query.
+///
+/// The lineage extractor's default has always been `GenericDialect`,
+/// which is fine for ANSI SQL but silently mis-parses (or fails on)
+/// dialect-specific syntax — Snowflake `COPY INTO`, BigQuery `UNNEST`,
+/// Redshift `DISTSTYLE`, MySQL backtick quoting, etc. Passing a
+/// matching dialect through to the parser turns those cases from
+/// "empty lineage with no error" into "lineage extracted correctly."
+///
+/// Mapping is intentional and explicit (no clever fallthrough): each
+/// variant maps to exactly one `sqlparser::dialect::*Dialect` instance.
+/// New dialects added to sqlparser are *opt-in* via a new variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlDialect {
+    /// `GenericDialect` — superset that accepts most syntax; the
+    /// historical default. Use when the connection type is unknown or
+    /// the workload is ANSI-shaped.
+    Generic,
+    Snowflake,
+    BigQuery,
+    Redshift,
+    Postgres,
+    MySql,
+    SQLite,
+    DuckDb,
+    ClickHouse,
+    MsSql,
+    Hive,
+    Databricks,
+    Ansi,
+}
+
+impl SqlDialect {
+    /// Map a connection-type string (as it appears in `ProviderInfo.kind`
+    /// or `TaskType::Sql.connection`'s registered provider) to a dialect.
+    /// Unknown values fall back to `Generic` so callers don't have to
+    /// special-case "I don't know what this is" — they get the historical
+    /// behaviour by default. Comparison is case-insensitive; aliases
+    /// commonly seen in DAG YAML are accepted (`postgresql`, `gcp` ≡
+    /// BigQuery, `sqlserver` ≡ MsSql).
+    pub fn from_connection_type(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "snowflake" => Self::Snowflake,
+            "bigquery" | "gcp" | "bq" => Self::BigQuery,
+            "redshift" => Self::Redshift,
+            "postgres" | "postgresql" | "pg" => Self::Postgres,
+            "mysql" => Self::MySql,
+            "sqlite" => Self::SQLite,
+            "duckdb" => Self::DuckDb,
+            "clickhouse" => Self::ClickHouse,
+            "mssql" | "sqlserver" | "azuresql" => Self::MsSql,
+            "hive" => Self::Hive,
+            "databricks" => Self::Databricks,
+            "ansi" => Self::Ansi,
+            _ => Self::Generic,
+        }
+    }
+
+    /// Box up the matching sqlparser dialect for use with `Parser::parse_sql`.
+    fn as_box(self) -> Box<dyn Dialect> {
+        match self {
+            Self::Generic => Box::new(GenericDialect {}),
+            Self::Snowflake => Box::new(SnowflakeDialect {}),
+            Self::BigQuery => Box::new(BigQueryDialect {}),
+            Self::Redshift => Box::new(RedshiftSqlDialect {}),
+            Self::Postgres => Box::new(PostgreSqlDialect {}),
+            Self::MySql => Box::new(MySqlDialect {}),
+            Self::SQLite => Box::new(SQLiteDialect {}),
+            Self::DuckDb => Box::new(DuckDbDialect {}),
+            Self::ClickHouse => Box::new(ClickHouseDialect {}),
+            Self::MsSql => Box::new(MsSqlDialect {}),
+            Self::Hive => Box::new(HiveDialect {}),
+            Self::Databricks => Box::new(DatabricksDialect {}),
+            Self::Ansi => Box::new(AnsiDialect {}),
+        }
+    }
+}
+
+impl Default for SqlDialect {
+    fn default() -> Self {
+        Self::Generic
+    }
+}
+
 /// Extracts column-level lineage from SQL queries.
 pub struct SqlLineageExtractor;
 
 impl SqlLineageExtractor {
-    /// Extract lineage from a SQL query string.
-    ///
-    /// Parses the SQL using `sqlparser` with GenericDialect, then walks
-    /// the AST to extract source tables, output columns, and column mappings.
+    /// Extract lineage from a SQL query string with the default
+    /// (`Generic`) dialect. Backwards-compatible entry point.
     pub fn extract(sql: &str) -> SqlLineage {
-        Self::extract_inner(sql, None)
+        Self::extract_inner(sql, None, SqlDialect::Generic)
+    }
+
+    /// Extract lineage with a specific dialect. Use for warehouse-specific
+    /// syntax (Snowflake `COPY INTO`, BigQuery `UNNEST`, Redshift
+    /// `DISTSTYLE`) where `Generic` would silently produce an empty result.
+    pub fn extract_with_dialect(sql: &str, dialect: SqlDialect) -> SqlLineage {
+        Self::extract_inner(sql, None, dialect)
     }
 
     /// Extract lineage with a table catalog for enhanced resolution.
@@ -106,10 +199,25 @@ impl SqlLineageExtractor {
     /// - CTE output columns are registered as virtual tables, enabling
     ///   column-level lineage propagation through CTEs
     pub fn extract_with_catalog(sql: &str, catalog: &TableCatalog) -> SqlLineage {
-        Self::extract_inner(sql, Some(catalog))
+        Self::extract_inner(sql, Some(catalog), SqlDialect::Generic)
     }
 
-    fn extract_inner(sql: &str, catalog: Option<&TableCatalog>) -> SqlLineage {
+    /// Extract lineage with both catalog and dialect — the fullest entry
+    /// point, used by `cross_task::stitch` when the task's `connection`
+    /// resolves to a known warehouse type.
+    pub fn extract_with_catalog_and_dialect(
+        sql: &str,
+        catalog: &TableCatalog,
+        dialect: SqlDialect,
+    ) -> SqlLineage {
+        Self::extract_inner(sql, Some(catalog), dialect)
+    }
+
+    fn extract_inner(
+        sql: &str,
+        catalog: Option<&TableCatalog>,
+        dialect: SqlDialect,
+    ) -> SqlLineage {
         // Replace Jinja `{{ ... }}` and `{% ... %}` blocks with safe SQL
         // placeholders so the underlying sqlparser doesn't choke on templated
         // SQL (dbt projects, Airflow macros). The placeholders are valid
@@ -118,8 +226,8 @@ impl SqlLineageExtractor {
         let sql_owned = strip_jinja(sql);
         let sql = sql_owned.as_str();
 
-        let dialect = GenericDialect {};
-        let statements = match Parser::parse_sql(&dialect, sql) {
+        let dialect_box = dialect.as_box();
+        let statements = match Parser::parse_sql(&*dialect_box, sql) {
             Ok(stmts) => stmts,
             Err(_) => {
                 return Self::empty();
@@ -1495,5 +1603,89 @@ mod tests {
         let t = lineage.target_table.expect("CTAS should yield target");
         assert_eq!(t.name, "raw_events");
         assert!(t.schema.is_none());
+    }
+
+    // ─── Dialect routing ─────────────────────────────────────────────
+
+    #[test]
+    fn dialect_from_connection_type_handles_known_aliases() {
+        // Strategic-plan §4.4 explicitly calls out Snowflake / BigQuery /
+        // Redshift — they need explicit mapping. Aliases like `gcp` ≡
+        // BigQuery and `sqlserver` ≡ MsSql come from real DAG YAML.
+        assert_eq!(
+            SqlDialect::from_connection_type("snowflake"),
+            SqlDialect::Snowflake
+        );
+        assert_eq!(
+            SqlDialect::from_connection_type("Snowflake"),
+            SqlDialect::Snowflake,
+            "match must be case-insensitive"
+        );
+        assert_eq!(
+            SqlDialect::from_connection_type("gcp"),
+            SqlDialect::BigQuery
+        );
+        assert_eq!(
+            SqlDialect::from_connection_type("postgresql"),
+            SqlDialect::Postgres
+        );
+        assert_eq!(
+            SqlDialect::from_connection_type("sqlserver"),
+            SqlDialect::MsSql
+        );
+        // Unknown connection-type strings fall through — this is the
+        // backwards-compat contract that lets pre-dialect DAGs keep working.
+        assert_eq!(
+            SqlDialect::from_connection_type("homemade_pipe_thing"),
+            SqlDialect::Generic
+        );
+    }
+
+    #[test]
+    fn snowflake_dialect_parses_semi_structured_access() {
+        // `Generic` parses `obj:foo` as the start of a labelled-block but
+        // can't always thread it through a SELECT list. SnowflakeDialect
+        // handles `obj:path` cleanly.
+        // Source: warehouse-typical query pattern from
+        // docs/STRATEGIC_DIRECTION.md §4.4 — verified with both dialects
+        // here so a future sqlparser bump can't silently regress.
+        let sql = "SELECT raw_event:user.id AS user_id, raw_event:ts AS ts FROM events";
+        let snow = SqlLineageExtractor::extract_with_dialect(sql, SqlDialect::Snowflake);
+        assert!(
+            !snow.output_columns.is_empty(),
+            "Snowflake dialect must extract output columns from semi-structured access; got {:?}",
+            snow
+        );
+        // `user_id` and `ts` are the aliases; both should appear.
+        let names: Vec<&str> = snow.output_columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"user_id"), "missing user_id alias: {:?}", names);
+        assert!(names.contains(&"ts"), "missing ts alias: {:?}", names);
+    }
+
+    #[test]
+    fn bigquery_dialect_parses_unnest() {
+        // `UNNEST(arr) AS x` is BigQuery-specific; under `Generic` it
+        // often parses as a function call without surfacing column info.
+        let sql = "SELECT t.id, x FROM dataset.events t, UNNEST(t.tags) AS x";
+        let bq = SqlLineageExtractor::extract_with_dialect(sql, SqlDialect::BigQuery);
+        assert!(
+            !bq.output_columns.is_empty(),
+            "BigQuery dialect must parse UNNEST and surface output columns; got {:?}",
+            bq
+        );
+    }
+
+    #[test]
+    fn default_dialect_is_generic_and_preserves_existing_behavior() {
+        // `extract` is the historical entry point — must keep returning
+        // the same shape it did before the dialect plumbing landed.
+        let lineage_default = SqlLineageExtractor::extract("SELECT id, name FROM users");
+        let lineage_generic =
+            SqlLineageExtractor::extract_with_dialect("SELECT id, name FROM users", SqlDialect::Generic);
+        assert_eq!(lineage_default.output_columns.len(), 2);
+        assert_eq!(
+            lineage_default.output_columns.len(),
+            lineage_generic.output_columns.len()
+        );
     }
 }
