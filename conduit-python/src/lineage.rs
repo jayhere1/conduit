@@ -2,10 +2,15 @@
 //!
 //! Exposes column-level lineage extraction and schema change detection.
 
+use std::collections::HashMap;
+
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use serde_json::{json, Value};
-use conduit_lineage::SqlLineageExtractor;
+use conduit_lineage::sql_parser::SqlLineage;
+use conduit_lineage::{
+    parse_sql_type, CatalogColumn, ColumnType, SqlDialect, SqlLineageExtractor, TableCatalog,
+};
 
 /// Extract SQL lineage from a query
 ///
@@ -23,28 +28,66 @@ use conduit_lineage::SqlLineageExtractor;
 #[pyfunction]
 pub fn extract_sql_lineage(sql: &str) -> PyResult<String> {
     let lineage = SqlLineageExtractor::extract(sql);
+    Ok(lineage_to_json(sql, &lineage).to_string())
+}
 
-    // Build a lookup from output column name to its source column references
-    let source_map: std::collections::HashMap<&str, Vec<String>> = lineage
+/// Extract SQL lineage with a table catalog and dialect for precise resolution.
+///
+/// Unlike [`extract_sql_lineage`], a catalog lets the extractor resolve bare
+/// (unqualified) columns to the correct source table, expand `SELECT *`, and
+/// propagate lineage through CTEs. The dialect string selects warehouse-specific
+/// parsing (e.g. BigQuery `UNNEST`, Snowflake `QUALIFY`).
+///
+/// Args:
+///     sql: SQL query string.
+///     catalog_json: JSON object mapping a table name (optionally
+///         `"schema.table"`) to its columns. Each column is either a string
+///         (the column name) or an object `{"name": ..., "type": ...}`. e.g.
+///         `{"orders": ["id", "customer_id"],
+///           "public.customers": [{"name": "active", "type": "boolean"}]}`.
+///         An empty string, `"null"`, or `"{}"` means "no catalog" — behaves
+///         like [`extract_sql_lineage`] but still dialect-aware.
+///     dialect: connection/dialect string (e.g. "bigquery", "postgresql",
+///         "clickhouse"); unknown values fall back to the generic dialect.
+///
+/// Returns:
+///     The same JSON shape as [`extract_sql_lineage`].
+#[pyfunction]
+pub fn extract_sql_lineage_with_catalog(
+    sql: &str,
+    catalog_json: &str,
+    dialect: &str,
+) -> PyResult<String> {
+    let catalog = build_catalog(catalog_json)
+        .map_err(|e| PyValueError::new_err(format!("Invalid catalog JSON: {}", e)))?;
+    let sql_dialect = SqlDialect::from_connection_type(dialect);
+    let lineage =
+        SqlLineageExtractor::extract_with_catalog_and_dialect(sql, &catalog, sql_dialect);
+    Ok(lineage_to_json(sql, &lineage).to_string())
+}
+
+/// Serialise a [`SqlLineage`] to the JSON contract shared by both extract
+/// entry points: `{sql, input_tables, output_columns[], column_dependencies[]}`.
+fn lineage_to_json(sql: &str, lineage: &SqlLineage) -> Value {
+    // output column name → its source column references ("table.column")
+    let source_map: HashMap<&str, Vec<String>> = lineage
         .column_mappings
         .iter()
         .map(|mapping| {
             let sources: Vec<String> = mapping
                 .inputs
                 .iter()
-                .map(|col_ref| format!("{}.{}", col_ref.task_id, col_ref.column_name))
+                .map(|col_ref| col_ref.to_string())
                 .collect();
             (mapping.output.as_str(), sources)
         })
         .collect();
 
-    let result = json!({
+    json!({
         "sql": sql,
         "input_tables": lineage.source_tables.iter().map(|t| &t.name).collect::<Vec<_>>(),
         "output_columns": lineage.output_columns.iter().map(|col| {
-            let sources = source_map.get(col.name.as_str())
-                .cloned()
-                .unwrap_or_default();
+            let sources = source_map.get(col.name.as_str()).cloned().unwrap_or_default();
             json!({
                 "name": col.name,
                 "expression": col.expression,
@@ -55,14 +98,78 @@ pub fn extract_sql_lineage(sql: &str) -> PyResult<String> {
         "column_dependencies": lineage.column_mappings.iter().map(|mapping| {
             json!({
                 "output": mapping.output,
-                "sources": mapping.inputs.iter().map(|col_ref| {
-                    format!("{}.{}", col_ref.task_id, col_ref.column_name)
-                }).collect::<Vec<_>>()
+                "sources": mapping.inputs.iter().map(|col_ref| col_ref.to_string()).collect::<Vec<_>>()
             })
         }).collect::<Vec<_>>()
-    });
+    })
+}
 
-    Ok(result.to_string())
+/// Build a [`TableCatalog`] from the JSON passed by Python callers. Tolerant by
+/// design: an empty/`null` payload yields an empty catalog, non-object payloads
+/// and unparseable column entries are skipped, and `"schema.table"` keys are
+/// split into `(schema, table)`.
+fn build_catalog(catalog_json: &str) -> Result<TableCatalog, serde_json::Error> {
+    let mut catalog = TableCatalog::new();
+    let trimmed = catalog_json.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return Ok(catalog);
+    }
+
+    let value: Value = serde_json::from_str(trimmed)?;
+    let Some(obj) = value.as_object() else {
+        return Ok(catalog);
+    };
+
+    for (table_key, cols_value) in obj {
+        let (schema, table) = split_table_key(table_key);
+        if table.is_empty() {
+            continue;
+        }
+        let columns = parse_catalog_columns(cols_value);
+        catalog.register_table(schema.as_deref(), &table, columns);
+    }
+    Ok(catalog)
+}
+
+/// Parse a column-list value into [`CatalogColumn`]s. Accepts both
+/// `["id", "name"]` and `[{"name": "id", "type": "int"}]` forms; unrecognised
+/// entries are skipped. Types are best-effort — lineage resolution only needs
+/// column names, so a missing/unknown type maps to [`ColumnType::Unknown`].
+fn parse_catalog_columns(value: &Value) -> Vec<CatalogColumn> {
+    let Some(arr) = value.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|col| match col {
+            Value::String(name) => Some(CatalogColumn::new(name, ColumnType::Unknown)),
+            Value::Object(map) => {
+                let name = map
+                    .get("name")
+                    .or_else(|| map.get("column"))
+                    .or_else(|| map.get("column_name"))
+                    .and_then(|v| v.as_str())?;
+                let data_type = map
+                    .get("type")
+                    .or_else(|| map.get("data_type"))
+                    .and_then(|v| v.as_str())
+                    .map(parse_sql_type)
+                    .unwrap_or(ColumnType::Unknown);
+                Some(CatalogColumn::new(name, data_type))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Split a catalog key (`"schema.table"`, `"db.schema.table"`, or `"table"`)
+/// into `(schema, table)`, mirroring the crate's two-tier catalog keying.
+fn split_table_key(key: &str) -> (Option<String>, String) {
+    let parts: Vec<&str> = key.split('.').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        [] => (None, String::new()),
+        [t] => (None, (*t).to_string()),
+        [.., s, t] => (Some((*s).to_string()), (*t).to_string()),
+    }
 }
 
 /// Trace column lineage in a direction (upstream or downstream)
@@ -277,6 +384,7 @@ pub fn diff_schemas(old_json: &str, new_json: &str) -> PyResult<String> {
 pub fn create_module(py: Python) -> PyResult<Bound<PyModule>> {
     let module = PyModule::new_bound(py, "lineage")?;
     module.add_function(wrap_pyfunction!(extract_sql_lineage, &module)?)?;
+    module.add_function(wrap_pyfunction!(extract_sql_lineage_with_catalog, &module)?)?;
     module.add_function(wrap_pyfunction!(trace_column, &module)?)?;
     module.add_function(wrap_pyfunction!(diff_schemas, &module)?)?;
     module.add("__doc__", "Column-level lineage and schema change detection module")?;

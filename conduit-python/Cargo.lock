@@ -181,6 +181,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "conduit-common",
+ "conduit-lineage",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -196,6 +197,7 @@ name = "conduit-lineage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "conduit-common",
  "serde",
  "serde_json",
@@ -242,6 +244,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "conduit-common",
+ "conduit-lineage",
  "rocksdb",
  "serde",
  "serde_json",
