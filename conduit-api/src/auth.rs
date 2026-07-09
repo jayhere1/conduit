@@ -335,18 +335,26 @@ impl AuthStore {
 
     /// Authenticate a request using a plaintext API key.
     ///
-    /// Because each key has its own unique salt, we must iterate over all stored
-    /// keys, re-hash the plaintext with each key's salt, and compare.
+    /// Candidate keys are pre-filtered by the stored `key_prefix` (the first
+    /// 12 plaintext characters, which are stored openly for identification),
+    /// so normally exactly one salted hash is computed per request instead of
+    /// one per stored key. The final hash comparison is constant-time so an
+    /// attacker cannot recover hash bytes through response timing.
     pub fn authenticate(&self, plaintext_key: &str) -> Result<AuthContext, AuthError> {
+        use subtle::ConstantTimeEq;
+
         let mut keys = self
             .keys_by_hash
             .write()
             .map_err(|_| AuthError::InvalidKey)?;
 
-        // Find the matching key by recomputing the salted hash for each stored key.
+        // Cheap prefix pre-filter, then salted hash + constant-time compare.
         let matched_hash = keys.iter().find_map(|(hash, stored_key)| {
+            if !plaintext_key.starts_with(stored_key.key_prefix.as_str()) {
+                return None;
+            }
             let candidate = hash_key(&stored_key.salt, plaintext_key);
-            if candidate == *hash {
+            if bool::from(candidate.as_bytes().ct_eq(hash.as_bytes())) {
                 Some(hash.clone())
             } else {
                 None

@@ -6,6 +6,7 @@ license.workspace = true
 description = "gRPC + REST + WebSocket API server for Conduit"
 
 [dependencies]
+subtle = "2.6"
 conduit-common = { path = "../conduit-common" }
 conduit-state = { path = "../conduit-state" }
 conduit-compiler = { path = "../conduit-compiler" }

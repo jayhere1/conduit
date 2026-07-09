@@ -592,3 +592,56 @@ mod tests {
         assert_eq!(key.key_prefix, &plaintext[..12]);
     }
 }
+
+// ─── Prefix-indexed constant-time authentication (PRD A2) ───────────────────
+
+mod prefix_auth {
+    use conduit_api::auth::*;
+
+    /// With several stored keys, each plaintext must authenticate to exactly
+    /// its own identity (prefix pre-filter must not cross-match).
+    #[test]
+    fn authenticate_disambiguates_among_many_keys() {
+        let store = AuthStore::new(true);
+        let mut pairs = Vec::new();
+        for i in 0..5 {
+            let (plaintext, key) = store
+                .create_key(&format!("key-{i}"), Role::Operator, "test", None, None)
+                .unwrap();
+            pairs.push((plaintext, key.id));
+        }
+        for (plaintext, expected_id) in pairs {
+            let ctx = store.authenticate(&plaintext).unwrap();
+            assert_eq!(ctx.key_id, expected_id);
+        }
+    }
+
+    /// A key that shares no stored prefix is rejected without matching.
+    #[test]
+    fn authenticate_rejects_unknown_prefix() {
+        let store = AuthStore::new(true);
+        store
+            .create_key("real", Role::Admin, "test", None, None)
+            .unwrap();
+        let err = store.authenticate("cdt_00000000deadbeef00000000deadbeef");
+        assert!(matches!(err, Err(AuthError::InvalidKey)));
+    }
+
+    /// A tampered key that KEEPS a valid prefix but differs afterwards must
+    /// fail the (constant-time) hash comparison, not sneak through the
+    /// prefix pre-filter.
+    #[test]
+    fn authenticate_rejects_tampered_key_with_valid_prefix() {
+        let store = AuthStore::new(true);
+        let (plaintext, _) = store
+            .create_key("real", Role::Admin, "test", None, None)
+            .unwrap();
+        let mut tampered = plaintext.clone();
+        tampered.pop();
+        tampered.push(if plaintext.ends_with('0') { '1' } else { '0' });
+        assert!(matches!(
+            store.authenticate(&tampered),
+            Err(AuthError::InvalidKey)
+        ));
+    }
+}
