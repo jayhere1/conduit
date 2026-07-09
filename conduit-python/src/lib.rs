@@ -31,7 +31,7 @@ fn conduit_native(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     let state_module = state::create_module(py)?;
     m.add_submodule(&state_module)?;
 
-    m.add("__version__", "0.1.0")?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("__doc__", "PyO3 bindings for Conduit pipeline orchestrator")?;
 
     Ok(())
