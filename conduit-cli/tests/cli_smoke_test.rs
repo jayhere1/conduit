@@ -403,3 +403,48 @@ fn cli_lineage_trace_unknown_column_fails() {
             "not found in the merged lineage graph",
         ));
 }
+
+// ─── README contract ────────────────────────────────────────────────────────
+
+/// Every command documented in the README's command table must parse.
+/// If this fails, either the CLI changed (update the README) or the README
+/// documents a command that doesn't exist (PRD B5).
+#[test]
+fn readme_documented_commands_parse() {
+    let documented = [
+        vec!["init"],
+        vec!["compile"],
+        vec!["run"],
+        vec!["serve"],
+        vec!["plan"],
+        vec!["apply"],
+        vec!["env", "create"],
+        vec!["env", "list"],
+        vec!["env", "promote"],
+        vec!["env", "diff"],
+        vec!["env", "history"],
+        vec!["env", "rollback"],
+        vec!["env", "set-policy"],
+        vec!["lineage", "extract"],
+        vec!["lineage", "trace"],
+        vec!["backfill"],
+        vec!["replay"],
+        vec!["query"],
+        vec!["preview"],
+        vec!["worker"],
+        vec!["cluster"],
+        vec!["migrate"],
+        vec!["status"],
+    ];
+
+    for cmd in documented {
+        let mut c = conduit();
+        for part in &cmd {
+            c.arg(part);
+        }
+        c.arg("--help")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Usage"));
+    }
+}
