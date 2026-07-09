@@ -48,6 +48,11 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Debug info dominates test-binary size; linking all of them at once has
+    # OOM'd the hosted runner's `ld` (SIGBUS). Drop debuginfo for the test
+    # build to keep the linker within the runner's memory.
+    env:
+      RUSTFLAGS: -Dwarnings -C debuginfo=0
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
