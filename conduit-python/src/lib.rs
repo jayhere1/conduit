@@ -8,6 +8,11 @@
 //!
 //! All complex types use JSON for pragmatic interchange in v0.1.
 
+// pyo3 0.22's #[pyfunction] expansion trips clippy 1.95's useless_conversion
+// on every PyResult-returning function; the lint points at macro-generated
+// glue, not our code. Remove once on a pyo3 that has the fix.
+#![allow(clippy::useless_conversion)]
+
 pub mod compiler;
 pub mod planner;
 pub mod lineage;
