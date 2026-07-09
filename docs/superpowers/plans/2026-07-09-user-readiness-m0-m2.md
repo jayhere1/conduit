@@ -1,5 +1,13 @@
 # User-Readiness M0–M2 Implementation Plan
 
+> **STATUS: COMPLETE (2026-07-09).** All 13 tasks implemented on
+> `feat/user-ready-v0.2`. Final gate: 1072 workspace tests passing,
+> `cargo fmt --check` clean, `cargo clippy --workspace -- -D warnings`
+> clean. Deviations from plan noted per task: rust-toolchain.toml skipped
+> (CI tracks `stable`; a pin would diverge), docker-compose CORS change
+> unnecessary (UI is same-origin via the vite proxy), branch pruning
+> deferred to Jay (deletion is destructive).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Execute milestones M0–M2 of `docs/PRD_USER_READINESS.md` — repo hygiene/truth fixes, API security enforcement, and a first-run path that works outside the repo checkout.
@@ -25,9 +33,9 @@
 - Create: `LICENSE` (Apache-2.0 full text, copyright "2026 Jayveer Singh")
 
 **Steps:**
-- [ ] Write the canonical Apache-2.0 text to `LICENSE`.
-- [ ] Verify `release.yml:120-123` glob (`LICENSE*`) now matches: `ls LICENSE`.
-- [ ] Commit: `chore: add Apache-2.0 LICENSE (PRD B2)`
+- [x] Write the canonical Apache-2.0 text to `LICENSE`.
+- [x] Verify `release.yml:120-123` glob (`LICENSE*`) now matches: `ls LICENSE`.
+- [x] Commit: `chore: add Apache-2.0 LICENSE (PRD B2)`
 
 ### Task 2: Fix installer + book repo references (B1)
 
@@ -36,9 +44,9 @@
 - Modify: `docs/book.toml:11` — same
 
 **Steps:**
-- [ ] Edit both files; grep repo-wide for any other `conduit-orchestrator` references and fix.
-- [ ] Test: `sh -n scripts/install.sh` (syntax) and `CONDUIT_REPO=jayhere1/conduit sh -c 'grep -c jayhere1 scripts/install.sh'` ≥ 3.
-- [ ] Commit: `fix(install): point installer and book at the real GitHub repo (PRD B1)`
+- [x] Edit both files; grep repo-wide for any other `conduit-orchestrator` references and fix.
+- [x] Test: `sh -n scripts/install.sh` (syntax) and `CONDUIT_REPO=jayhere1/conduit sh -c 'grep -c jayhere1 scripts/install.sh'` ≥ 3.
+- [x] Commit: `fix(install): point installer and book at the real GitHub repo (PRD B1)`
 
 ### Task 3: Single-source conduit-native version (D6 version fix, BUG-8)
 
@@ -48,9 +56,9 @@
 - Modify: `conduit-python/MANIFEST.md:270` — 0.1.0 → note "version is single-sourced from Cargo.toml"
 
 **Steps:**
-- [ ] Make the three edits.
-- [ ] Test: `cargo check -p conduit-python` passes.
-- [ ] Commit: `fix(python): single-source conduit-native version from Cargo.toml (PRD D6)`
+- [x] Make the three edits.
+- [x] Test: `cargo check -p conduit-python` passes.
+- [x] Commit: `fix(python): single-source conduit-native version from Cargo.toml (PRD D6)`
 
 ### Task 4: conduit-sdk README + packaging fix (B4 part 1, BUG-10)
 
@@ -59,9 +67,9 @@
 - Verify: `sdk/python/pyproject.toml:9` readme reference resolves
 
 **Steps:**
-- [ ] Write README (decorators, operators, hooks, contracts — one example each, ≤80 lines).
-- [ ] Test: `cd sdk/python && python3 -m pip wheel --no-deps -w /tmp/wheeltest . ` succeeds (or `python3 -m build` if available).
-- [ ] Commit: `fix(sdk): add missing README so the package builds (PRD B4)`
+- [x] Write README (decorators, operators, hooks, contracts — one example each, ≤80 lines).
+- [x] Test: `cd sdk/python && python3 -m pip wheel --no-deps -w /tmp/wheeltest . ` succeeds (or `python3 -m build` if available).
+- [x] Commit: `fix(sdk): add missing README so the package builds (PRD B4)`
 
 ### Task 5: README truth pass (B5, BUG-11)
 
@@ -71,11 +79,11 @@
 - Modify: `conduit-cli/tests/cli_smoke_test.rs` — add a test that runs `--help` for every README-documented subcommand
 
 **Steps:**
-- [ ] Extract the clap command list: `cargo run -p conduit-cli -- --help`.
-- [ ] Rewrite README install + command table to match reality.
-- [ ] Add smoke test `readme_documented_commands_parse` iterating `["init","compile","run","serve","plan","apply","env","lineage","migrate","status","backfill","worker","cluster","query","preview","replay"]` → `conduit <cmd> --help` exits 0.
-- [ ] Run: `cargo test -p conduit-cli --test cli_smoke_test` passes.
-- [ ] Commit: `docs: make README install + command table match the CLI (PRD B5)`
+- [x] Extract the clap command list: `cargo run -p conduit-cli -- --help`.
+- [x] Rewrite README install + command table to match reality.
+- [x] Add smoke test `readme_documented_commands_parse` iterating `["init","compile","run","serve","plan","apply","env","lineage","migrate","status","backfill","worker","cluster","query","preview","replay"]` → `conduit <cmd> --help` exits 0.
+- [x] Run: `cargo test -p conduit-cli --test cli_smoke_test` passes.
+- [x] Commit: `docs: make README install + command table match the CLI (PRD B5)`
 
 ### Task 6: Repo hygiene (B8)
 
@@ -86,8 +94,8 @@
 - NOT in scope: deleting branches (surface list to Jay instead)
 
 **Steps:**
-- [ ] Make deletions + edits.
-- [ ] Commit: `chore: remove stale session artifacts, fix conduit-python doc labels (PRD B8)`
+- [x] Make deletions + edits.
+- [x] Commit: `chore: remove stale session artifacts, fix conduit-python doc labels (PRD B8)`
 
 ### Task 7: Constant-time + O(1)-hash key auth (A2, BUG-2)
 
@@ -100,10 +108,10 @@
 - Produces: `AuthStore::authenticate(&self, plaintext_key: &str) -> Result<AuthContext, AuthError>` (unchanged signature; new behavior: filters candidates by stored `key_prefix` — first 8 chars of plaintext — so exactly the matching-prefix keys are hashed; comparison via `subtle::ConstantTimeEq` on hash bytes).
 
 **Steps:**
-- [ ] Write failing test `authenticate_hashes_only_prefix_matched_keys` — create 3 keys, authenticate with one, assert success; and `authenticate_uses_constant_time_compare` is not directly testable — instead assert behavior parity: valid key OK, revoked → KeyRevoked, expired → KeyExpired, wrong key → InvalidKey (existing tests must stay green).
-- [ ] Implement: candidates = keys where `plaintext_key.starts_with(&stored.key_prefix)`; for each, `hash_key(salt, plaintext)`, compare `hash.as_bytes().ct_eq(stored_hash.as_bytes())`.
-- [ ] Run: `cargo test -p conduit-api auth` → pass.
-- [ ] Commit: `fix(api): constant-time API-key comparison, prefix-indexed lookup (PRD A2)`
+- [x] Write failing test `authenticate_hashes_only_prefix_matched_keys` — create 3 keys, authenticate with one, assert success; and `authenticate_uses_constant_time_compare` is not directly testable — instead assert behavior parity: valid key OK, revoked → KeyRevoked, expired → KeyExpired, wrong key → InvalidKey (existing tests must stay green).
+- [x] Implement: candidates = keys where `plaintext_key.starts_with(&stored.key_prefix)`; for each, `hash_key(salt, plaintext)`, compare `hash.as_bytes().ct_eq(stored_hash.as_bytes())`.
+- [x] Run: `cargo test -p conduit-api auth` → pass.
+- [x] Commit: `fix(api): constant-time API-key comparison, prefix-indexed lookup (PRD A2)`
 
 ### Task 8: Global auth enforcement + handler permissions (A1, BUG-1)
 
@@ -127,14 +135,14 @@
 - WebSocket route `/ws/events`: NOT gated in this task (browser WS cannot set headers; UI would break — document in SECURITY.md task later, PRD A5/M4).
 
 **Steps:**
-- [ ] Write failing table-driven test: with auth enabled and no key, every route in a `MUTATING: &[(Method, &str)]` table (all POST/PUT/DELETE routes from routes.rs) returns 401; `GET /api/v1/dags` returns 401; `GET /api/v1/health` returns 200.
-- [ ] Second test: Viewer key → 403 on `POST /api/v1/dags/x/runs`; Operator key → non-401/403 status.
-- [ ] Third test: auth disabled → everything passes as today (existing integration tests cover; keep green).
-- [ ] Implement middleware + wire `.layer(middleware::from_fn_with_state(state.clone(), auth_gate))` on api_routes (note: `build_router` receives `state` before `.with_state` — capture the Arc).
-- [ ] Add handler permission checks (mechanical sweep above).
-- [ ] Fix `routes.rs:8-14` doc comment and startup log to match new reality.
-- [ ] Run: `cargo test -p conduit-api` → pass; `cargo clippy -p conduit-api -- -D warnings`.
-- [ ] Commit: `feat(api): enforce authentication globally + permission checks on mutating handlers (PRD A1)`
+- [x] Write failing table-driven test: with auth enabled and no key, every route in a `MUTATING: &[(Method, &str)]` table (all POST/PUT/DELETE routes from routes.rs) returns 401; `GET /api/v1/dags` returns 401; `GET /api/v1/health` returns 200.
+- [x] Second test: Viewer key → 403 on `POST /api/v1/dags/x/runs`; Operator key → non-401/403 status.
+- [x] Third test: auth disabled → everything passes as today (existing integration tests cover; keep green).
+- [x] Implement middleware + wire `.layer(middleware::from_fn_with_state(state.clone(), auth_gate))` on api_routes (note: `build_router` receives `state` before `.with_state` — capture the Arc).
+- [x] Add handler permission checks (mechanical sweep above).
+- [x] Fix `routes.rs:8-14` doc comment and startup log to match new reality.
+- [x] Run: `cargo test -p conduit-api` → pass; `cargo clippy -p conduit-api -- -D warnings`.
+- [x] Commit: `feat(api): enforce authentication globally + permission checks on mutating handlers (PRD A1)`
 
 ### Task 9: Register connection-test route (C2, BUG-9)
 
@@ -144,9 +152,9 @@
 - Test: extend `auth_enforcement_test.rs` table + a direct handler test if a fixture exists
 
 **Steps:**
-- [ ] Add route + auth check; add `(Method::POST, "/api/v1/connections/x/test")` to the sweep table.
-- [ ] Run: `cargo test -p conduit-api` → pass.
-- [ ] Commit: `fix(api): register POST /connections/:name/test route (PRD C2)`
+- [x] Add route + auth check; add `(Method::POST, "/api/v1/connections/x/test")` to the sweep table.
+- [x] Run: `cargo test -p conduit-api` → pass.
+- [x] Commit: `fix(api): register POST /connections/:name/test route (PRD C2)`
 
 ### Task 10: CORS restriction (A4, GAP-8)
 
@@ -157,10 +165,10 @@
 - Docs: note in `docs/src/reference/cli-reference.md` serve section + `docker-compose.yml` ui-dev profile gets `--cors-origin http://localhost:3000` (check the dev port used by vite config first)
 
 **Steps:**
-- [ ] Test: router built with empty origins does not include `access-control-allow-origin: *` on a preflight response; with `--cors-origin http://localhost:3000` it echoes exactly that origin.
-- [ ] Implement + thread the flag.
-- [ ] Run: `cargo test -p conduit-api`, `cargo check --workspace`.
-- [ ] Commit: `feat(api): configurable CORS allow-list, same-origin by default (PRD A4)`
+- [x] Test: router built with empty origins does not include `access-control-allow-origin: *` on a preflight response; with `--cors-origin http://localhost:3000` it echoes exactly that origin.
+- [x] Implement + thread the flag.
+- [x] Run: `cargo test -p conduit-api`, `cargo check --workspace`.
+- [x] Commit: `feat(api): configurable CORS allow-list, same-origin by default (PRD A4)`
 
 ### Task 11: `conduit impact` subcommand (C1, BUG-3)
 
@@ -178,13 +186,13 @@
   Git mode: `git worktree add <tmp> <ref>` (cleanup via `git worktree remove --force` in a drop guard), compile `<tmp>/<dags-path>`; `WORKING` compiles `<dags-path>` in place. Exit 0 on successful analysis (breaking changes do NOT fail the exit — gating is the workflow's label logic); exit ≠0 only on operational errors. JSON output must serialize `PlanImpact` so `.summary.total_breaking_changes` resolves.
 
 **Steps:**
-- [ ] Fixtures: base DAG with SQL task producing columns (a,b); head drops column b consumed downstream (crib the shape from `conduit-lineage/tests/plan_impact_e2e.rs`).
-- [ ] Write failing smoke test `impact_plan_file_mode_reports_breaking`: run binary with `--base-plan fixtures/impact/base --head-plan fixtures/impact/head --format json`, assert exit 0 and `summary.total_breaking_changes >= 1`.
-- [ ] Implement clap variant + cmd_impact (plan-file mode first, then git mode).
-- [ ] Test git mode manually in a scratch repo: two commits, run `--base HEAD~1 --head WORKING`.
-- [ ] Add `impact` to the Task-5 smoke list and README table.
-- [ ] Run: `cargo test -p conduit-cli`, `cargo clippy -p conduit-cli -- -D warnings`.
-- [ ] Commit: `feat(cli): wire conduit impact subcommand — plan-file + git modes (PRD C1)`
+- [x] Fixtures: base DAG with SQL task producing columns (a,b); head drops column b consumed downstream (crib the shape from `conduit-lineage/tests/plan_impact_e2e.rs`).
+- [x] Write failing smoke test `impact_plan_file_mode_reports_breaking`: run binary with `--base-plan fixtures/impact/base --head-plan fixtures/impact/head --format json`, assert exit 0 and `summary.total_breaking_changes >= 1`.
+- [x] Implement clap variant + cmd_impact (plan-file mode first, then git mode).
+- [x] Test git mode manually in a scratch repo: two commits, run `--base HEAD~1 --head WORKING`.
+- [x] Add `impact` to the Task-5 smoke list and README table.
+- [x] Run: `cargo test -p conduit-cli`, `cargo clippy -p conduit-cli -- -D warnings`.
+- [x] Commit: `feat(cli): wire conduit impact subcommand — plan-file + git modes (PRD C1)`
 
 ### Task 12: SDK bootstrap outside the checkout (B3, BUG-4)
 
@@ -198,12 +206,12 @@
 - Produces: `discover_sdk_path() -> Option<String>` (same name/signature, new search order — document each tier in the doc comment).
 
 **Steps:**
-- [ ] Failing test `init_vendors_python_sdk`: run `conduit init tmpproj`, assert `tmpproj/.conduit/sdk/conduit_sdk/__init__.py` exists.
-- [ ] Failing test `discover_sdk_prefers_env_override` (executor): set env, assert returned path.
-- [ ] Implement vendoring + discovery.
-- [ ] End-to-end proof (the PRD acceptance): copy `target/release/conduit` to `/tmp/bin-only/conduit`, `cd /tmp && ./bin-only/conduit init demo && cd demo && ../bin-only/conduit run hello_world` succeeds.
-- [ ] Run: `cargo test -p conduit-cli -p conduit-executor`.
-- [ ] Commit: `feat(cli): vendor Python SDK into init scaffolds; CONDUIT_SDK_PATH override (PRD B3)`
+- [x] Failing test `init_vendors_python_sdk`: run `conduit init tmpproj`, assert `tmpproj/.conduit/sdk/conduit_sdk/__init__.py` exists.
+- [x] Failing test `discover_sdk_prefers_env_override` (executor): set env, assert returned path.
+- [x] Implement vendoring + discovery.
+- [x] End-to-end proof (the PRD acceptance): copy `target/release/conduit` to `/tmp/bin-only/conduit`, `cd /tmp && ./bin-only/conduit init demo && cd demo && ../bin-only/conduit run hello_world` succeeds.
+- [x] Run: `cargo test -p conduit-cli -p conduit-executor`.
+- [x] Commit: `feat(cli): vendor Python SDK into init scaffolds; CONDUIT_SDK_PATH override (PRD B3)`
 
 ### Task 13: conduit-sdk publish workflow (B4 part 2)
 
@@ -212,10 +220,10 @@
 - Modify: `sdk/python/pyproject.toml` — version → `0.2.0`
 
 **Steps:**
-- [ ] Write workflow (pure-python wheel, single build job).
-- [ ] Validate: `actionlint .github/workflows/publish-sdk.yml` if available, else YAML parse.
-- [ ] Note for Jay: PyPI trusted-publisher must be configured on pypi.org for `conduit-sdk` before first tag.
-- [ ] Commit: `ci(sdk): publish conduit-sdk wheels to PyPI on sdk-v* tags (PRD B4)`
+- [x] Write workflow (pure-python wheel, single build job).
+- [x] Validate: `actionlint .github/workflows/publish-sdk.yml` if available, else YAML parse.
+- [x] Note for Jay: PyPI trusted-publisher must be configured on pypi.org for `conduit-sdk` before first tag.
+- [x] Commit: `ci(sdk): publish conduit-sdk wheels to PyPI on sdk-v* tags (PRD B4)`
 
 ---
 
