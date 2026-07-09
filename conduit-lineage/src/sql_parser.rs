@@ -102,11 +102,12 @@ pub struct ColumnMapping {
 /// Mapping is intentional and explicit (no clever fallthrough): each
 /// variant maps to exactly one `sqlparser::dialect::*Dialect` instance.
 /// New dialects added to sqlparser are *opt-in* via a new variant here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SqlDialect {
     /// `GenericDialect` — superset that accepts most syntax; the
     /// historical default. Use when the connection type is unknown or
     /// the workload is ANSI-shaped.
+    #[default]
     Generic,
     Snowflake,
     BigQuery,
@@ -165,12 +166,6 @@ impl SqlDialect {
             Self::Databricks => Box::new(DatabricksDialect {}),
             Self::Ansi => Box::new(AnsiDialect {}),
         }
-    }
-}
-
-impl Default for SqlDialect {
-    fn default() -> Self {
-        Self::Generic
     }
 }
 
