@@ -48,13 +48,21 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    # Debug info dominates test-binary size; linking all of them at once has
-    # OOM'd the hosted runner's `ld` (SIGBUS). Drop debuginfo for the test
-    # build to keep the linker within the runner's memory.
+    # Linking every workspace test binary crashed the hosted runner's `ld`
+    # with SIGBUS — the signature of the runner's disk/tmpfs filling up
+    # mid-link (RocksDB + all deps + every test binary). Two mitigations:
+    # reclaim the ~25 GB of preinstalled toolchains we don't use, and drop
+    # debuginfo to shrink the artifacts. Test behavior is unchanged.
     env:
       RUSTFLAGS: -Dwarnings -C debuginfo=0
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /usr/local/share/powershell \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
