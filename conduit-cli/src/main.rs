@@ -926,6 +926,14 @@ fn cmd_init(name: &str) -> Result<()> {
     fs::create_dir_all(project_dir.join("dags"))?;
     fs::create_dir_all(project_dir.join(".conduit"))?;
 
+    // Vendor the Python SDK into the project so `conduit run` works without
+    // a repo checkout or `pip install conduit-sdk` (PRD B3). The executor
+    // discovers `.conduit/sdk` by walking up from the working directory;
+    // CONDUIT_SDK_PATH overrides, and a pip-installed conduit-sdk also works.
+    let sdk_dest = project_dir.join(".conduit").join("sdk");
+    write_embedded_sdk(&sdk_dest.join("conduit_sdk"))?;
+    fs::write(sdk_dest.join("VERSION"), env!("CARGO_PKG_VERSION"))?;
+
     // conduit.yaml
     let config = format!(
         r#"# Conduit project configuration
@@ -3928,4 +3936,44 @@ fn cmd_impact(
         None => println!("{report}"),
     }
     Ok(())
+}
+
+// ─── Embedded Python SDK (vendored into `conduit init` scaffolds) ───────────
+
+/// The `conduit_sdk` package embedded at compile time from `sdk/python/`.
+static EMBEDDED_SDK: include_dir::Dir<'_> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/../sdk/python/conduit_sdk");
+
+/// Write the embedded SDK to `dest`, skipping bytecode caches.
+fn write_embedded_sdk(dest: &Path) -> Result<()> {
+    fn write_dir(dir: &include_dir::Dir<'_>, dest: &Path) -> Result<()> {
+        use std::fs;
+        for entry in dir.entries() {
+            match entry {
+                include_dir::DirEntry::Dir(d) => {
+                    let name = d
+                        .path()
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    if name == "__pycache__" {
+                        continue;
+                    }
+                    write_dir(d, dest)?;
+                }
+                include_dir::DirEntry::File(f) => {
+                    if f.path().extension().is_some_and(|e| e == "pyc") {
+                        continue;
+                    }
+                    let target = dest.join(f.path());
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(target, f.contents())?;
+                }
+            }
+        }
+        Ok(())
+    }
+    write_dir(&EMBEDDED_SDK, dest)
 }

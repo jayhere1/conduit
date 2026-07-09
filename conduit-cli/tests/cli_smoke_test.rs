@@ -258,6 +258,39 @@ fn cli_init_creates_project() {
     );
 }
 
+/// `conduit init` vendors the Python SDK so `conduit run` works outside a
+/// repo checkout without `pip install conduit-sdk` (PRD B3).
+#[test]
+fn cli_init_vendors_python_sdk() {
+    let tmp = TempDir::new().unwrap();
+
+    conduit()
+        .arg("init")
+        .arg("vendored")
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+
+    let sdk_root = tmp.path().join("vendored/.conduit/sdk");
+    assert!(
+        sdk_root.join("conduit_sdk/__init__.py").exists(),
+        "vendored SDK package must exist"
+    );
+    assert!(
+        sdk_root.join("conduit_sdk/_runtime.py").exists(),
+        "runtime shim must be vendored (the executor imports it)"
+    );
+    assert!(
+        sdk_root.join("VERSION").exists(),
+        "vendored SDK must carry a version stamp"
+    );
+    // Bytecode caches must not be embedded in the binary or written out.
+    assert!(
+        !sdk_root.join("conduit_sdk/__pycache__").exists(),
+        "__pycache__ must not be vendored"
+    );
+}
+
 #[test]
 fn cli_lineage_outputs_native_json_for_sql_task() {
     let tmp = TempDir::new().unwrap();
