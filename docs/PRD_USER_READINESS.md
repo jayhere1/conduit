@@ -1,7 +1,7 @@
 # PRD — Conduit User-Ready Release (v0.2)
 
 **Date:** 2026-07-09
-**Status:** Draft for review
+**Status:** Draft for review — M0–M3 implemented on `feat/user-ready-v0.2` (2026-07-09): M0 hygiene, M1 security gate, M2 first-run success (impact CLI, SDK vendoring), M3 conduit-native 0.2.0 (D1–D3 bindings, D5/D6 wheel+PyPI pipeline). Remaining: M4 (docs deploy, audit log, redteam, provider probes) and M5 (soak, coordinator recovery, SQLGlot oracle).
 **Owner:** Jay
 **Scope:** Everything required to (1) let real users adopt Conduit without hitting a wall, and (2) finish the functionality the project has already committed to building.
 **Evidence discipline:** Per `STRATEGIC_DIRECTION.md` §8.7 — every claim below traces to a file path, line, or commit. All findings verified against source on 2026-07-09 (`cargo check --workspace` and `cargo test --workspace` both green on `main` @ `a04a2b6`).
