@@ -6,10 +6,12 @@
 # ── Stage 1: Build the Rust binary ────────────────────────────────────────────
 FROM rust:1.91-bookworm AS rust-builder
 
-# Install RocksDB system deps
+# Install RocksDB system deps + protoc (conduit-distributed's build script
+# runs prost/tonic codegen).
 RUN apt-get update && apt-get install -y \
     libclang-dev \
     librocksdb-dev \
+    protobuf-compiler \
     cmake \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -26,9 +28,15 @@ COPY conduit-state/Cargo.toml conduit-state/Cargo.toml
 COPY conduit-planner/Cargo.toml conduit-planner/Cargo.toml
 COPY conduit-lineage/Cargo.toml conduit-lineage/Cargo.toml
 COPY conduit-api/Cargo.toml conduit-api/Cargo.toml
+COPY conduit-providers/Cargo.toml conduit-providers/Cargo.toml
+COPY conduit-distributed/Cargo.toml conduit-distributed/Cargo.toml
+COPY conduit-distributed/build.rs conduit-distributed/build.rs
+COPY conduit-distributed/proto conduit-distributed/proto
 COPY conduit-cli/Cargo.toml conduit-cli/Cargo.toml
 
-# Create dummy source files so cargo can resolve the dependency graph
+# Create dummy source files so cargo can resolve the dependency graph. Every
+# workspace member listed in the root Cargo.toml must be present or the
+# workspace won't parse.
 RUN mkdir -p conduit-common/src && echo "" > conduit-common/src/lib.rs && \
     mkdir -p conduit-compiler/src && echo "" > conduit-compiler/src/lib.rs && \
     mkdir -p conduit-scheduler/src && echo "" > conduit-scheduler/src/lib.rs && \
@@ -37,6 +45,8 @@ RUN mkdir -p conduit-common/src && echo "" > conduit-common/src/lib.rs && \
     mkdir -p conduit-planner/src && echo "" > conduit-planner/src/lib.rs && \
     mkdir -p conduit-lineage/src && echo "" > conduit-lineage/src/lib.rs && \
     mkdir -p conduit-api/src && echo "" > conduit-api/src/lib.rs && \
+    mkdir -p conduit-providers/src && echo "" > conduit-providers/src/lib.rs && \
+    mkdir -p conduit-distributed/src && echo "" > conduit-distributed/src/lib.rs && \
     mkdir -p conduit-cli/src && echo "fn main() {}" > conduit-cli/src/main.rs
 
 # Pre-build dependencies (this layer gets cached unless Cargo.toml changes)
@@ -51,6 +61,8 @@ COPY conduit-state/ conduit-state/
 COPY conduit-planner/ conduit-planner/
 COPY conduit-lineage/ conduit-lineage/
 COPY conduit-api/ conduit-api/
+COPY conduit-providers/ conduit-providers/
+COPY conduit-distributed/ conduit-distributed/
 COPY conduit-cli/ conduit-cli/
 
 # Touch the main files to invalidate the dummy builds
