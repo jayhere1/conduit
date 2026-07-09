@@ -21,7 +21,7 @@ conduit/
 ├── conduit-cli/           CLI entry point
 │
 ├── conduit-bench/         (excluded) Benchmarks
-├── conduit-python/        (excluded) Python SDK + tree-sitter bindings
+├── conduit-python/        (excluded) PyO3 native bindings (the SDK is sdk/python)
 └── conduit-wasm/          (excluded) WebAssembly target
 ```
 
