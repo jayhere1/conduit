@@ -62,7 +62,7 @@ dnf install -y clang rocksdb-devel
 Clone the repository and build:
 
 ```bash
-git clone https://github.com/conduit-orchestrator/conduit.git
+git clone https://github.com/jayhere1/conduit.git
 cd conduit
 cargo install --path conduit-cli
 ```
