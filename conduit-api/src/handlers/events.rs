@@ -273,7 +273,7 @@ mod tests {
         let a = task_failed_event(1, "r1", "etl", "load");
         let b = task_failed_event(2, "r2", "etl", "load");
         let c = dag_created_event(3, "r1", "etl");
-        let events = vec![&a, &b, &c];
+        let events = [&a, &b, &c];
 
         let want = Some("r1".to_string());
         let kept: Vec<u64> = events
