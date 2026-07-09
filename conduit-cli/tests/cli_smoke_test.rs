@@ -427,6 +427,7 @@ fn readme_documented_commands_parse() {
         vec!["env", "set-policy"],
         vec!["lineage", "extract"],
         vec!["lineage", "trace"],
+        vec!["impact"],
         vec!["backfill"],
         vec!["replay"],
         vec!["query"],
@@ -447,4 +448,72 @@ fn readme_documented_commands_parse() {
             .success()
             .stdout(predicate::str::contains("Usage"));
     }
+}
+
+// ─── conduit impact (PRD C1) ─────────────────────────────────────────────────
+
+/// Plan-file mode with DAGs directories: the head fixture drops a column the
+/// downstream task reads — the JSON report must count it as breaking.
+#[test]
+fn impact_plan_file_mode_reports_breaking() {
+    let out = conduit()
+        .arg("impact")
+        .arg("--base-plan")
+        .arg("tests/fixtures/impact/base")
+        .arg("--head-plan")
+        .arg("tests/fixtures/impact/head")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("stdout must be JSON");
+    let breaking = report["summary"]["total_breaking_changes"]
+        .as_u64()
+        .expect("summary.total_breaking_changes must exist");
+    assert!(breaking >= 1, "expected at least one breaking change, got {breaking}");
+}
+
+/// Markdown mode writes the report to --output and exits 0 even when
+/// breaking changes exist (gating is the CI workflow's label logic).
+#[test]
+fn impact_markdown_mode_writes_output_file() {
+    let tmp = TempDir::new().unwrap();
+    let report_path = tmp.path().join("report.md");
+
+    conduit()
+        .arg("impact")
+        .arg("--base-plan")
+        .arg("tests/fixtures/impact/base")
+        .arg("--head-plan")
+        .arg("tests/fixtures/impact/head")
+        .arg("--format")
+        .arg("markdown")
+        .arg("--output")
+        .arg(report_path.to_str().unwrap())
+        .assert()
+        .success();
+
+    let report = fs::read_to_string(&report_path).unwrap();
+    assert!(report.contains("region"), "report must name the dropped column:\n{report}");
+}
+
+/// Identical base and head → zero breaking changes.
+#[test]
+fn impact_identical_plans_report_clean() {
+    let out = conduit()
+        .arg("impact")
+        .arg("--base-plan")
+        .arg("tests/fixtures/impact/base")
+        .arg("--head-plan")
+        .arg("tests/fixtures/impact/base")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["summary"]["total_breaking_changes"].as_u64(), Some(0));
 }

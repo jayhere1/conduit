@@ -132,6 +132,7 @@ Terraform-style change detection and deployment. Computes content-addressable fi
 | `conduit env set-policy <name>` | Set or clear an environment's promotion policy |
 | `conduit lineage extract <dag.task>` | Extract SQL lineage for a task (`--openlineage` emits a RunEvent) |
 | `conduit lineage trace --dag <id> --column <task.col>` | Trace a column across task boundaries (Python → SQL → Python) |
+| `conduit impact --base <ref> --head WORKING` | Schema-impact report between two DAG versions (CI gate) |
 | `conduit backfill <dag>` | Run a DAG across a date/partition range |
 | `conduit replay` | Replay events to reconstruct historical state |
 | `conduit query <sql>` | Run SQL locally (powered by DuckDB) |

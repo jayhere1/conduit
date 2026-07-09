@@ -351,6 +351,41 @@ enum Commands {
         command: LineageCommands,
     },
 
+    /// Schema impact between two DAG versions — the CI gate behind
+    /// .github/workflows/conduit-impact.yml. Diffs task output schemas and
+    /// traces the downstream blast radius through cross-task lineage.
+    Impact {
+        /// Base side: git ref (git mode; pair with --head)
+        #[arg(long, conflicts_with_all = ["base_plan", "head_plan"], requires = "head")]
+        base: Option<String>,
+
+        /// Head side: git ref, or the literal WORKING for the uncommitted
+        /// working tree
+        #[arg(long, requires = "base")]
+        head: Option<String>,
+
+        /// Base side: compiled plan JSON file or a DAGs directory (file mode;
+        /// pair with --head-plan)
+        #[arg(long, requires = "head_plan")]
+        base_plan: Option<PathBuf>,
+
+        /// Head side: compiled plan JSON file or a DAGs directory
+        #[arg(long, requires = "base_plan")]
+        head_plan: Option<PathBuf>,
+
+        /// DAGs directory relative to the repo root (git mode only)
+        #[arg(long, default_value = "dags")]
+        dags_path: PathBuf,
+
+        /// Output format: markdown or json
+        #[arg(long, default_value = "markdown")]
+        format: String,
+
+        /// Write the report to this file instead of stdout
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
     /// Backfill a DAG across a range of dates/partitions
     Backfill {
         /// DAG ID to backfill
@@ -747,6 +782,23 @@ fn main() -> Result<()> {
             dry_run,
         } => cmd_migrate(&source, &output, dry_run),
 
+        Commands::Impact {
+            base,
+            head,
+            base_plan,
+            head_plan,
+            dags_path,
+            format,
+            output,
+        } => cmd_impact(
+            base.as_deref(),
+            head.as_deref(),
+            base_plan.as_ref(),
+            head_plan.as_ref(),
+            &dags_path,
+            &format,
+            output.as_ref(),
+        ),
         Commands::Lineage { command } => match command {
             LineageCommands::Extract {
                 task_ref,
@@ -3741,4 +3793,139 @@ mod gethostname {
             .map(OsString::from)
             .unwrap_or_else(|_| OsString::from("unknown"))
     }
+}
+
+// ─── conduit impact ──────────────────────────────────────────────────────────
+
+/// Removes a temporary git worktree on drop, so failed compiles don't leak
+/// worktrees into the operator's repo.
+struct WorktreeGuard {
+    repo_root: PathBuf,
+    path: PathBuf,
+}
+
+impl Drop for WorktreeGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("git")
+            .current_dir(&self.repo_root)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .output();
+    }
+}
+
+/// Load a `DagSet` from a path that is either a DAGs directory (compiled
+/// on the spot) or a compiled-plan JSON file (as produced by serializing
+/// `ConduitPlan`).
+fn load_dagset(path: &Path) -> Result<conduit_lineage::DagSet> {
+    if path.is_dir() {
+        let (plan, _) = ConduitPlan::compile(path)?;
+        Ok(plan.dags)
+    } else {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("failed to read plan file '{}': {}", path.display(), e)
+        })?;
+        let plan: ConduitPlan = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!(
+                "'{}' is not a compiled plan JSON (serialize ConduitPlan, or pass a DAGs directory): {}",
+                path.display(),
+                e
+            )
+        })?;
+        Ok(plan.dags)
+    }
+}
+
+/// Compile the DAGs directory as it exists at `git_ref`, via a temporary
+/// detached worktree (removed on return, even on failure).
+fn compile_dagset_at_ref(git_ref: &str, dags_path: &Path) -> Result<conduit_lineage::DagSet> {
+    let root_out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()?;
+    if !root_out.status.success() {
+        anyhow::bail!("--base/--head git mode requires running inside a git repository");
+    }
+    let repo_root = PathBuf::from(String::from_utf8_lossy(&root_out.stdout).trim().to_string());
+
+    let wt_path = std::env::temp_dir().join(format!("conduit-impact-{}", Uuid::new_v4().simple()));
+    let add_out = std::process::Command::new("git")
+        .current_dir(&repo_root)
+        .args(["worktree", "add", "--detach"])
+        .arg(&wt_path)
+        .arg(git_ref)
+        .output()?;
+    if !add_out.status.success() {
+        anyhow::bail!(
+            "git worktree add failed for ref '{}': {}",
+            git_ref,
+            String::from_utf8_lossy(&add_out.stderr).trim()
+        );
+    }
+    let _guard = WorktreeGuard {
+        repo_root,
+        path: wt_path.clone(),
+    };
+
+    let dags_dir = wt_path.join(dags_path);
+    if !dags_dir.exists() {
+        anyhow::bail!(
+            "DAGs path '{}' does not exist at ref '{}'",
+            dags_path.display(),
+            git_ref
+        );
+    }
+    let (plan, _) = ConduitPlan::compile(&dags_dir)?;
+    Ok(plan.dags)
+}
+
+/// `conduit impact` — analyze schema impact between two DAG versions.
+///
+/// Exit code is 0 whenever analysis succeeds, even with breaking changes:
+/// the CI workflow gates on the JSON `summary.total_breaking_changes` plus
+/// the `allow-breaking` PR label, not on this exit code.
+fn cmd_impact(
+    base: Option<&str>,
+    head: Option<&str>,
+    base_plan: Option<&PathBuf>,
+    head_plan: Option<&PathBuf>,
+    dags_path: &Path,
+    format: &str,
+    output: Option<&PathBuf>,
+) -> Result<()> {
+    use conduit_lineage::{analyze_plan_impact, render_impact, ImpactFormat};
+
+    let fmt = ImpactFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+
+    let (base_set, head_set) = match (base_plan, head_plan, base, head) {
+        (Some(bp), Some(hp), None, None) => (load_dagset(bp)?, load_dagset(hp)?),
+        (None, None, Some(b), Some(h)) => {
+            let base_set = compile_dagset_at_ref(b, dags_path)?;
+            let head_set = if h == "WORKING" {
+                let (plan, _) = ConduitPlan::compile(dags_path)?;
+                plan.dags
+            } else {
+                compile_dagset_at_ref(h, dags_path)?
+            };
+            (base_set, head_set)
+        }
+        _ => anyhow::bail!(
+            "pass either --base-plan/--head-plan (file mode) or --base/--head (git mode)"
+        ),
+    };
+
+    let impact = analyze_plan_impact(&base_set, &head_set);
+    let report = render_impact(&impact, fmt);
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &report)?;
+            eprintln!(
+                "impact report written to {} ({} breaking change(s))",
+                path.display(),
+                impact.summary.total_breaking_changes
+            );
+        }
+        None => println!("{report}"),
+    }
+    Ok(())
 }
