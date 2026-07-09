@@ -83,6 +83,11 @@ pub struct AppState {
     /// DAG source signature change. Shared across all handlers that
     /// need a `ConduitPlan` or a `CrossTaskLineage`.
     pub plan_cache: Arc<PlanCache>,
+    /// CORS origins allowed to call the API cross-origin. Empty (the
+    /// default) means same-origin only — no CORS headers are emitted.
+    /// Set at startup via `conduit serve --cors-origin` before the router
+    /// is built.
+    pub cors_allowed_origins: RwLock<Vec<String>>,
     /// Optional persistent event store backing the `/events` query API. When
     /// `state_dir/events` exists, it's opened on `AppState::with_options`; if
     /// the directory is missing or open fails (e.g. permissions), the field
@@ -173,6 +178,7 @@ impl AppState {
             catalog_cache: RwLock::new(None),
             external_lineage,
             plan_cache,
+            cors_allowed_origins: RwLock::new(Vec::new()),
             event_store,
         })
     }
@@ -248,6 +254,14 @@ impl AppState {
             })?
         };
         registry.test_connection(name).await
+    }
+
+    /// Configure the CORS allow-list. Call before `build_router`; the
+    /// router snapshots this list at construction time.
+    pub fn set_cors_origins(&self, origins: Vec<String>) {
+        if let Ok(mut guard) = self.cors_allowed_origins.write() {
+            *guard = origins;
+        }
     }
 
     /// Broadcast an event to all WebSocket subscribers.

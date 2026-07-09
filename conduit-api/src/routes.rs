@@ -238,15 +238,24 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         tracing::info!("Authentication disabled — all endpoints are publicly accessible");
     }
 
-    // CORS: allow any origin but restrict methods and headers.
-    // TODO: restrict origins in production via configuration.
-    let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+    // CORS: same-origin only by default (no CORS headers emitted).
+    // Cross-origin callers — e.g. a UI dev server on another port — must be
+    // allowed explicitly via `conduit serve --cors-origin <URL>` (repeatable).
+    let cors_origins: Vec<axum::http::HeaderValue> = state
+        .cors_allowed_origins
+        .read()
+        .map(|v| v.iter().filter_map(|o| o.parse().ok()).collect())
+        .unwrap_or_default();
 
-    router
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+    let router = if cors_origins.is_empty() {
+        router
+    } else {
+        let cors = CorsLayer::new()
+            .allow_origin(cors_origins)
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+        router.layer(cors)
+    };
+
+    router.layer(TraceLayer::new_for_http()).with_state(state)
 }

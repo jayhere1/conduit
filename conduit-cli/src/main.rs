@@ -279,6 +279,12 @@ enum Commands {
         /// Enable API key authentication
         #[arg(long)]
         auth_enabled: bool,
+
+        /// Origin allowed to call the API cross-origin (repeatable).
+        /// Default: none — same-origin only. Example for a UI dev server:
+        /// --cors-origin http://localhost:3000
+        #[arg(long = "cors-origin")]
+        cors_origins: Vec<String>,
     },
 
     /// Show system status
@@ -698,7 +704,15 @@ fn main() -> Result<()> {
             dags_path,
             state_dir,
             auth_enabled,
-        } => rt.block_on(cmd_serve(&host, port, &dags_path, &state_dir, auth_enabled)),
+            cors_origins,
+        } => rt.block_on(cmd_serve(
+            &host,
+            port,
+            &dags_path,
+            &state_dir,
+            auth_enabled,
+            cors_origins,
+        )),
         Commands::Status { env, dags_path } => cmd_status(env.as_deref(), &dags_path),
         Commands::Env { action, dags_path } => match action {
             EnvCommands::Create { name, from } => cmd_env_create(&name, &from, &dags_path),
@@ -1678,6 +1692,7 @@ async fn cmd_serve(
     dags_path: &PathBuf,
     state_dir: &PathBuf,
     auth_enabled: bool,
+    cors_origins: Vec<String>,
 ) -> Result<()> {
     use std::net::SocketAddr;
 
@@ -1728,6 +1743,11 @@ async fn cmd_serve(
         ui_dir,
         auth_enabled,
     );
+
+    if !cors_origins.is_empty() {
+        println!("  CORS:        allowing {}", cors_origins.join(", "));
+        state.set_cors_origins(cors_origins);
+    }
 
     // If auth is enabled and no keys exist, create a bootstrap admin key
     if auth_enabled && state.auth_store.list_keys().is_empty() {
