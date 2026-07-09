@@ -179,6 +179,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/connections/:name",
             get(handlers::connections::get_connection),
         )
+        .route(
+            "/connections/:name/test",
+            post(handlers::connections::test_connection),
+        )
         // ── Backfill ────────────────────────────────────────────
         .route("/backfill", post(handlers::backfill::create_backfill))
         // ── Cluster ────────────────────────────────────────────

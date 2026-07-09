@@ -70,6 +70,7 @@ fn mutating_routes() -> Vec<(Method, &'static str)> {
         (Method::POST, "/api/v1/lineage/cache/invalidate"),
         (Method::POST, "/api/v1/openlineage/v1/lineage"),
         (Method::POST, "/api/v1/backfill"),
+        (Method::POST, "/api/v1/connections/somename/test"),
         (Method::POST, "/api/v1/cluster/workers/w1/drain"),
     ]
 }

@@ -66,7 +66,7 @@ pub struct AppState {
     /// WebSocket broadcast channel for live events.
     pub event_tx: tokio::sync::broadcast::Sender<String>,
     /// Provider registry: named connections to external data systems.
-    pub provider_registry: RwLock<Option<ProviderRegistry>>,
+    pub provider_registry: RwLock<Option<Arc<ProviderRegistry>>>,
     /// Authentication store: API keys, roles, and permissions.
     pub auth_store: AuthStore,
     /// Optional channel to dispatch events to the scheduler.
@@ -214,7 +214,7 @@ impl AppState {
     ) {
         let registry = ProviderRegistry::from_configs(connections).await;
         if let Ok(mut guard) = self.provider_registry.write() {
-            *guard = Some(registry);
+            *guard = Some(Arc::new(registry));
         }
     }
 
@@ -228,21 +228,25 @@ impl AppState {
     }
 
     /// Test a specific connection.
-    #[allow(clippy::await_holding_lock)]
+    ///
+    /// The registry `Arc` is cloned and the lock released *before* awaiting,
+    /// so the returned future stays `Send` (required by axum handlers).
     pub async fn test_connection(
         &self,
         name: &str,
     ) -> Result<ConnectionTestResult, conduit_providers::ProviderError> {
-        let registry_guard = self.provider_registry.read().map_err(|_| {
-            conduit_providers::ProviderError::ConnectionNotFound {
-                name: name.to_string(),
-            }
-        })?;
-        let registry = registry_guard.as_ref().ok_or_else(|| {
-            conduit_providers::ProviderError::ConnectionNotFound {
-                name: name.to_string(),
-            }
-        })?;
+        let registry = {
+            let guard = self.provider_registry.read().map_err(|_| {
+                conduit_providers::ProviderError::ConnectionNotFound {
+                    name: name.to_string(),
+                }
+            })?;
+            guard.as_ref().cloned().ok_or_else(|| {
+                conduit_providers::ProviderError::ConnectionNotFound {
+                    name: name.to_string(),
+                }
+            })?
+        };
         registry.test_connection(name).await
     }
 
@@ -669,7 +673,7 @@ impl AppState {
             });
 
         if let Ok(mut guard) = self.provider_registry.write() {
-            *guard = Some(registry);
+            *guard = Some(Arc::new(registry));
         }
     }
 }

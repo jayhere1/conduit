@@ -12,6 +12,9 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde_json::{json, Value};
 
+use crate::auth::Permission;
+use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::AppState;
 
 /// GET /api/v1/connections — list all configured connections.
@@ -43,10 +46,13 @@ pub async fn get_connection(
 
 /// POST /api/v1/connections/:name/test — test a specific connection.
 pub async fn test_connection(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Json<Value> {
-    match state.test_connection(&name).await {
+) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ViewConnections)?;
+
+    Ok(match state.test_connection(&name).await {
         Ok(result) => Json(json!({
             "name": name,
             "result": json!({
@@ -64,7 +70,7 @@ pub async fn test_connection(
                 "latencyMs": 0,
             }),
         })),
-    }
+    })
 }
 
 /// GET /api/v1/connections/providers — list supported provider types.
