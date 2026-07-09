@@ -60,9 +60,12 @@ async fn forged_tokens_are_rejected() {
         // (a NUL-byte token can't be built as an HTTP header at all — the
         // `http` crate rejects it before auth sees it.)
     ] {
-        let status =
-            status_with_header(&router, Method::GET, "/api/v1/dags", Some(forged)).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "forged token accepted: {forged:?}");
+        let status = status_with_header(&router, Method::GET, "/api/v1/dags", Some(forged)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "forged token accepted: {forged:?}"
+        );
     }
 }
 
@@ -73,13 +76,12 @@ async fn malformed_authorization_headers_are_rejected() {
         "",
         "cdt_nobearerprefix",
         "Basic dXNlcjpwYXNz",       // wrong scheme
-        "Bearer",                    // no token
-        "Bearer ",                   // empty token
-        "bearer lowercase",          // scheme is case-sensitive here
-        "Bearer tok1, Bearer tok2",  // header smuggling attempt
+        "Bearer",                   // no token
+        "Bearer ",                  // empty token
+        "bearer lowercase",         // scheme is case-sensitive here
+        "Bearer tok1, Bearer tok2", // header smuggling attempt
     ] {
-        let status =
-            status_with_header(&router, Method::GET, "/api/v1/dags", Some(header)).await;
+        let status = status_with_header(&router, Method::GET, "/api/v1/dags", Some(header)).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,

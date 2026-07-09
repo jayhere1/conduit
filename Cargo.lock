@@ -989,6 +989,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "conduit-common",
+ "proptest",
  "reqwest",
  "serde",
  "serde_json",

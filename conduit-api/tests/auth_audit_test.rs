@@ -50,7 +50,10 @@ async fn send(
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 async fn audit_events(router: &axum::Router, admin_key: &str) -> Vec<Value> {
@@ -130,9 +133,7 @@ async fn key_lifecycle_is_audited() {
         .uri("/api/v1/auth/keys")
         .header("Authorization", format!("Bearer {admin_key}"))
         .header("Content-Type", "application/json")
-        .body(Body::from(
-            r#"{"name": "ci-bot", "role": "operator"}"#,
-        ))
+        .body(Body::from(r#"{"name": "ci-bot", "role": "operator"}"#))
         .unwrap();
     let response = router.clone().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);

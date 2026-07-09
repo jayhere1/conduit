@@ -18,8 +18,24 @@ use proptest::prelude::*;
 /// A small alphabet of valid SQL identifiers.
 fn ident() -> impl Strategy<Value = String> {
     prop::sample::select(vec![
-        "id", "name", "email", "amount", "customer_id", "region", "total", "created_at", "status",
-        "qty", "price", "orders", "customers", "staging", "analytics", "t", "a", "b",
+        "id",
+        "name",
+        "email",
+        "amount",
+        "customer_id",
+        "region",
+        "total",
+        "created_at",
+        "status",
+        "qty",
+        "price",
+        "orders",
+        "customers",
+        "staging",
+        "analytics",
+        "t",
+        "a",
+        "b",
     ])
     .prop_map(String::from)
 }
