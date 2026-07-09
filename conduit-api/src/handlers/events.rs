@@ -227,6 +227,7 @@ fn event_type_name(kind: &EventKind) -> &'static str {
         EventKind::EnvironmentRolledBack { .. } => "EnvironmentRolledBack",
         EventKind::PlanCreated { .. } => "PlanCreated",
         EventKind::PlanApplied { .. } => "PlanApplied",
+        EventKind::AuthAudit { .. } => "AuthAudit",
     }
 }
 

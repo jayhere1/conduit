@@ -264,6 +264,21 @@ impl AppState {
         }
     }
 
+    /// Record a security-relevant auth event in the event store (PRD A3).
+    /// Best-effort: a missing or failing store never blocks the request.
+    pub fn audit_auth(&self, action: &str, key_id: Option<String>, detail: impl Into<String>) {
+        if let Some(store) = &self.event_store {
+            let event = conduit_common::event::EventKind::AuthAudit {
+                action: action.to_string(),
+                key_id,
+                detail: detail.into(),
+            };
+            if let Err(e) = store.append(event) {
+                tracing::debug!(error = %e, "failed to append auth audit event");
+            }
+        }
+    }
+
     /// Broadcast an event to all WebSocket subscribers.
     pub fn broadcast_event(&self, event_json: &str) {
         let _ = self.event_tx.send(event_json.to_string());

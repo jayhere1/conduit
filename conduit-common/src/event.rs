@@ -106,6 +106,20 @@ pub enum EventKind {
         reason: String,
     },
 
+    // ── Authentication audit ─────────────────────────────────
+    /// Security-relevant auth events: failed authentications, role
+    /// denials, and API-key lifecycle changes. Successful per-request
+    /// authentications are NOT logged (too noisy — `last_used_at` on the
+    /// key covers usage); key identity is present whenever known.
+    AuthAudit {
+        /// "auth_failed" | "permission_denied" | "key_created" | "key_revoked".
+        action: String,
+        /// The key involved, when known (None for failed authentications).
+        key_id: Option<String>,
+        /// Human-readable context: failure reason, denied path, key name/role.
+        detail: String,
+    },
+
     // ── Snapshot & Environment ───────────────────────────────
     SnapshotCreated {
         snapshot_id: SnapshotId,

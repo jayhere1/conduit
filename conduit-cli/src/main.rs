@@ -2403,6 +2403,7 @@ fn cmd_replay(
                 EventKind::SnapshotCreated { snapshot_id, .. } => {
                     format!("SnapshotCreated({})", snapshot_id)
                 }
+                EventKind::AuthAudit { action, .. } => format!("AuthAudit({})", action),
                 EventKind::EnvironmentCreated { env_name, .. } => {
                     format!("EnvironmentCreated({})", env_name)
                 }

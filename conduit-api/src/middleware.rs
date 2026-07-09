@@ -85,11 +85,30 @@ pub async fn auth_gate(
         .and_then(|token| auth_store.authenticate(token))
     {
         Ok(ctx) => ctx,
-        Err(e) => return AuthApiError(e).into_response(),
+        Err(e) => {
+            state.audit_auth(
+                "auth_failed",
+                None,
+                format!("{} {} {}: {}", req.method(), path, e, "rejected"),
+            );
+            return AuthApiError(e).into_response();
+        }
     };
 
     let required = required_role_for(req.method(), &path);
     if context.role < required {
+        state.audit_auth(
+            "permission_denied",
+            Some(context.key_id.clone()),
+            format!(
+                "{} {} requires {} (key '{}' is {})",
+                req.method(),
+                path,
+                required,
+                context.key_name,
+                context.role
+            ),
+        );
         return AuthApiError(AuthError::Forbidden {
             required_role: required,
             actual_role: context.role,
