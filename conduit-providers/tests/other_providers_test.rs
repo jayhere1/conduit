@@ -137,6 +137,26 @@ async fn test_gcs_from_config() {
     );
 }
 
+/// The GCS probe makes a real HTTPS request to the Storage JSON API. A
+/// definitely-nonexistent bucket must NOT report success (the old
+/// implementation always returned success=true without any network call).
+/// Passes whether the sandbox allows network (404 → false) or blocks it
+/// (request error → false).
+#[tokio::test]
+async fn test_gcs_test_connection_rejects_bogus_bucket() {
+    let mut config = make_config("gcs");
+    config.database = Some("conduit-nonexistent-bucket-9d3f2a1c-test".to_string());
+    let provider =
+        gcs::GcsProvider::from_config("test_gcs", &config).expect("Failed to create GCS provider");
+
+    let result = provider.test_connection().await.expect("returns Ok");
+    assert!(
+        !result.success,
+        "GCS test_connection must not succeed for a nonexistent bucket, got: {}",
+        result.message
+    );
+}
+
 #[tokio::test]
 async fn test_gcs_provider_info() {
     let config = make_config("gcs");

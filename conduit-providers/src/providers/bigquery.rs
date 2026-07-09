@@ -290,28 +290,21 @@ impl Provider for BigQueryProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
-        use tokio::net::TcpStream;
-        use tokio::time::{timeout, Duration};
-
+        // A real authenticated round-trip: mint an OAuth token from the
+        // service account, then run `SELECT 1` via the jobs.query API. This
+        // validates credentials and project access, not just TCP reachability
+        // to www.googleapis.com.
         let start = Instant::now();
-        let addr = "www.googleapis.com:443";
-
-        match timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
-            Ok(Ok(_)) => Ok(ConnectionTestResult {
+        match self.execute_query("SELECT 1").await {
+            Ok(_) => Ok(ConnectionTestResult {
                 success: true,
-                message: format!("TCP connection to {} successful", addr),
+                message: format!("Authenticated to BigQuery project '{}'", self.project),
                 latency_ms: start.elapsed().as_millis() as u64,
                 server_version: None,
             }),
-            Ok(Err(e)) => Ok(ConnectionTestResult {
+            Err(e) => Ok(ConnectionTestResult {
                 success: false,
-                message: format!("Connection failed: {}", e),
-                latency_ms: start.elapsed().as_millis() as u64,
-                server_version: None,
-            }),
-            Err(_) => Ok(ConnectionTestResult {
-                success: false,
-                message: format!("Connection timed out after 5s to {}", addr),
+                message: format!("BigQuery connection failed: {}", e),
                 latency_ms: start.elapsed().as_millis() as u64,
                 server_version: None,
             }),
