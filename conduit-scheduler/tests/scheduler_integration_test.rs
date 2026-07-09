@@ -513,9 +513,9 @@ async fn duplicate_task_completed_is_ignored() {
 // Alert hooks (Bet 3)
 // ---------------------------------------------------------------------------
 
+use conduit_scheduler::{AlertEvent, AlertHook, AlertStatus};
 use std::sync::Arc as StdArc;
 use std::sync::Mutex;
-use conduit_scheduler::{AlertEvent, AlertHook, AlertStatus};
 
 /// Test-only hook that captures every `AlertEvent::fire` call. Mirrors the
 /// in-crate `RecordingHook` but is local to this integration test so we don't
@@ -605,7 +605,11 @@ async fn alert_hook_fires_on_dag_failure() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let calls = hook.calls();
-    assert_eq!(calls.len(), 1, "hook should fire exactly once for a failed run");
+    assert_eq!(
+        calls.len(),
+        1,
+        "hook should fire exactly once for a failed run"
+    );
     let evt = &calls[0];
     assert_eq!(evt.dag_id, "dag1");
     assert_eq!(evt.run_id, "run1");

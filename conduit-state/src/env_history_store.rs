@@ -51,9 +51,9 @@ impl EnvHistoryStore {
             return Ok(1);
         }
         let mut max: u32 = 0;
-        for entry in std::fs::read_dir(&dir).map_err(|e| {
-            ConduitError::ConfigError(format!("read_dir {}: {}", dir.display(), e))
-        })? {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| ConduitError::ConfigError(format!("read_dir {}: {}", dir.display(), e)))?
+        {
             let entry = entry.map_err(|e| ConduitError::ConfigError(e.to_string()))?;
             if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
                 if let Ok(n) = stem.parse::<u32>() {
@@ -77,9 +77,8 @@ impl EnvHistoryStore {
         let final_path = self.version_path(&entry.env_id, entry.version);
         let tmp_path = final_path.with_extension("json.tmp");
 
-        let data = serde_json::to_string_pretty(entry).map_err(|e| {
-            ConduitError::ConfigError(format!("serialize history version: {}", e))
-        })?;
+        let data = serde_json::to_string_pretty(entry)
+            .map_err(|e| ConduitError::ConfigError(format!("serialize history version: {}", e)))?;
         std::fs::write(&tmp_path, data).map_err(|e| {
             ConduitError::ConfigError(format!("write tmp {}: {}", tmp_path.display(), e))
         })?;
@@ -129,9 +128,9 @@ impl EnvHistoryStore {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(&dir).map_err(|e| {
-            ConduitError::ConfigError(format!("read_dir {}: {}", dir.display(), e))
-        })? {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| ConduitError::ConfigError(format!("read_dir {}: {}", dir.display(), e)))?
+        {
             let entry = entry.map_err(|e| ConduitError::ConfigError(e.to_string()))?;
             let path = entry.path();
             // Skip in-flight temp files written by `record`.

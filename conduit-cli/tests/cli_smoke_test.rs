@@ -505,7 +505,10 @@ fn impact_plan_file_mode_reports_breaking() {
     let breaking = report["summary"]["total_breaking_changes"]
         .as_u64()
         .expect("summary.total_breaking_changes must exist");
-    assert!(breaking >= 1, "expected at least one breaking change, got {breaking}");
+    assert!(
+        breaking >= 1,
+        "expected at least one breaking change, got {breaking}"
+    );
 }
 
 /// Markdown mode writes the report to --output and exits 0 even when
@@ -529,7 +532,10 @@ fn impact_markdown_mode_writes_output_file() {
         .success();
 
     let report = fs::read_to_string(&report_path).unwrap();
-    assert!(report.contains("region"), "report must name the dropped column:\n{report}");
+    assert!(
+        report.contains("region"),
+        "report must name the dropped column:\n{report}"
+    );
 }
 
 /// Identical base and head → zero breaking changes.
@@ -548,5 +554,8 @@ fn impact_identical_plans_report_clean() {
 
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(report["summary"]["total_breaking_changes"].as_u64(), Some(0));
+    assert_eq!(
+        report["summary"]["total_breaking_changes"].as_u64(),
+        Some(0)
+    );
 }

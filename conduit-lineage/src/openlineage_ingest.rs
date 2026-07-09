@@ -421,10 +421,7 @@ pub fn extract_column_edges(event: &OpenLineageRunEvent) -> Vec<ExternalColumnEd
     out
 }
 
-pub fn flatten_event(
-    event: &OpenLineageRunEvent,
-    received_at: DateTime<Utc>,
-) -> IngestedEvent {
+pub fn flatten_event(event: &OpenLineageRunEvent, received_at: DateTime<Utc>) -> IngestedEvent {
     IngestedEvent {
         received_at,
         run_id: event.run.run_id.clone(),

@@ -182,10 +182,7 @@ fn stitch_with_dbt_manifest_resolves_ref_to_real_table() {
         vec![],
         vec![Dataset::new(
             "staging.orders",
-            vec![
-                ColumnSpec::new("customer_id"),
-                ColumnSpec::new("amount"),
-            ],
+            vec![ColumnSpec::new("customer_id"), ColumnSpec::new("amount")],
         )],
     );
 
@@ -255,9 +252,10 @@ fn stitch_with_dbt_manifest_resolves_ref_to_real_table() {
         stitch_with_dbt_manifest(&dag, None).expect("non-strict stitch should not error");
     let target = ColumnRef::task(TaskRef::new("dbt_demo", "transform"), "total");
     let upstream_no_manifest = no_manifest.graph.trace_upstream(&target);
-    let reaches_producer_no_manifest = upstream_no_manifest.columns.iter().any(|c| {
-        matches!(&c.source, ColumnSource::Task(t) if t.task_id == "extract_orders")
-    });
+    let reaches_producer_no_manifest = upstream_no_manifest
+        .columns
+        .iter()
+        .any(|c| matches!(&c.source, ColumnSource::Task(t) if t.task_id == "extract_orders"));
     assert!(
         !reaches_producer_no_manifest,
         "without manifest, ref('orders') should be a placeholder and lineage should NOT reach \
@@ -270,9 +268,10 @@ fn stitch_with_dbt_manifest_resolves_ref_to_real_table() {
     let with_manifest = stitch_with_dbt_manifest(&dag, Some(&manifest))
         .expect("non-strict stitch should not error");
     let upstream = with_manifest.graph.trace_upstream(&target);
-    let reaches_producer = upstream.columns.iter().any(|c| {
-        matches!(&c.source, ColumnSource::Task(t) if t.task_id == "extract_orders")
-    });
+    let reaches_producer = upstream
+        .columns
+        .iter()
+        .any(|c| matches!(&c.source, ColumnSource::Task(t) if t.task_id == "extract_orders"));
     assert!(
         reaches_producer,
         "with manifest, ref('orders') should resolve to staging.orders and the upstream trace \

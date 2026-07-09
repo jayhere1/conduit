@@ -738,7 +738,10 @@ mod tests {
         let vendored = project.join(".conduit").join("sdk").join("conduit_sdk");
         std::fs::create_dir_all(&vendored).unwrap();
         let found = ProcessRunner::discover_sdk_path_from(&nested_cwd).unwrap();
-        assert!(found.contains(".conduit"), "vendored copy must win: {found}");
+        assert!(
+            found.contains(".conduit"),
+            "vendored copy must win: {found}"
+        );
     }
 
     fn make_bash_task(id: &str, command: &str) -> Task {

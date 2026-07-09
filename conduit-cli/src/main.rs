@@ -1524,10 +1524,7 @@ async fn cmd_apply(
                 s.split_once('.')
                     .map(|(d, t)| (d.to_string(), t.to_string()))
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "--only value '{}' must be in 'dag_id.task_id' form",
-                            s
-                        )
+                        anyhow::anyhow!("--only value '{}' must be in 'dag_id.task_id' form", s)
                     })
             })
             .collect();
@@ -1714,9 +1711,10 @@ async fn cmd_apply(
     let post_apply_map = env_snapshot.snapshot_map.clone();
     let snapshot_count = post_apply_map.len();
 
-    let recorded_version = state
-        .env_manager
-        .apply_snapshot_map(environment, post_apply_map, deploy.id.clone())?;
+    let recorded_version =
+        state
+            .env_manager
+            .apply_snapshot_map(environment, post_apply_map, deploy.id.clone())?;
 
     // Persist state to disk
     state.save()?;
@@ -2739,9 +2737,9 @@ fn cmd_lineage(
     })?;
 
     let (connection, sql) = match &task.task_type {
-        conduit_common::dag::TaskType::Sql { connection, query, .. } => {
-            (connection.as_str(), query.as_str())
-        }
+        conduit_common::dag::TaskType::Sql {
+            connection, query, ..
+        } => (connection.as_str(), query.as_str()),
         other => {
             anyhow::bail!(
                 "Task '{}.{}' is {:?}, not a SQL task",
@@ -2845,10 +2843,7 @@ fn cmd_lineage_trace(
     // embedded underscores stay intact; column names with literal dots are
     // not supported (matches the rest of the CLI surface).
     let (task_id, column_name) = column.split_once('.').ok_or_else(|| {
-        anyhow::anyhow!(
-            "--column must be 'task_id.column_name', got '{}'",
-            column
-        )
+        anyhow::anyhow!("--column must be 'task_id.column_name', got '{}'", column)
     })?;
 
     // Compile and pick the DAG.
@@ -3830,9 +3825,8 @@ fn load_dagset(path: &Path) -> Result<conduit_lineage::DagSet> {
         let (plan, _) = ConduitPlan::compile(path)?;
         Ok(plan.dags)
     } else {
-        let text = std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!("failed to read plan file '{}': {}", path.display(), e)
-        })?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read plan file '{}': {}", path.display(), e))?;
         let plan: ConduitPlan = serde_json::from_str(&text).map_err(|e| {
             anyhow::anyhow!(
                 "'{}' is not a compiled plan JSON (serialize ConduitPlan, or pass a DAGs directory): {}",

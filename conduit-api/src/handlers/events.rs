@@ -280,7 +280,11 @@ mod tests {
             .filter(|e| match_run_id(&want, &e.kind))
             .map(|e| e.sequence)
             .collect();
-        assert_eq!(kept, vec![1, 3], "run_id=r1 must match both r1 task and r1 dag-create");
+        assert_eq!(
+            kept,
+            vec![1, 3],
+            "run_id=r1 must match both r1 task and r1 dag-create"
+        );
     }
 
     #[test]

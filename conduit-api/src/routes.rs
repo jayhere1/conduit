@@ -252,7 +252,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     } else {
         let cors = CorsLayer::new()
             .allow_origin(cors_origins)
-            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
         router.layer(cors)
     };

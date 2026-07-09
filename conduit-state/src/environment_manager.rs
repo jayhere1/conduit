@@ -278,7 +278,10 @@ impl EnvironmentManager {
     pub fn apply_snapshot_map(
         &self,
         env_name: &str,
-        new_snapshot_map: HashMap<(conduit_common::dag::DagId, conduit_common::dag::TaskId), String>,
+        new_snapshot_map: HashMap<
+            (conduit_common::dag::DagId, conduit_common::dag::TaskId),
+            String,
+        >,
         plan_id: String,
     ) -> ConduitResult<Option<u32>> {
         let mut envs = self
@@ -424,9 +427,10 @@ impl EnvironmentManager {
         env_name: &str,
         version: u32,
     ) -> ConduitResult<EnvSnapshotMapVersion> {
-        let store = self.history.as_ref().ok_or_else(|| {
-            ConduitError::ConfigError("No history store attached".to_string())
-        })?;
+        let store = self
+            .history
+            .as_ref()
+            .ok_or_else(|| ConduitError::ConfigError("No history store attached".to_string()))?;
         store.get(env_name, version)
     }
 
@@ -859,10 +863,7 @@ mod tests {
         mgr.set_promotion_policy("production", policy).unwrap();
 
         let err = mgr.promote("dev", "production").unwrap_err();
-        assert!(matches!(
-            err,
-            ConduitError::PromotionPolicyViolation(_)
-        ));
+        assert!(matches!(err, ConduitError::PromotionPolicyViolation(_)));
 
         // The correct source still works.
         assert!(mgr.promote("staging", "production").is_ok());
@@ -912,10 +913,7 @@ mod tests {
         .unwrap();
 
         let err = mgr.promote("staging", "production").unwrap_err();
-        assert!(matches!(
-            err,
-            ConduitError::PromotionPolicyViolation(_)
-        ));
+        assert!(matches!(err, ConduitError::PromotionPolicyViolation(_)));
 
         // Loosen the policy: zero-second min satisfied immediately.
         mgr.set_promotion_policy(
@@ -943,10 +941,7 @@ mod tests {
         .unwrap();
 
         let err = mgr.promote("staging", "production").unwrap_err();
-        assert!(matches!(
-            err,
-            ConduitError::PromotionPolicyViolation(_)
-        ));
+        assert!(matches!(err, ConduitError::PromotionPolicyViolation(_)));
     }
 
     #[test]

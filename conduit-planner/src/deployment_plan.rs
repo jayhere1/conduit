@@ -39,7 +39,10 @@ impl std::fmt::Display for PartialApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptySelection => {
-                write!(f, "partial apply: --only was passed but no selectors were given")
+                write!(
+                    f,
+                    "partial apply: --only was passed but no selectors were given"
+                )
             }
             Self::UnknownSelectors(items) => {
                 write!(f, "partial apply: selectors not in plan:")?;
@@ -880,7 +883,11 @@ mod tests {
         let selectors = vec![("etl".to_string(), "load".to_string())];
         let filtered = deploy.filtered_to(&plan, &selectors).unwrap();
 
-        let ids: Vec<&str> = filtered.actions.iter().map(|a| a.task_id.as_str()).collect();
+        let ids: Vec<&str> = filtered
+            .actions
+            .iter()
+            .map(|a| a.task_id.as_str())
+            .collect();
         assert_eq!(
             ids,
             vec!["extract", "transform", "load"],
@@ -931,7 +938,11 @@ mod tests {
         let selectors = vec![("etl".to_string(), "transform".to_string())];
         let filtered = deploy.filtered_to(&plan, &selectors).unwrap();
 
-        let ids: Vec<&str> = filtered.actions.iter().map(|a| a.task_id.as_str()).collect();
+        let ids: Vec<&str> = filtered
+            .actions
+            .iter()
+            .map(|a| a.task_id.as_str())
+            .collect();
         assert_eq!(
             ids,
             vec!["transform"],
@@ -974,10 +985,7 @@ mod tests {
         // plan must keep the same id and target so history accounting lines up.
         let plan = make_plan(
             "etl",
-            vec![
-                make_task("a", vec![]),
-                make_task("b", vec!["a"]),
-            ],
+            vec![make_task("a", vec![]), make_task("b", vec!["a"])],
             vec!["a", "b"],
         );
         let env = Environment::new("production");

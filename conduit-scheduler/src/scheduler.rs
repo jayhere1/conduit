@@ -831,9 +831,7 @@ impl Scheduler {
             .execution_order
             .iter()
             .filter_map(|task_id| match run_state.task_states.get(task_id) {
-                Some(TaskState::Failed { error, .. }) => {
-                    Some((task_id.clone(), error.clone()))
-                }
+                Some(TaskState::Failed { error, .. }) => Some((task_id.clone(), error.clone())),
                 _ => None,
             })
             .collect();

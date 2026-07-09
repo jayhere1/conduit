@@ -233,7 +233,10 @@ mod tests {
 
     #[test]
     fn alert_status_skips_success() {
-        assert_eq!(AlertStatus::from_run_status(RunStatus::Failed), Some(AlertStatus::Failed));
+        assert_eq!(
+            AlertStatus::from_run_status(RunStatus::Failed),
+            Some(AlertStatus::Failed)
+        );
         assert_eq!(
             AlertStatus::from_run_status(RunStatus::Cancelled),
             Some(AlertStatus::Cancelled)
@@ -318,9 +321,7 @@ mod tests {
                 // Naive end-of-body detection: stop once we see the
                 // closing `}` after the headers. Good enough for a
                 // JSON payload under a few KiB.
-                if buf.windows(4).any(|w| w == b"\r\n\r\n")
-                    && buf.last().copied() == Some(b'}')
-                {
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.last().copied() == Some(b'}') {
                     break;
                 }
             }
@@ -341,15 +342,13 @@ mod tests {
     #[tokio::test]
     async fn webhook_hook_posts_event_as_json() {
         let (url, rx) = one_shot_webhook_server().await;
-        let hook =
-            WebhookAlertHook::with_timeout(url, std::time::Duration::from_secs(5)).unwrap();
+        let hook = WebhookAlertHook::with_timeout(url, std::time::Duration::from_secs(5)).unwrap();
         let event = sample_event("etl");
 
         hook.fire(&event).await.unwrap();
 
         let body = rx.await.expect("server should receive the POST body");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&body).expect("body must be JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be JSON");
         assert_eq!(parsed["dag_id"], "etl");
         assert_eq!(parsed["run_id"], "r1");
         assert_eq!(parsed["status"], "failed");

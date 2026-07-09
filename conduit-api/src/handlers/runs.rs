@@ -66,9 +66,7 @@ pub async fn trigger_run(
         .unwrap_or(now);
 
     let config = body.config.unwrap_or_default();
-    let environment = body
-        .environment
-        .unwrap_or_else(|| "production".to_string());
+    let environment = body.environment.unwrap_or_else(|| "production".to_string());
 
     let task_states: HashMap<String, String> = dag
         .tasks

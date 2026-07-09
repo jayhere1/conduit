@@ -41,7 +41,11 @@ async fn request(
     } else {
         Body::empty()
     };
-    let response = router.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+    let response = router
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
     response.status()
 }
 
@@ -126,7 +130,11 @@ async fn public_routes_stay_public_when_auth_enabled() {
     let state = test_state(true);
     let router = build_router(state);
 
-    for path in ["/api/v1/health", "/api/v1/info", "/api/v1/docs/openapi.json"] {
+    for path in [
+        "/api/v1/health",
+        "/api/v1/info",
+        "/api/v1/docs/openapi.json",
+    ] {
         let status = request(&router, &Method::GET, path, None).await;
         assert_eq!(
             status,

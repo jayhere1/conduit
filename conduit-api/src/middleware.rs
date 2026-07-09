@@ -55,7 +55,11 @@ fn required_role_for(method: &Method, path: &str) -> Role {
 ///
 /// On success the authenticated [`AuthContext`] is stored in request
 /// extensions, so the `RequireAuth` extractor does not re-hash the key.
-pub async fn auth_gate(State(state): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
+pub async fn auth_gate(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
     let auth_store = &state.auth_store;
     if !auth_store.auth_enabled {
         return next.run(req).await;
