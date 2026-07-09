@@ -65,6 +65,11 @@ COPY conduit-providers/ conduit-providers/
 COPY conduit-distributed/ conduit-distributed/
 COPY conduit-cli/ conduit-cli/
 
+# conduit-cli embeds the Python SDK at compile time via include_dir!
+# (vendored into `conduit init` scaffolds), so sdk/ must be present in the
+# builder before the binary is compiled.
+COPY sdk/ sdk/
+
 # Touch the main files to invalidate the dummy builds
 RUN find . -name "*.rs" -exec touch {} +
 
