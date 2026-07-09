@@ -11,7 +11,9 @@ use serde_json::{json, Value};
 
 use conduit_scheduler::SchedulerEvent;
 
+use crate::auth::Permission;
 use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::state::DagRunInfo;
 use crate::AppState;
 
@@ -37,10 +39,13 @@ pub struct TriggerRunRequest {
 
 /// POST /api/v1/dags/:dag_id/runs — trigger a new DAG run.
 pub async fn trigger_run(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(dag_id): Path<String>,
     Json(body): Json<TriggerRunRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::TriggerRun)?;
+
     // Verify the DAG exists
     let (plan, _) = conduit_compiler::ConduitPlan::compile(&state.dags_path)
         .map_err(|e| ApiError::CompilationFailed(e.to_string()))?;
@@ -61,9 +66,7 @@ pub async fn trigger_run(
         .unwrap_or(now);
 
     let config = body.config.unwrap_or_default();
-    let environment = body
-        .environment
-        .unwrap_or_else(|| "production".to_string());
+    let environment = body.environment.unwrap_or_else(|| "production".to_string());
 
     let task_states: HashMap<String, String> = dag
         .tasks

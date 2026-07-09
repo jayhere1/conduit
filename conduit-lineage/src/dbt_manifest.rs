@@ -83,10 +83,7 @@ pub struct DbtSource {
 
 impl DbtSource {
     pub fn qualified_table(&self) -> String {
-        let table = self
-            .identifier
-            .clone()
-            .unwrap_or_else(|| self.name.clone());
+        let table = self.identifier.clone().unwrap_or_else(|| self.name.clone());
         match &self.database {
             Some(db) => format!("{}.{}.{}", db, self.schema, table),
             None => format!("{}.{}", self.schema, table),
@@ -188,10 +185,7 @@ mod tests {
 
     fn manifest_with(nodes: Vec<(&str, DbtNode)>, sources: Vec<(&str, DbtSource)>) -> DbtManifest {
         DbtManifest {
-            nodes: nodes
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
+            nodes: nodes.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
             sources: sources
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
@@ -217,7 +211,10 @@ mod tests {
     #[test]
     fn ref_falls_back_to_name_when_no_alias() {
         let m = manifest_with(
-            vec![("model.demo.orders", node("orders", "model", "staging", None))],
+            vec![(
+                "model.demo.orders",
+                node("orders", "model", "staging", None),
+            )],
             vec![],
         );
         assert_eq!(

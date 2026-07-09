@@ -23,7 +23,7 @@ exclude = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/conduit-orchestrator/conduit"
+repository = "https://github.com/jayhere1/conduit"
 description = "A Rust-native data pipeline orchestrator"
 
 [workspace.dependencies]

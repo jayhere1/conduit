@@ -258,6 +258,39 @@ fn cli_init_creates_project() {
     );
 }
 
+/// `conduit init` vendors the Python SDK so `conduit run` works outside a
+/// repo checkout without `pip install conduit-sdk` (PRD B3).
+#[test]
+fn cli_init_vendors_python_sdk() {
+    let tmp = TempDir::new().unwrap();
+
+    conduit()
+        .arg("init")
+        .arg("vendored")
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+
+    let sdk_root = tmp.path().join("vendored/.conduit/sdk");
+    assert!(
+        sdk_root.join("conduit_sdk/__init__.py").exists(),
+        "vendored SDK package must exist"
+    );
+    assert!(
+        sdk_root.join("conduit_sdk/_runtime.py").exists(),
+        "runtime shim must be vendored (the executor imports it)"
+    );
+    assert!(
+        sdk_root.join("VERSION").exists(),
+        "vendored SDK must carry a version stamp"
+    );
+    // Bytecode caches must not be embedded in the binary or written out.
+    assert!(
+        !sdk_root.join("conduit_sdk/__pycache__").exists(),
+        "__pycache__ must not be vendored"
+    );
+}
+
 #[test]
 fn cli_lineage_outputs_native_json_for_sql_task() {
     let tmp = TempDir::new().unwrap();
@@ -402,4 +435,127 @@ fn cli_lineage_trace_unknown_column_fails() {
         .stderr(predicate::str::contains(
             "not found in the merged lineage graph",
         ));
+}
+
+// ─── README contract ────────────────────────────────────────────────────────
+
+/// Every command documented in the README's command table must parse.
+/// If this fails, either the CLI changed (update the README) or the README
+/// documents a command that doesn't exist (PRD B5).
+#[test]
+fn readme_documented_commands_parse() {
+    let documented = [
+        vec!["init"],
+        vec!["compile"],
+        vec!["run"],
+        vec!["serve"],
+        vec!["plan"],
+        vec!["apply"],
+        vec!["env", "create"],
+        vec!["env", "list"],
+        vec!["env", "promote"],
+        vec!["env", "diff"],
+        vec!["env", "history"],
+        vec!["env", "rollback"],
+        vec!["env", "set-policy"],
+        vec!["lineage", "extract"],
+        vec!["lineage", "trace"],
+        vec!["impact"],
+        vec!["backfill"],
+        vec!["replay"],
+        vec!["query"],
+        vec!["preview"],
+        vec!["worker"],
+        vec!["cluster"],
+        vec!["migrate"],
+        vec!["status"],
+    ];
+
+    for cmd in documented {
+        let mut c = conduit();
+        for part in &cmd {
+            c.arg(part);
+        }
+        c.arg("--help")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Usage"));
+    }
+}
+
+// ─── conduit impact (PRD C1) ─────────────────────────────────────────────────
+
+/// Plan-file mode with DAGs directories: the head fixture drops a column the
+/// downstream task reads — the JSON report must count it as breaking.
+#[test]
+fn impact_plan_file_mode_reports_breaking() {
+    let out = conduit()
+        .arg("impact")
+        .arg("--base-plan")
+        .arg("tests/fixtures/impact/base")
+        .arg("--head-plan")
+        .arg("tests/fixtures/impact/head")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("stdout must be JSON");
+    let breaking = report["summary"]["total_breaking_changes"]
+        .as_u64()
+        .expect("summary.total_breaking_changes must exist");
+    assert!(
+        breaking >= 1,
+        "expected at least one breaking change, got {breaking}"
+    );
+}
+
+/// Markdown mode writes the report to --output and exits 0 even when
+/// breaking changes exist (gating is the CI workflow's label logic).
+#[test]
+fn impact_markdown_mode_writes_output_file() {
+    let tmp = TempDir::new().unwrap();
+    let report_path = tmp.path().join("report.md");
+
+    conduit()
+        .arg("impact")
+        .arg("--base-plan")
+        .arg("tests/fixtures/impact/base")
+        .arg("--head-plan")
+        .arg("tests/fixtures/impact/head")
+        .arg("--format")
+        .arg("markdown")
+        .arg("--output")
+        .arg(report_path.to_str().unwrap())
+        .assert()
+        .success();
+
+    let report = fs::read_to_string(&report_path).unwrap();
+    assert!(
+        report.contains("region"),
+        "report must name the dropped column:\n{report}"
+    );
+}
+
+/// Identical base and head → zero breaking changes.
+#[test]
+fn impact_identical_plans_report_clean() {
+    let out = conduit()
+        .arg("impact")
+        .arg("--base-plan")
+        .arg("tests/fixtures/impact/base")
+        .arg("--head-plan")
+        .arg("tests/fixtures/impact/base")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        report["summary"]["total_breaking_changes"].as_u64(),
+        Some(0)
+    );
 }

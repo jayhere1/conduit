@@ -275,29 +275,32 @@ impl Provider for SnowflakeProvider {
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
         use std::time::Instant;
-        use tokio::net::TcpStream;
-        use tokio::time::{timeout, Duration};
 
+        // A real authenticated round-trip: login() obtains a session token,
+        // then `SELECT 1` runs it. This validates account, credentials, and
+        // warehouse — not just TCP reachability to port 443.
         let start = Instant::now();
-        let account = self.account.trim_end_matches(".snowflakecomputing.com");
-        let addr = format!("{}.snowflakecomputing.com:443", account);
-
-        match timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await {
-            Ok(Ok(_)) => Ok(ConnectionTestResult {
-                success: true,
-                message: format!("TCP connection to {} successful", addr),
-                latency_ms: start.elapsed().as_millis() as u64,
-                server_version: None,
-            }),
-            Ok(Err(e)) => Ok(ConnectionTestResult {
+        match self.execute_sql("SELECT 1").await {
+            Ok(_) => {
+                let version = self
+                    .execute_sql("SELECT CURRENT_VERSION()")
+                    .await
+                    .ok()
+                    .and_then(|v| {
+                        v.pointer("/data/0/0")
+                            .and_then(|x| x.as_str())
+                            .map(str::to_string)
+                    });
+                Ok(ConnectionTestResult {
+                    success: true,
+                    message: format!("Authenticated to Snowflake account '{}'", self.account),
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    server_version: version,
+                })
+            }
+            Err(e) => Ok(ConnectionTestResult {
                 success: false,
-                message: format!("Connection failed: {}", e),
-                latency_ms: start.elapsed().as_millis() as u64,
-                server_version: None,
-            }),
-            Err(_) => Ok(ConnectionTestResult {
-                success: false,
-                message: format!("Connection timed out after 5s to {}", addr),
+                message: format!("Snowflake connection failed: {}", e),
                 latency_ms: start.elapsed().as_millis() as u64,
                 server_version: None,
             }),

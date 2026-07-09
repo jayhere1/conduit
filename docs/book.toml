@@ -2,10 +2,9 @@
 title = "Conduit Documentation"
 authors = ["Conduit Team"]
 language = "en"
-multilingual = false
 src = "src"
 
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/conduit-orchestrator/conduit"
+git-repository-url = "https://github.com/jayhere1/conduit"

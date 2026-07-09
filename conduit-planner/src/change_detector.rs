@@ -690,7 +690,11 @@ mod tests {
         let output = format!("{}", ChangeDetector::new(&plan, &env, &store).detect());
 
         // DAG header appears.
-        assert!(output.contains("etl:"), "expected dag header, got:\n{}", output);
+        assert!(
+            output.contains("etl:"),
+            "expected dag header, got:\n{}",
+            output
+        );
         // Words explain what changed.
         assert!(
             output.contains("new task"),

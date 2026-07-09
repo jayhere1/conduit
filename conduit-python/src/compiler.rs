@@ -143,9 +143,30 @@ pub fn validate_dag(path: &str) -> PyResult<String> {
 }
 
 /// Create the compiler submodule for Python
+/// Compile DAGs and return the FULL canonical DAG model as JSON — the
+/// serde form of `{dag_id: Dag}`, including task inputs/outputs, resources,
+/// contracts, and lineage-relevant fields.
+///
+/// This is the shape consumed by `lineage.analyze_plan_impact` (and by
+/// Conduit's own plan files). The older `compile_dags` returns a slimmer
+/// hand-shaped summary and is kept for backward compatibility.
+#[pyfunction]
+pub fn compile_dags_full(path: &str) -> PyResult<String> {
+    let path_obj = Path::new(path);
+
+    // ConduitPlan::compile is the same entry point the CLI uses — it parses
+    // both Python (tree-sitter) and YAML DAGs and runs SQL I/O inference,
+    // so the emitted plan matches `conduit compile` / plan files exactly.
+    let (plan, _stats) =
+        conduit_compiler::ConduitPlan::compile(path_obj).map_err(error_to_pyerr)?;
+    serde_json::to_string(&plan)
+        .map_err(|e| PyValueError::new_err(format!("Serialization failed: {}", e)))
+}
+
 pub fn create_module(py: Python) -> PyResult<Bound<PyModule>> {
     let module = PyModule::new_bound(py, "compiler")?;
     module.add_function(wrap_pyfunction!(compile_dags, &module)?)?;
+    module.add_function(wrap_pyfunction!(compile_dags_full, &module)?)?;
     module.add_function(wrap_pyfunction!(validate_dag, &module)?)?;
     module.add("__doc__", "DAG compilation and validation module")?;
     Ok(module)

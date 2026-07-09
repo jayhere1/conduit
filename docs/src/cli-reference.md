@@ -543,12 +543,20 @@ Start the REST API and WebSocket server.
 conduit serve [options]
 
 Options:
-  --host <addr>         Bind address (default: 0.0.0.0)
-  --port <n>            Port (default: 8080)
-  --workers <n>         Worker threads (default: CPU count)
-  --ui                  Serve web UI (default: true)
-  --ui-port <n>         UI port (default: 3000)
+  --host <addr>          Bind address (default: 0.0.0.0)
+  -p, --port <n>         Port (default: 8080)
+  -d, --dags-path <dir>  Path to DAG definitions (default: ./dags)
+  --state-dir <dir>      State directory (default: ./.conduit)
+  --auth-enabled         Require API keys on all endpoints (a bootstrap
+                         admin key is printed on first start)
+  --cors-origin <url>    Allow this origin to call the API cross-origin
+                         (repeatable; default: same-origin only)
 ```
+
+The bundled web UI is served from the same port when built UI assets are
+available (`CONDUIT_UI_DIR`). Because the UI is same-origin, no
+`--cors-origin` is needed for it — the flag exists for external browser
+clients hosted elsewhere.
 
 Example:
 
@@ -556,6 +564,7 @@ Example:
 conduit serve                          # Start on 0.0.0.0:8080
 conduit serve --port 9000             # Custom port
 conduit serve --host 127.0.0.1        # Localhost only
+conduit serve --auth-enabled          # Enforce API keys
 ```
 
 ### health

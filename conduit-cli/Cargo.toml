@@ -10,6 +10,7 @@ name = "conduit"
 path = "src/main.rs"
 
 [dependencies]
+include_dir = "0.7"
 conduit-common = { path = "../conduit-common" }
 conduit-compiler = { path = "../conduit-compiler" }
 conduit-state = { path = "../conduit-state" }

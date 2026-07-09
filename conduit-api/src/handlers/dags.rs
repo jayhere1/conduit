@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 
 use conduit_compiler::ConduitPlan;
 
+use crate::auth::Permission;
 use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::AppState;
 
 /// Response type for a single DAG (reserved for typed responses).
@@ -185,7 +187,11 @@ pub async fn get_dag_graph(
 }
 
 /// POST /api/v1/dags/compile — recompile all DAGs and return results.
-pub async fn compile_dags(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+pub async fn compile_dags(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::CompileDags)?;
     let (_plan, stats) = ConduitPlan::compile(&state.dags_path)
         .map_err(|e| ApiError::CompilationFailed(e.to_string()))?;
 

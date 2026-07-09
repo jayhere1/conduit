@@ -596,17 +596,50 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
         cmd.env("PYTHONPATH", parts.join(sep));
     }
 
-    /// Walk up from the current binary's directory looking for `sdk/python`
-    /// (the in-repo SDK location). Returns the absolute path as a String if
-    /// found. This lets the quickstart work without `pip install conduit-sdk`
-    /// when running from a checkout of the repo.
+    /// Locate the `conduit_sdk` Python package. Search order:
+    ///
+    /// 1. `.conduit/sdk` walking up from the working directory — the copy
+    ///    vendored by `conduit init`, so installed binaries work outside a
+    ///    repo checkout (PRD B3).
+    /// 2. `sdk/python` walking up from the working directory — running with
+    ///    an in-repo project.
+    /// 3. `sdk/python` walking up from the binary's directory — running a
+    ///    `target/…` build from inside the repo.
+    ///
+    /// An explicit `CONDUIT_SDK_PATH` (honored by `inject_python_path`)
+    /// overrides all three; a pip-installed `conduit-sdk` needs none of them.
     fn discover_sdk_path() -> Option<String> {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(found) = Self::discover_sdk_path_from(&cwd) {
+                return Some(found);
+            }
+        }
+
         let exe = std::env::current_exe().ok()?;
         let mut dir = exe.parent()?;
         for _ in 0..6 {
             let candidate = dir.join("sdk").join("python");
             if candidate.join("conduit_sdk").is_dir() {
                 return Some(candidate.to_string_lossy().into_owned());
+            }
+            dir = dir.parent()?;
+        }
+        None
+    }
+
+    /// The working-directory tiers of [`Self::discover_sdk_path`], separated
+    /// for testability: walk up from `start` looking for a vendored
+    /// `.conduit/sdk` first, then an in-repo `sdk/python`.
+    fn discover_sdk_path_from(start: &std::path::Path) -> Option<String> {
+        let mut dir = start;
+        for _ in 0..6 {
+            let vendored = dir.join(".conduit").join("sdk");
+            if vendored.join("conduit_sdk").is_dir() {
+                return Some(vendored.to_string_lossy().into_owned());
+            }
+            let in_repo = dir.join("sdk").join("python");
+            if in_repo.join("conduit_sdk").is_dir() {
+                return Some(in_repo.to_string_lossy().into_owned());
             }
             dir = dir.parent()?;
         }
@@ -682,6 +715,34 @@ print('CONDUIT::XCOM::{{"rows_affected": 0}}')
 mod tests {
     use super::*;
     use conduit_common::dag::{ResourceLimits, TriggerRule};
+
+    /// Vendored `.conduit/sdk` (written by `conduit init`) wins over an
+    /// in-repo `sdk/python`, and both are found by walking up (PRD B3).
+    #[test]
+    fn discover_sdk_prefers_vendored_copy_walking_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        let nested_cwd = project.join("dags").join("sub");
+        std::fs::create_dir_all(&nested_cwd).unwrap();
+
+        // No SDK anywhere → None.
+        assert_eq!(ProcessRunner::discover_sdk_path_from(&nested_cwd), None);
+
+        // In-repo layout found while walking up.
+        let in_repo = project.join("sdk").join("python").join("conduit_sdk");
+        std::fs::create_dir_all(&in_repo).unwrap();
+        let found = ProcessRunner::discover_sdk_path_from(&nested_cwd).unwrap();
+        assert!(found.ends_with(&format!("sdk{}python", std::path::MAIN_SEPARATOR)));
+
+        // A vendored copy takes precedence.
+        let vendored = project.join(".conduit").join("sdk").join("conduit_sdk");
+        std::fs::create_dir_all(&vendored).unwrap();
+        let found = ProcessRunner::discover_sdk_path_from(&nested_cwd).unwrap();
+        assert!(
+            found.contains(".conduit"),
+            "vendored copy must win: {found}"
+        );
+    }
 
     fn make_bash_task(id: &str, command: &str) -> Task {
         Task {

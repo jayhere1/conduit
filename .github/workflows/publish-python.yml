@@ -1,45 +1,135 @@
 name: Publish conduit-native
 
+# Multi-arch wheel pipeline for the PyO3 bindings (PRD D5/D6).
+#
+# Triggers on native-v* tags (decoupled from the CLI's v* releases and the
+# SDK's sdk-v* — PRD OD4), plus workflow_dispatch for dry runs that build
+# and test wheels without publishing.
+#
+# The crate builds abi3-py39 wheels, so ONE wheel per platform covers
+# CPython 3.9+. Targets: manylinux x86_64 + aarch64, macOS x86_64 + arm64,
+# plus an sdist.
+#
+# Publishing uses PyPI Trusted Publishing (OIDC). One-time setup on
+# pypi.org: add a Trusted Publisher for `conduit-native` pointing at this
+# repository + workflow + environment `pypi`.
+
 on:
   push:
-    tags: ["v*"]
+    tags: ["native-v*"]
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build-linux:
-    name: Build wheel (Linux x86_64)
+    name: Wheel (manylinux ${{ matrix.target }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: '2_28'
+          args: --release --strip -m conduit-python/Cargo.toml -o dist
+          # RocksDB (librocksdb-sys) needs clang/libclang for bindgen, and
+          # tree-sitter needs a C compiler — install them in the build
+          # container before compiling.
+          before-script-linux: |
+            if command -v yum >/dev/null; then
+              yum install -y clang clang-devel llvm-devel
+            elif command -v apt-get >/dev/null; then
+              apt-get update && apt-get install -y clang libclang-dev
+            fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*.whl
+
+  build-macos:
+    name: Wheel (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13   # x86_64
+            target: x86_64
+          - runner: macos-14   # arm64
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --strip -m conduit-python/Cargo.toml -o dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*.whl
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: -m conduit-python/Cargo.toml -o dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  test:
+    name: Test wheel on ${{ matrix.os }}
+    needs: [build-linux, build-macos]
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: wheels-linux-x86_64
+          - os: macos-14
+            artifact: wheels-macos-aarch64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang librocksdb-dev
-
-      - name: Build wheel
-        run: |
-          pip install maturin>=1.7
-          cd conduit-python
-          maturin build --release --strip -o dist/
-
-      - uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: wheels-linux-x86_64
-          path: conduit-python/dist/*.whl
+          name: ${{ matrix.artifact }}
+          path: dist/
 
-  release:
-    name: Create GitHub Release
-    needs: [build-linux]
+      - name: Install wheel and run the binding test suite
+        run: |
+          python -m pip install dist/*.whl pytest
+          python -m pytest conduit-python/tests/ -q
+
+  publish:
+    name: Publish to PyPI + GitHub Release
+    if: startsWith(github.ref, 'refs/tags/native-v')
+    needs: [test, sdist]
     runs-on: ubuntu-latest
+    environment: pypi
     permissions:
+      id-token: write  # OIDC trusted publishing
       contents: write
     steps:
       - uses: actions/download-artifact@v4
@@ -47,10 +137,17 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: List wheels
+      - name: List distributions
         run: ls -la dist/
+
+      - name: Publish to PyPI (trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.whl
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           generate_release_notes: true

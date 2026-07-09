@@ -12,6 +12,9 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde_json::{json, Value};
 
+use crate::auth::Permission;
+use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::AppState;
 
 /// GET /api/v1/cluster/status — get cluster status and worker information.
@@ -33,15 +36,18 @@ pub async fn cluster_status(State(_state): State<Arc<AppState>>) -> Json<Value> 
 
 /// POST /api/v1/cluster/workers/:id/drain — initiate drain for a worker.
 pub async fn drain_worker(
+    auth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     Path(worker_id): Path<String>,
-) -> Json<Value> {
+) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::DrainWorker)?;
+
     // In production, this would communicate with the coordinator
     // to initiate the drain operation for the specified worker
 
-    Json(json!({
+    Ok(Json(json!({
         "success": true,
         "workerId": worker_id,
         "message": format!("Drain initiated for worker {}", worker_id)
-    }))
+    })))
 }

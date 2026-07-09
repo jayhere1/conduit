@@ -144,28 +144,57 @@ impl Provider for GcsProvider {
     }
 
     async fn test_connection(&self) -> Result<ConnectionTestResult, ProviderError> {
+        use tokio::time::{timeout, Duration};
+
         let start = Instant::now();
 
-        // Validate credentials are available
+        // Credentials must at least be present/parseable before we bother.
         self.validate_credentials()?;
 
-        let cred_type = if self.service_account_json_path.is_some() {
-            "service account"
-        } else {
-            "Application Default Credentials"
-        };
+        // Real network probe against the Storage JSON API bucket-metadata
+        // endpoint. Unlike Snowflake/BigQuery this is NOT a signed request —
+        // GCS object auth isn't wired yet (read/list/write are stubs) — so it
+        // proves reachability and bucket existence, not credential validity:
+        //   200      → bucket exists and is publicly readable
+        //   401/403  → bucket exists but is private (auth would be required)
+        //   404      → bucket does not exist (wrong name)
+        let url = format!(
+            "https://storage.googleapis.com/storage/v1/b/{}",
+            self.bucket
+        );
+        let request = reqwest::Client::new().get(&url).send();
 
-        let message = if self.project.is_empty() {
-            format!("GCS configured ({}): bucket={}", cred_type, self.bucket)
-        } else {
-            format!(
-                "GCS configured ({}): bucket={} project={}",
-                cred_type, self.bucket, self.project
-            )
+        let (success, message) = match timeout(Duration::from_secs(5), request).await {
+            Ok(Ok(resp)) => {
+                let code = resp.status().as_u16();
+                match code {
+                    200 => (true, format!("GCS bucket '{}' reachable (public)", self.bucket)),
+                    401 | 403 => (
+                        true,
+                        format!(
+                            "GCS bucket '{}' exists (private; HTTP {} — credentials not verified, GCS auth is not yet wired)",
+                            self.bucket, code
+                        ),
+                    ),
+                    404 => (
+                        false,
+                        format!("GCS bucket '{}' not found (HTTP 404)", self.bucket),
+                    ),
+                    other => (
+                        false,
+                        format!("GCS bucket check returned unexpected HTTP {}", other),
+                    ),
+                }
+            }
+            Ok(Err(e)) => (false, format!("GCS request failed: {}", e)),
+            Err(_) => (
+                false,
+                format!("GCS bucket check timed out after 5s ({})", url),
+            ),
         };
 
         Ok(ConnectionTestResult {
-            success: true,
+            success,
             message,
             latency_ms: start.elapsed().as_millis() as u64,
             server_version: None,

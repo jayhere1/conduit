@@ -697,10 +697,22 @@ impl Scheduler {
         }
     }
 
-    /// Handle external sensor trigger.
-    fn handle_sensor_triggered(&mut self, _sensor_id: &str, _payload: HashMap<String, String>) {
-        // Future: unblock sensor-waiting tasks
-        debug!(sensor_id = %_sensor_id, "Sensor triggered (not yet implemented)");
+    /// Handle an externally-delivered sensor trigger.
+    ///
+    /// Not supported: Conduit sensors are **poll-only** — a `Sensor` task
+    /// polls its condition at `poke_interval` in the executor
+    /// (`conduit-executor`) until it succeeds or times out. There is no
+    /// event-driven "push" path that unblocks a waiting sensor from an
+    /// external signal. This handler exists only so the scheduler doesn't
+    /// silently drop such an event; it warns loudly instead. If a real
+    /// push-trigger use case appears, it needs its own design (waiting-task
+    /// registry + wake path), not a fill-in here.
+    fn handle_sensor_triggered(&mut self, sensor_id: &str, _payload: HashMap<String, String>) {
+        warn!(
+            sensor_id = %sensor_id,
+            "External sensor trigger received but Conduit sensors are poll-only — ignoring. \
+             Use a Sensor task with a poke_interval instead."
+        );
     }
 
     /// Evaluate which tasks in a run are ready to execute.
@@ -831,9 +843,7 @@ impl Scheduler {
             .execution_order
             .iter()
             .filter_map(|task_id| match run_state.task_states.get(task_id) {
-                Some(TaskState::Failed { error, .. }) => {
-                    Some((task_id.clone(), error.clone()))
-                }
+                Some(TaskState::Failed { error, .. }) => Some((task_id.clone(), error.clone())),
                 _ => None,
             })
             .collect();

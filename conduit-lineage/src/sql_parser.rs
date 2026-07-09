@@ -102,11 +102,12 @@ pub struct ColumnMapping {
 /// Mapping is intentional and explicit (no clever fallthrough): each
 /// variant maps to exactly one `sqlparser::dialect::*Dialect` instance.
 /// New dialects added to sqlparser are *opt-in* via a new variant here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SqlDialect {
     /// `GenericDialect` — superset that accepts most syntax; the
     /// historical default. Use when the connection type is unknown or
     /// the workload is ANSI-shaped.
+    #[default]
     Generic,
     Snowflake,
     BigQuery,
@@ -165,12 +166,6 @@ impl SqlDialect {
             Self::Databricks => Box::new(DatabricksDialect {}),
             Self::Ansi => Box::new(AnsiDialect {}),
         }
-    }
-}
-
-impl Default for SqlDialect {
-    fn default() -> Self {
-        Self::Generic
     }
 }
 
@@ -1793,8 +1788,16 @@ mod tests {
             snow
         );
         // `user_id` and `ts` are the aliases; both should appear.
-        let names: Vec<&str> = snow.output_columns.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"user_id"), "missing user_id alias: {:?}", names);
+        let names: Vec<&str> = snow
+            .output_columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"user_id"),
+            "missing user_id alias: {:?}",
+            names
+        );
         assert!(names.contains(&"ts"), "missing ts alias: {:?}", names);
     }
 
@@ -1963,8 +1966,10 @@ mod tests {
         // `extract` is the historical entry point — must keep returning
         // the same shape it did before the dialect plumbing landed.
         let lineage_default = SqlLineageExtractor::extract("SELECT id, name FROM users");
-        let lineage_generic =
-            SqlLineageExtractor::extract_with_dialect("SELECT id, name FROM users", SqlDialect::Generic);
+        let lineage_generic = SqlLineageExtractor::extract_with_dialect(
+            "SELECT id, name FROM users",
+            SqlDialect::Generic,
+        );
         assert_eq!(lineage_default.output_columns.len(), 2);
         assert_eq!(
             lineage_default.output_columns.len(),

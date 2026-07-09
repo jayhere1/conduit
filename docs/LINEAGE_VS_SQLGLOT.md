@@ -26,8 +26,9 @@ that the platform carries the rest.
 
 ## Current state — most of the roadmap already shipped (locally)
 
-> ⚠️ The GitHub `v0.1.0` release is **8 commits behind** local `main`. Judge the
-> crate by local source, not the published wheel.
+> Update 2026-07-09: local `main` and `origin/main` are in sync and `v0.1.1`
+> is tagged — the earlier "8 commits behind" warning is resolved. The wheel
+> coverage gap (single-arch, no PyPI) remains; see PRD Epic D.
 
 Recent local commits already did the hard parser work:
 
@@ -47,11 +48,11 @@ So in `conduit-lineage/src/sql_parser.rs` we **already have**:
   `extract_with_full_context(sql, catalog, dialect, manifest)`.
 - Jinja stripping + dbt-manifest `ref()`/`source()` resolution.
 
-**The one thing missing is the Python binding.** `conduit-python/src/lineage.rs`
-registers only `extract_sql_lineage`, `trace_column`, `diff_schemas`. None of the
-catalog/dialect/full-context entry points are reachable from Python — so the
-consumer is stuck on the no-catalog, Generic-dialect path even though the crate
-has everything it needs.
+**Update (2026-07-09):** the catalog+dialect binding shipped in `6a3e192` —
+`conduit-python/src/lineage.rs` now registers `extract_sql_lineage_with_catalog`
+alongside `extract_sql_lineage`, `trace_column`, `diff_schemas`. Still unbound:
+the full-context/dbt-manifest entry point, `contracts`, `impact`, `openlineage`
+emit, and `cross_task` (tracked as Epic D in `docs/PRD_USER_READINESS.md`).
 
 > The consumer's degraded lineage is not a crate flaw and no longer even a
 > "missing feature" — it's a **binding that hasn't caught up to the crate**.

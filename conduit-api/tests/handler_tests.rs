@@ -453,7 +453,7 @@ async fn openlineage_unified_view_fuses_external_and_404s_unknown() {
         "etl.warehouse_load"
     );
     assert_eq!(body["producers"]["internal"], serde_json::Value::Null);
-    assert!(body["recentEvents"].as_array().unwrap().len() >= 1);
+    assert!(!body["recentEvents"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

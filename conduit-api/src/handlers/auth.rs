@@ -72,6 +72,17 @@ pub async fn create_key(
     // Persist keys to disk
     state.save_auth_keys();
 
+    state.audit_auth(
+        "key_created",
+        Some(key.id.clone()),
+        format!(
+            "key '{}' ({}) created by '{}'",
+            key.name,
+            key.role,
+            auth.context().key_name
+        ),
+    );
+
     Ok(Json(json!({
         "key": plaintext,
         "id": key.id,
@@ -164,6 +175,16 @@ pub async fn revoke_key(
 
     // Persist updated keys
     state.save_auth_keys();
+
+    state.audit_auth(
+        "key_revoked",
+        Some(key.id.clone()),
+        format!(
+            "key '{}' revoked by '{}'",
+            key.name,
+            auth.context().key_name
+        ),
+    );
 
     Ok(Json(json!({
         "id": key.id,

@@ -28,7 +28,7 @@ pub const CONDUIT_TASK_LINEAGE_FACET_SCHEMA_URL: &str =
     "https://conduit.dev/schemas/conduit_task_lineage/v1";
 
 /// Default producer URI for Conduit-generated OpenLineage metadata.
-pub const CONDUIT_OPENLINEAGE_PRODUCER: &str = "https://github.com/conduit-orchestrator/conduit";
+pub const CONDUIT_OPENLINEAGE_PRODUCER: &str = "https://github.com/jayhere1/conduit";
 
 /// Format the OpenLineage namespace used for task-produced datasets:
 /// `conduit://<dag_id>`. Physical-table inputs keep the caller-supplied

@@ -19,7 +19,9 @@ use conduit_lineage::OpenLineageRunEvent;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::auth::Permission;
 use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -37,9 +39,12 @@ pub struct ListEventsQuery {
 /// e.g. lifecycle ordering, because well-behaved producers handle that
 /// and we want to be lossless for the round-trip.
 pub async fn ingest_event(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(event): Json<OpenLineageRunEvent>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    auth.require(Permission::IngestLineage)?;
+
     let result = state.external_lineage.record(event);
 
     // Broadcast over websocket so live UI views can light up.
@@ -298,10 +303,15 @@ pub async fn cache_stats(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// `POST /api/v1/lineage/cache/invalidate` — force a recompile on the
 /// next request. Useful after an external DAG-source mutation that
 /// somehow didn't change file mtimes (rare, but harmless to expose).
-pub async fn cache_invalidate(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn cache_invalidate(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ExtractLineage)?;
+
     state.plan_cache.invalidate();
-    Json(json!({
+    Ok(Json(json!({
         "invalidated": true,
         "message": "Plan cache will recompile on the next request.",
-    }))
+    })))
 }

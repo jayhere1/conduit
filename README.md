@@ -6,14 +6,46 @@ Conduit is not "Airflow but faster." It solves problems that Airflow architectur
 
 ![Conduit Web UI](conduit-demo-final.gif)
 
+## Install
+
+**Prebuilt binary (recommended):**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/jayhere1/conduit/main/scripts/install.sh | sh
+```
+
+Installs the latest release to `~/.local/bin/conduit` (no sudo). Binaries for
+Linux (x86_64/aarch64, musl) and macOS (Intel/Apple Silicon) are attached to
+[GitHub Releases](https://github.com/jayhere1/conduit/releases).
+
+**From source:**
+
+```bash
+git clone https://github.com/jayhere1/conduit.git
+cd conduit
+cargo install --path conduit-cli   # installs `conduit` into ~/.cargo/bin
+```
+
+(`cargo build --release` also works — the binary lands at `target/release/conduit`;
+add it to your PATH yourself.)
+
+**Docker:**
+
+```bash
+docker run -p 9090:9090 -v "$PWD/dags:/data/dags" ghcr.io/jayhere1/conduit:latest
+```
+
+The image bundles the API server, web UI, and Python runtime. `docker compose up`
+also works from a checkout (pulls the published image; add `--build` to build
+locally).
+
+📖 **Documentation:** <https://jayhere1.github.io/conduit/>
+
 ## Quick Start
 
 ![CLI Demo](demo.gif)
 
 ```bash
-# Build
-cargo build --release
-
 # Initialize a project
 conduit init my-project
 cd my-project
@@ -106,13 +138,25 @@ Terraform-style change detection and deployment. Computes content-addressable fi
 | `conduit env create <name>` | Create a virtual environment (forked from production) |
 | `conduit env list` | List all environments |
 | `conduit env promote <src> <dst>` | Promote one environment into another |
-| `conduit lineage <dag.task>` | Show SQL lineage for a task, or emit an OpenLineage RunEvent |
+| `conduit env diff <a> <b>` | Show added/removed/changed snapshots between environments |
+| `conduit env history <name>` | Show an environment's version history |
+| `conduit env rollback <name>` | Roll back an environment to a prior version |
+| `conduit env set-policy <name>` | Set or clear an environment's promotion policy |
+| `conduit lineage extract <dag.task>` | Extract SQL lineage for a task (`--openlineage` emits a RunEvent) |
+| `conduit lineage trace --dag <id> --column <task.col>` | Trace a column across task boundaries (Python → SQL → Python) |
+| `conduit impact --base <ref> --head WORKING` | Schema-impact report between two DAG versions (CI gate) |
+| `conduit backfill <dag>` | Run a DAG across a date/partition range |
+| `conduit replay` | Replay events to reconstruct historical state |
+| `conduit query <sql>` | Run SQL locally (powered by DuckDB) |
+| `conduit preview <dag.task>` | Preview a SQL task's output locally |
+| `conduit worker` | Start a distributed worker node |
+| `conduit cluster` | Query distributed cluster status |
 | `conduit migrate <path>` | Convert Airflow DAGs to Conduit format |
 | `conduit status` | Show system status |
 
 ## Build Requirements
 
-- Rust 1.75+ (2021 edition)
+- Rust stable toolchain (CI tracks `stable`; the Docker image builds on 1.91)
 - clang/llvm (for RocksDB and tree-sitter compilation)
 - On Ubuntu: `apt install clang librocksdb-dev`
 - On macOS: `brew install llvm rocksdb`

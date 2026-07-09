@@ -227,6 +227,7 @@ fn event_type_name(kind: &EventKind) -> &'static str {
         EventKind::EnvironmentRolledBack { .. } => "EnvironmentRolledBack",
         EventKind::PlanCreated { .. } => "PlanCreated",
         EventKind::PlanApplied { .. } => "PlanApplied",
+        EventKind::AuthAudit { .. } => "AuthAudit",
     }
 }
 
@@ -272,7 +273,7 @@ mod tests {
         let a = task_failed_event(1, "r1", "etl", "load");
         let b = task_failed_event(2, "r2", "etl", "load");
         let c = dag_created_event(3, "r1", "etl");
-        let events = vec![&a, &b, &c];
+        let events = [&a, &b, &c];
 
         let want = Some("r1".to_string());
         let kept: Vec<u64> = events
@@ -280,7 +281,11 @@ mod tests {
             .filter(|e| match_run_id(&want, &e.kind))
             .map(|e| e.sequence)
             .collect();
-        assert_eq!(kept, vec![1, 3], "run_id=r1 must match both r1 task and r1 dag-create");
+        assert_eq!(
+            kept,
+            vec![1, 3],
+            "run_id=r1 must match both r1 task and r1 dag-create"
+        );
     }
 
     #[test]

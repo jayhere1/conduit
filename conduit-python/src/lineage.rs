@@ -9,7 +9,10 @@ use pyo3::exceptions::PyValueError;
 use serde_json::{json, Value};
 use conduit_lineage::sql_parser::SqlLineage;
 use conduit_lineage::{
-    parse_sql_type, CatalogColumn, ColumnType, SqlDialect, SqlLineageExtractor, TableCatalog,
+    analyze_plan_impact as analyze_impact, parse_sql_type, render_impact, CatalogColumn,
+    ColumnType, ContractValidator, DbtManifest, ImpactFormat, OpenLineageEventType,
+    OpenLineageRunEvent, OpenLineageSqlEventOptions, Schema, SchemaContract, SqlDialect,
+    SqlLineageExtractor, TableCatalog, CONDUIT_OPENLINEAGE_PRODUCER,
 };
 
 /// Extract SQL lineage from a query
@@ -86,6 +89,15 @@ fn lineage_to_json(sql: &str, lineage: &SqlLineage) -> Value {
     json!({
         "sql": sql,
         "input_tables": lineage.source_tables.iter().map(|t| &t.name).collect::<Vec<_>>(),
+        // Schema-qualified forms ("schema.table" when the qualifier is known,
+        // bare name otherwise). Additive: `input_tables` keeps bare names for
+        // backward compatibility with existing consumers.
+        "input_tables_qualified": lineage.source_tables.iter().map(|t| {
+            match &t.schema {
+                Some(schema) => format!("{}.{}", schema, t.name),
+                None => t.name.clone(),
+            }
+        }).collect::<Vec<_>>(),
         "output_columns": lineage.output_columns.iter().map(|col| {
             let sources = source_map.get(col.name.as_str()).cloned().unwrap_or_default();
             json!({
@@ -380,13 +392,222 @@ pub fn diff_schemas(old_json: &str, new_json: &str) -> PyResult<String> {
     Ok(result.to_string())
 }
 
+/// Extract SQL lineage with the full resolution context: catalog, dialect,
+/// and a dbt manifest for `{{ ref() }}` / `{{ source() }}` resolution.
+///
+/// Args:
+///     sql: SQL query string (may contain dbt Jinja `ref`/`source` calls).
+///     catalog_json: same shape as [`extract_sql_lineage_with_catalog`];
+///         empty/"null"/"{}" means no catalog.
+///     dialect: connection/dialect string; unknown values fall back to Generic.
+///     dbt_manifest: either a filesystem path to dbt's `target/manifest.json`
+///         or the manifest JSON itself (detected by a leading `{`). Empty
+///         means no manifest — unresolved refs keep placeholder behaviour.
+///
+/// Returns:
+///     The same JSON shape as [`extract_sql_lineage`].
+#[pyfunction]
+#[pyo3(signature = (sql, catalog_json="", dialect="", dbt_manifest=""))]
+pub fn extract_sql_lineage_full(
+    sql: &str,
+    catalog_json: &str,
+    dialect: &str,
+    dbt_manifest: &str,
+) -> PyResult<String> {
+    let catalog = build_catalog(catalog_json)
+        .map_err(|e| PyValueError::new_err(format!("Invalid catalog JSON: {}", e)))?;
+    let sql_dialect = SqlDialect::from_connection_type(dialect);
+    let manifest = load_manifest(dbt_manifest)?;
+
+    let lineage = SqlLineageExtractor::extract_with_full_context(
+        sql,
+        Some(&catalog),
+        sql_dialect,
+        manifest.as_ref(),
+    );
+    Ok(lineage_to_json(sql, &lineage).to_string())
+}
+
+/// Parse the `dbt_manifest` argument: empty → None, `{…}` → inline JSON,
+/// anything else → a path to `manifest.json`.
+fn load_manifest(spec: &str) -> PyResult<Option<DbtManifest>> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return Ok(None);
+    }
+    if trimmed.starts_with('{') {
+        let manifest: DbtManifest = serde_json::from_str(trimmed)
+            .map_err(|e| PyValueError::new_err(format!("Invalid dbt manifest JSON: {}", e)))?;
+        return Ok(Some(manifest));
+    }
+    let manifest = DbtManifest::load_from_file(std::path::Path::new(trimmed))
+        .map_err(|e| PyValueError::new_err(format!("Failed to load dbt manifest '{}': {}", trimmed, e)))?;
+    Ok(Some(manifest))
+}
+
+/// Validate a schema against a schema contract (breaking-change detection).
+///
+/// Args:
+///     schema_json: serde JSON of a conduit `Schema`:
+///         `{"task_id": ..., "dag_id": null, "columns": [{"name": ...,
+///           "column_type": ..., "nullable": ..., "description": null,
+///           "tags": []}], "version": 1}`.
+///     contract_json: serde JSON of a `SchemaContract` (as produced by
+///         `SchemaContract` serialization or hand-written).
+///
+/// Returns:
+///     JSON: {"task_id", "passed", "violations": [...], "rules_checked",
+///     "rules_passed"}.
+#[pyfunction]
+pub fn validate_contract(schema_json: &str, contract_json: &str) -> PyResult<String> {
+    let schema: Schema = serde_json::from_str(schema_json)
+        .map_err(|e| PyValueError::new_err(format!("Invalid schema JSON: {}", e)))?;
+    let contract: SchemaContract = serde_json::from_str(contract_json)
+        .map_err(|e| PyValueError::new_err(format!("Invalid contract JSON: {}", e)))?;
+
+    let result = ContractValidator::validate(&schema, &contract);
+    let out = json!({
+        "task_id": result.task_id,
+        "passed": result.passed,
+        "violations": result.violations,
+        "rules_checked": result.rules_checked,
+        "rules_passed": result.rules_passed,
+    });
+    Ok(out.to_string())
+}
+
+/// Schema-impact analysis between two compiled DAG sets — the engine behind
+/// `conduit impact`, callable from Python.
+///
+/// Args:
+///     base_json / head_json: either a compiled plan JSON (an object with a
+///         `"dags"` key, as returned by `conduit_native.compiler.compile_dags`)
+///         or a bare `{dag_id: Dag}` map.
+///     format: "json" (default) or "markdown".
+///
+/// Returns:
+///     The impact report. JSON format includes
+///     `summary.total_breaking_changes`, per-task changes, and
+///     `lineage_coverage`.
+#[pyfunction]
+#[pyo3(signature = (base_json, head_json, format="json"))]
+pub fn analyze_plan_impact(base_json: &str, head_json: &str, format: &str) -> PyResult<String> {
+    let fmt = ImpactFormat::parse(format).map_err(PyValueError::new_err)?;
+    let base = dagset_from_json(base_json, "base")?;
+    let head = dagset_from_json(head_json, "head")?;
+    let impact = analyze_impact(&base, &head);
+    Ok(render_impact(&impact, fmt))
+}
+
+/// Accept either `{"dags": {…}, …}` (a compiled `ConduitPlan`) or a bare
+/// `{dag_id: Dag}` map.
+fn dagset_from_json(payload: &str, side: &str) -> PyResult<conduit_lineage::DagSet> {
+    let value: Value = serde_json::from_str(payload)
+        .map_err(|e| PyValueError::new_err(format!("Invalid {} JSON: {}", side, e)))?;
+    let dags_value = match value.get("dags") {
+        Some(d) if d.is_object() => d.clone(),
+        _ => value,
+    };
+    serde_json::from_value(dags_value)
+        .map_err(|e| PyValueError::new_err(format!("Invalid {} DAG set: {}", side, e)))
+}
+
+/// Build an OpenLineage RunEvent (with columnLineage facets) from a SQL query.
+///
+/// Args:
+///     sql: the SQL to extract lineage from.
+///     job_namespace / job_name: OpenLineage job coordinates.
+///     dataset_namespace: namespace for input/output datasets (e.g. the
+///         connection name).
+///     output_dataset: output dataset name, e.g. "analytics.daily".
+///     event_type: START | RUNNING | COMPLETE | ABORT | FAIL | OTHER
+///         (default COMPLETE).
+///     run_id: UUID string; generated when omitted.
+///     event_time: RFC3339 timestamp; now() when omitted.
+///     catalog_json / dialect: same as [`extract_sql_lineage_with_catalog`];
+///         when a catalog is given, task-produced datasets gain the
+///         `conduit_task_lineage` facet.
+///
+/// Returns:
+///     The RunEvent as a JSON string, ready to POST to Marquez/DataHub or
+///     Conduit's own `/api/v1/openlineage/v1/lineage` ingest endpoint.
+#[pyfunction]
+#[pyo3(signature = (sql, job_namespace, job_name, dataset_namespace, output_dataset,
+                    event_type="COMPLETE", run_id=None, event_time=None,
+                    catalog_json="", dialect=""))]
+#[allow(clippy::too_many_arguments)]
+pub fn to_openlineage_event(
+    sql: &str,
+    job_namespace: &str,
+    job_name: &str,
+    dataset_namespace: &str,
+    output_dataset: &str,
+    event_type: &str,
+    run_id: Option<&str>,
+    event_time: Option<&str>,
+    catalog_json: &str,
+    dialect: &str,
+) -> PyResult<String> {
+    let parsed_type = OpenLineageEventType::parse(event_type).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "Invalid event_type '{}': expected START, RUNNING, COMPLETE, ABORT, FAIL, or OTHER",
+            event_type
+        ))
+    })?;
+    let run_id = match run_id {
+        Some(value) => uuid::Uuid::parse_str(value)
+            .map_err(|_| PyValueError::new_err(format!("Invalid run_id '{}': expected a UUID", value)))?
+            .to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let event_time = event_time
+        .map(str::to_string)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    let catalog = build_catalog(catalog_json)
+        .map_err(|e| PyValueError::new_err(format!("Invalid catalog JSON: {}", e)))?;
+    let sql_dialect = SqlDialect::from_connection_type(dialect);
+    let has_catalog = !catalog_json.trim().is_empty()
+        && catalog_json.trim() != "null"
+        && catalog_json.trim() != "{}";
+
+    let lineage = if has_catalog {
+        SqlLineageExtractor::extract_with_catalog_and_dialect(sql, &catalog, sql_dialect)
+    } else {
+        SqlLineageExtractor::extract_with_dialect(sql, sql_dialect)
+    };
+
+    let options = OpenLineageSqlEventOptions {
+        event_type: parsed_type,
+        event_time,
+        run_id,
+        job_namespace: job_namespace.to_string(),
+        job_name: job_name.to_string(),
+        dataset_namespace: dataset_namespace.to_string(),
+        output_dataset: output_dataset.to_string(),
+        producer: CONDUIT_OPENLINEAGE_PRODUCER.to_string(),
+    };
+
+    let event = if has_catalog {
+        OpenLineageRunEvent::from_sql_lineage_with_catalog(&lineage, options, &catalog)
+    } else {
+        OpenLineageRunEvent::from_sql_lineage(&lineage, options)
+    };
+    serde_json::to_string(&event)
+        .map_err(|e| PyValueError::new_err(format!("Failed to serialize event: {}", e)))
+}
+
 /// Create the lineage submodule for Python
 pub fn create_module(py: Python) -> PyResult<Bound<PyModule>> {
     let module = PyModule::new_bound(py, "lineage")?;
     module.add_function(wrap_pyfunction!(extract_sql_lineage, &module)?)?;
     module.add_function(wrap_pyfunction!(extract_sql_lineage_with_catalog, &module)?)?;
+    module.add_function(wrap_pyfunction!(extract_sql_lineage_full, &module)?)?;
     module.add_function(wrap_pyfunction!(trace_column, &module)?)?;
     module.add_function(wrap_pyfunction!(diff_schemas, &module)?)?;
+    module.add_function(wrap_pyfunction!(validate_contract, &module)?)?;
+    module.add_function(wrap_pyfunction!(analyze_plan_impact, &module)?)?;
+    module.add_function(wrap_pyfunction!(to_openlineage_event, &module)?)?;
     module.add("__doc__", "Column-level lineage and schema change detection module")?;
     Ok(module)
 }

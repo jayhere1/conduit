@@ -279,6 +279,12 @@ enum Commands {
         /// Enable API key authentication
         #[arg(long)]
         auth_enabled: bool,
+
+        /// Origin allowed to call the API cross-origin (repeatable).
+        /// Default: none — same-origin only. Example for a UI dev server:
+        /// --cors-origin http://localhost:3000
+        #[arg(long = "cors-origin")]
+        cors_origins: Vec<String>,
     },
 
     /// Show system status
@@ -343,6 +349,41 @@ enum Commands {
     Lineage {
         #[command(subcommand)]
         command: LineageCommands,
+    },
+
+    /// Schema impact between two DAG versions — the CI gate behind
+    /// .github/workflows/conduit-impact.yml. Diffs task output schemas and
+    /// traces the downstream blast radius through cross-task lineage.
+    Impact {
+        /// Base side: git ref (git mode; pair with --head)
+        #[arg(long, conflicts_with_all = ["base_plan", "head_plan"], requires = "head")]
+        base: Option<String>,
+
+        /// Head side: git ref, or the literal WORKING for the uncommitted
+        /// working tree
+        #[arg(long, requires = "base")]
+        head: Option<String>,
+
+        /// Base side: compiled plan JSON file or a DAGs directory (file mode;
+        /// pair with --head-plan)
+        #[arg(long, requires = "head_plan")]
+        base_plan: Option<PathBuf>,
+
+        /// Head side: compiled plan JSON file or a DAGs directory
+        #[arg(long, requires = "base_plan")]
+        head_plan: Option<PathBuf>,
+
+        /// DAGs directory relative to the repo root (git mode only)
+        #[arg(long, default_value = "dags")]
+        dags_path: PathBuf,
+
+        /// Output format: markdown or json
+        #[arg(long, default_value = "markdown")]
+        format: String,
+
+        /// Write the report to this file instead of stdout
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 
     /// Backfill a DAG across a range of dates/partitions
@@ -698,7 +739,15 @@ fn main() -> Result<()> {
             dags_path,
             state_dir,
             auth_enabled,
-        } => rt.block_on(cmd_serve(&host, port, &dags_path, &state_dir, auth_enabled)),
+            cors_origins,
+        } => rt.block_on(cmd_serve(
+            &host,
+            port,
+            &dags_path,
+            &state_dir,
+            auth_enabled,
+            cors_origins,
+        )),
         Commands::Status { env, dags_path } => cmd_status(env.as_deref(), &dags_path),
         Commands::Env { action, dags_path } => match action {
             EnvCommands::Create { name, from } => cmd_env_create(&name, &from, &dags_path),
@@ -733,6 +782,23 @@ fn main() -> Result<()> {
             dry_run,
         } => cmd_migrate(&source, &output, dry_run),
 
+        Commands::Impact {
+            base,
+            head,
+            base_plan,
+            head_plan,
+            dags_path,
+            format,
+            output,
+        } => cmd_impact(
+            base.as_deref(),
+            head.as_deref(),
+            base_plan.as_ref(),
+            head_plan.as_ref(),
+            &dags_path,
+            &format,
+            output.as_ref(),
+        ),
         Commands::Lineage { command } => match command {
             LineageCommands::Extract {
                 task_ref,
@@ -859,6 +925,14 @@ fn cmd_init(name: &str) -> Result<()> {
 
     fs::create_dir_all(project_dir.join("dags"))?;
     fs::create_dir_all(project_dir.join(".conduit"))?;
+
+    // Vendor the Python SDK into the project so `conduit run` works without
+    // a repo checkout or `pip install conduit-sdk` (PRD B3). The executor
+    // discovers `.conduit/sdk` by walking up from the working directory;
+    // CONDUIT_SDK_PATH overrides, and a pip-installed conduit-sdk also works.
+    let sdk_dest = project_dir.join(".conduit").join("sdk");
+    write_embedded_sdk(&sdk_dest.join("conduit_sdk"))?;
+    fs::write(sdk_dest.join("VERSION"), env!("CARGO_PKG_VERSION"))?;
 
     // conduit.yaml
     let config = format!(
@@ -1450,10 +1524,7 @@ async fn cmd_apply(
                 s.split_once('.')
                     .map(|(d, t)| (d.to_string(), t.to_string()))
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "--only value '{}' must be in 'dag_id.task_id' form",
-                            s
-                        )
+                        anyhow::anyhow!("--only value '{}' must be in 'dag_id.task_id' form", s)
                     })
             })
             .collect();
@@ -1640,9 +1711,10 @@ async fn cmd_apply(
     let post_apply_map = env_snapshot.snapshot_map.clone();
     let snapshot_count = post_apply_map.len();
 
-    let recorded_version = state
-        .env_manager
-        .apply_snapshot_map(environment, post_apply_map, deploy.id.clone())?;
+    let recorded_version =
+        state
+            .env_manager
+            .apply_snapshot_map(environment, post_apply_map, deploy.id.clone())?;
 
     // Persist state to disk
     state.save()?;
@@ -1678,6 +1750,7 @@ async fn cmd_serve(
     dags_path: &PathBuf,
     state_dir: &PathBuf,
     auth_enabled: bool,
+    cors_origins: Vec<String>,
 ) -> Result<()> {
     use std::net::SocketAddr;
 
@@ -1728,6 +1801,11 @@ async fn cmd_serve(
         ui_dir,
         auth_enabled,
     );
+
+    if !cors_origins.is_empty() {
+        println!("  CORS:        allowing {}", cors_origins.join(", "));
+        state.set_cors_origins(cors_origins);
+    }
 
     // If auth is enabled and no keys exist, create a bootstrap admin key
     if auth_enabled && state.auth_store.list_keys().is_empty() {
@@ -2325,6 +2403,7 @@ fn cmd_replay(
                 EventKind::SnapshotCreated { snapshot_id, .. } => {
                     format!("SnapshotCreated({})", snapshot_id)
                 }
+                EventKind::AuthAudit { action, .. } => format!("AuthAudit({})", action),
                 EventKind::EnvironmentCreated { env_name, .. } => {
                     format!("EnvironmentCreated({})", env_name)
                 }
@@ -2659,9 +2738,9 @@ fn cmd_lineage(
     })?;
 
     let (connection, sql) = match &task.task_type {
-        conduit_common::dag::TaskType::Sql { connection, query, .. } => {
-            (connection.as_str(), query.as_str())
-        }
+        conduit_common::dag::TaskType::Sql {
+            connection, query, ..
+        } => (connection.as_str(), query.as_str()),
         other => {
             anyhow::bail!(
                 "Task '{}.{}' is {:?}, not a SQL task",
@@ -2765,10 +2844,7 @@ fn cmd_lineage_trace(
     // embedded underscores stay intact; column names with literal dots are
     // not supported (matches the rest of the CLI surface).
     let (task_id, column_name) = column.split_once('.').ok_or_else(|| {
-        anyhow::anyhow!(
-            "--column must be 'task_id.column_name', got '{}'",
-            column
-        )
+        anyhow::anyhow!("--column must be 'task_id.column_name', got '{}'", column)
     })?;
 
     // Compile and pick the DAG.
@@ -3721,4 +3797,178 @@ mod gethostname {
             .map(OsString::from)
             .unwrap_or_else(|_| OsString::from("unknown"))
     }
+}
+
+// ─── conduit impact ──────────────────────────────────────────────────────────
+
+/// Removes a temporary git worktree on drop, so failed compiles don't leak
+/// worktrees into the operator's repo.
+struct WorktreeGuard {
+    repo_root: PathBuf,
+    path: PathBuf,
+}
+
+impl Drop for WorktreeGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("git")
+            .current_dir(&self.repo_root)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .output();
+    }
+}
+
+/// Load a `DagSet` from a path that is either a DAGs directory (compiled
+/// on the spot) or a compiled-plan JSON file (as produced by serializing
+/// `ConduitPlan`).
+fn load_dagset(path: &Path) -> Result<conduit_lineage::DagSet> {
+    if path.is_dir() {
+        let (plan, _) = ConduitPlan::compile(path)?;
+        Ok(plan.dags)
+    } else {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read plan file '{}': {}", path.display(), e))?;
+        let plan: ConduitPlan = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!(
+                "'{}' is not a compiled plan JSON (serialize ConduitPlan, or pass a DAGs directory): {}",
+                path.display(),
+                e
+            )
+        })?;
+        Ok(plan.dags)
+    }
+}
+
+/// Compile the DAGs directory as it exists at `git_ref`, via a temporary
+/// detached worktree (removed on return, even on failure).
+fn compile_dagset_at_ref(git_ref: &str, dags_path: &Path) -> Result<conduit_lineage::DagSet> {
+    let root_out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()?;
+    if !root_out.status.success() {
+        anyhow::bail!("--base/--head git mode requires running inside a git repository");
+    }
+    let repo_root = PathBuf::from(String::from_utf8_lossy(&root_out.stdout).trim().to_string());
+
+    let wt_path = std::env::temp_dir().join(format!("conduit-impact-{}", Uuid::new_v4().simple()));
+    let add_out = std::process::Command::new("git")
+        .current_dir(&repo_root)
+        .args(["worktree", "add", "--detach"])
+        .arg(&wt_path)
+        .arg(git_ref)
+        .output()?;
+    if !add_out.status.success() {
+        anyhow::bail!(
+            "git worktree add failed for ref '{}': {}",
+            git_ref,
+            String::from_utf8_lossy(&add_out.stderr).trim()
+        );
+    }
+    let _guard = WorktreeGuard {
+        repo_root,
+        path: wt_path.clone(),
+    };
+
+    let dags_dir = wt_path.join(dags_path);
+    if !dags_dir.exists() {
+        anyhow::bail!(
+            "DAGs path '{}' does not exist at ref '{}'",
+            dags_path.display(),
+            git_ref
+        );
+    }
+    let (plan, _) = ConduitPlan::compile(&dags_dir)?;
+    Ok(plan.dags)
+}
+
+/// `conduit impact` — analyze schema impact between two DAG versions.
+///
+/// Exit code is 0 whenever analysis succeeds, even with breaking changes:
+/// the CI workflow gates on the JSON `summary.total_breaking_changes` plus
+/// the `allow-breaking` PR label, not on this exit code.
+fn cmd_impact(
+    base: Option<&str>,
+    head: Option<&str>,
+    base_plan: Option<&PathBuf>,
+    head_plan: Option<&PathBuf>,
+    dags_path: &Path,
+    format: &str,
+    output: Option<&PathBuf>,
+) -> Result<()> {
+    use conduit_lineage::{analyze_plan_impact, render_impact, ImpactFormat};
+
+    let fmt = ImpactFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+
+    let (base_set, head_set) = match (base_plan, head_plan, base, head) {
+        (Some(bp), Some(hp), None, None) => (load_dagset(bp)?, load_dagset(hp)?),
+        (None, None, Some(b), Some(h)) => {
+            let base_set = compile_dagset_at_ref(b, dags_path)?;
+            let head_set = if h == "WORKING" {
+                let (plan, _) = ConduitPlan::compile(dags_path)?;
+                plan.dags
+            } else {
+                compile_dagset_at_ref(h, dags_path)?
+            };
+            (base_set, head_set)
+        }
+        _ => anyhow::bail!(
+            "pass either --base-plan/--head-plan (file mode) or --base/--head (git mode)"
+        ),
+    };
+
+    let impact = analyze_plan_impact(&base_set, &head_set);
+    let report = render_impact(&impact, fmt);
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &report)?;
+            eprintln!(
+                "impact report written to {} ({} breaking change(s))",
+                path.display(),
+                impact.summary.total_breaking_changes
+            );
+        }
+        None => println!("{report}"),
+    }
+    Ok(())
+}
+
+// ─── Embedded Python SDK (vendored into `conduit init` scaffolds) ───────────
+
+/// The `conduit_sdk` package embedded at compile time from `sdk/python/`.
+static EMBEDDED_SDK: include_dir::Dir<'_> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/../sdk/python/conduit_sdk");
+
+/// Write the embedded SDK to `dest`, skipping bytecode caches.
+fn write_embedded_sdk(dest: &Path) -> Result<()> {
+    fn write_dir(dir: &include_dir::Dir<'_>, dest: &Path) -> Result<()> {
+        use std::fs;
+        for entry in dir.entries() {
+            match entry {
+                include_dir::DirEntry::Dir(d) => {
+                    let name = d
+                        .path()
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    if name == "__pycache__" {
+                        continue;
+                    }
+                    write_dir(d, dest)?;
+                }
+                include_dir::DirEntry::File(f) => {
+                    if f.path().extension().is_some_and(|e| e == "pyc") {
+                        continue;
+                    }
+                    let target = dest.join(f.path());
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(target, f.contents())?;
+                }
+            }
+        }
+        Ok(())
+    }
+    write_dir(&EMBEDDED_SDK, dest)
 }

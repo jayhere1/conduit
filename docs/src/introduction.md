@@ -192,7 +192,7 @@ Each crate is responsible for one concern:
 - **conduit-planner**: Fingerprint diffing and impact analysis
 - **conduit-lineage**: Column-level lineage (Phase 4)
 - **conduit-api**: REST and WebSocket API (Phase 2)
-- **conduit-python**: Python SDK and tree-sitter bindings
+- **conduit-python**: PyO3 native bindings (compiler/planner/lineage/state) — the authoring SDK lives in `sdk/python`
 
 ## Comparison Matrix
 

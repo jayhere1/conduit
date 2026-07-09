@@ -1,0 +1,22 @@
+id: impact_demo
+description: Base version — seed produces id, amount, region.
+schedule: "@daily"
+tags: [impact, fixture]
+
+tasks:
+  seed:
+    type: sql
+    connection: warehouse
+    query: |
+      CREATE TABLE staging.orders AS
+      SELECT 1 AS id, 100 AS amount, 'emea' AS region
+
+  by_region:
+    type: sql
+    connection: warehouse
+    depends_on: [seed]
+    query: |
+      INSERT INTO analytics.by_region
+      SELECT region, SUM(amount) AS total
+      FROM staging.orders
+      GROUP BY region

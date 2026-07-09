@@ -66,7 +66,7 @@ pub struct AppState {
     /// WebSocket broadcast channel for live events.
     pub event_tx: tokio::sync::broadcast::Sender<String>,
     /// Provider registry: named connections to external data systems.
-    pub provider_registry: RwLock<Option<ProviderRegistry>>,
+    pub provider_registry: RwLock<Option<Arc<ProviderRegistry>>>,
     /// Authentication store: API keys, roles, and permissions.
     pub auth_store: AuthStore,
     /// Optional channel to dispatch events to the scheduler.
@@ -83,6 +83,11 @@ pub struct AppState {
     /// DAG source signature change. Shared across all handlers that
     /// need a `ConduitPlan` or a `CrossTaskLineage`.
     pub plan_cache: Arc<PlanCache>,
+    /// CORS origins allowed to call the API cross-origin. Empty (the
+    /// default) means same-origin only — no CORS headers are emitted.
+    /// Set at startup via `conduit serve --cors-origin` before the router
+    /// is built.
+    pub cors_allowed_origins: RwLock<Vec<String>>,
     /// Optional persistent event store backing the `/events` query API. When
     /// `state_dir/events` exists, it's opened on `AppState::with_options`; if
     /// the directory is missing or open fails (e.g. permissions), the field
@@ -173,6 +178,7 @@ impl AppState {
             catalog_cache: RwLock::new(None),
             external_lineage,
             plan_cache,
+            cors_allowed_origins: RwLock::new(Vec::new()),
             event_store,
         })
     }
@@ -214,7 +220,7 @@ impl AppState {
     ) {
         let registry = ProviderRegistry::from_configs(connections).await;
         if let Ok(mut guard) = self.provider_registry.write() {
-            *guard = Some(registry);
+            *guard = Some(Arc::new(registry));
         }
     }
 
@@ -228,22 +234,49 @@ impl AppState {
     }
 
     /// Test a specific connection.
-    #[allow(clippy::await_holding_lock)]
+    ///
+    /// The registry `Arc` is cloned and the lock released *before* awaiting,
+    /// so the returned future stays `Send` (required by axum handlers).
     pub async fn test_connection(
         &self,
         name: &str,
     ) -> Result<ConnectionTestResult, conduit_providers::ProviderError> {
-        let registry_guard = self.provider_registry.read().map_err(|_| {
-            conduit_providers::ProviderError::ConnectionNotFound {
-                name: name.to_string(),
-            }
-        })?;
-        let registry = registry_guard.as_ref().ok_or_else(|| {
-            conduit_providers::ProviderError::ConnectionNotFound {
-                name: name.to_string(),
-            }
-        })?;
+        let registry = {
+            let guard = self.provider_registry.read().map_err(|_| {
+                conduit_providers::ProviderError::ConnectionNotFound {
+                    name: name.to_string(),
+                }
+            })?;
+            guard.as_ref().cloned().ok_or_else(|| {
+                conduit_providers::ProviderError::ConnectionNotFound {
+                    name: name.to_string(),
+                }
+            })?
+        };
         registry.test_connection(name).await
+    }
+
+    /// Configure the CORS allow-list. Call before `build_router`; the
+    /// router snapshots this list at construction time.
+    pub fn set_cors_origins(&self, origins: Vec<String>) {
+        if let Ok(mut guard) = self.cors_allowed_origins.write() {
+            *guard = origins;
+        }
+    }
+
+    /// Record a security-relevant auth event in the event store (PRD A3).
+    /// Best-effort: a missing or failing store never blocks the request.
+    pub fn audit_auth(&self, action: &str, key_id: Option<String>, detail: impl Into<String>) {
+        if let Some(store) = &self.event_store {
+            let event = conduit_common::event::EventKind::AuthAudit {
+                action: action.to_string(),
+                key_id,
+                detail: detail.into(),
+            };
+            if let Err(e) = store.append(event) {
+                tracing::debug!(error = %e, "failed to append auth audit event");
+            }
+        }
     }
 
     /// Broadcast an event to all WebSocket subscribers.
@@ -669,7 +702,7 @@ impl AppState {
             });
 
         if let Ok(mut guard) = self.provider_registry.write() {
-            *guard = Some(registry);
+            *guard = Some(Arc::new(registry));
         }
     }
 }

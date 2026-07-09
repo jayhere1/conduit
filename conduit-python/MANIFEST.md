@@ -267,7 +267,7 @@ python examples/plan_apply_workflow.py
 
 ## Version
 
-- **Package Version:** 0.1.0
+- **Package Version:** single-sourced from conduit-python/Cargo.toml (currently 0.1.1)
 - **Edition:** 2021 (Rust)
 - **License:** Apache-2.0
 

@@ -2,17 +2,17 @@
 # Conduit installer — POSIX sh.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/conduit-orchestrator/conduit/main/scripts/install.sh | sh
+#   curl -sSL https://raw.githubusercontent.com/jayhere1/conduit/main/scripts/install.sh | sh
 #
 # Environment overrides:
-#   CONDUIT_REPO        owner/repo on GitHub (default: conduit-orchestrator/conduit)
+#   CONDUIT_REPO        owner/repo on GitHub (default: jayhere1/conduit)
 #   CONDUIT_VERSION     specific version tag like v0.3.0 (default: latest)
 #   CONDUIT_INSTALL_DIR install destination (default: $HOME/.local/bin)
 set -eu
 
 # ---- configuration ---------------------------------------------------------
 # NOTE: Update CONDUIT_REPO below if the canonical repository ever moves.
-CONDUIT_REPO="${CONDUIT_REPO:-conduit-orchestrator/conduit}"
+CONDUIT_REPO="${CONDUIT_REPO:-jayhere1/conduit}"
 CONDUIT_VERSION="${CONDUIT_VERSION:-latest}"
 CONDUIT_INSTALL_DIR="${CONDUIT_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_NAME="conduit"

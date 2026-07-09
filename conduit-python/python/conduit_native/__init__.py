@@ -11,7 +11,6 @@ Example:
     >>> plan_json = compiler.compile_dags("/path/to/dag/definitions")
 """
 
-__version__ = "0.1.0"
 __doc__ = "PyO3 bindings for Conduit pipeline orchestrator"
 
 try:
@@ -24,3 +23,7 @@ except ImportError:
         "conduit_native module not found. "
         "Build with: maturin develop or pip install ."
     )
+
+# Single-sourced from the crate version (see conduit-python/Cargo.toml);
+# the native module stamps it via env!("CARGO_PKG_VERSION").
+__version__ = getattr(conduit_native, "__version__", "unknown")

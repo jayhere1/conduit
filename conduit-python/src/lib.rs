@@ -8,6 +8,11 @@
 //!
 //! All complex types use JSON for pragmatic interchange in v0.1.
 
+// pyo3 0.22's #[pyfunction] expansion trips clippy 1.95's useless_conversion
+// on every PyResult-returning function; the lint points at macro-generated
+// glue, not our code. Remove once on a pyo3 that has the fix.
+#![allow(clippy::useless_conversion)]
+
 pub mod compiler;
 pub mod planner;
 pub mod lineage;
@@ -31,7 +36,7 @@ fn conduit_native(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     let state_module = state::create_module(py)?;
     m.add_submodule(&state_module)?;
 
-    m.add("__version__", "0.1.0")?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("__doc__", "PyO3 bindings for Conduit pipeline orchestrator")?;
 
     Ok(())

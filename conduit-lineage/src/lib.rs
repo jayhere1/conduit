@@ -21,6 +21,7 @@
 pub mod catalog;
 pub mod contracts;
 pub mod cross_task;
+pub mod dbt_manifest;
 pub mod impact;
 pub mod impact_report;
 pub mod lineage_graph;
@@ -28,7 +29,6 @@ pub mod openlineage;
 pub mod openlineage_ingest;
 pub mod plan_impact;
 pub mod schema;
-pub mod dbt_manifest;
 pub mod sql_parser;
 
 pub use catalog::{parse_sql_type, CatalogColumn, TableCatalog};
@@ -58,10 +58,10 @@ pub use plan_impact::{
     PlanImpactSummary, TaskImpact,
 };
 
+pub use dbt_manifest::{DbtManifest, DbtManifestError, DbtNode, DbtSource};
 /// Cross-crate test helpers for the [`ExternalLineageBackend`] trait.
 /// Behind the `testing` feature so production builds don't pay for it.
 #[cfg(feature = "testing")]
 pub use openlineage_ingest::testing;
 pub use schema::{Column, ColumnType, Schema, SchemaRegistry};
-pub use dbt_manifest::{DbtManifest, DbtManifestError, DbtNode, DbtSource};
 pub use sql_parser::{SqlDialect, SqlLineageExtractor};

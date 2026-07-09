@@ -252,10 +252,14 @@ async fn test_snowflake_test_connection() {
     let provider = snowflake::SnowflakeProvider::from_config("test_snowflake", &config)
         .expect("Failed to create Snowflake provider");
 
-    let result = provider.test_connection().await;
+    // test_connection now runs a real authenticated `SELECT 1`. A fake
+    // account with no credentials can never authenticate, so the probe must
+    // report success=false (rather than the old always-true TCP dial).
+    let result = provider.test_connection().await.expect("returns Ok");
     assert!(
-        result.is_ok(),
-        "Snowflake test_connection should succeed (returns Ok with success=false for unreachable hosts)"
+        !result.success,
+        "Snowflake test_connection must fail without valid credentials, got: {}",
+        result.message
     );
 }
 
@@ -491,10 +495,14 @@ async fn test_bigquery_test_connection() {
     let provider = bigquery::BigQueryProvider::from_config("test_bigquery", &config)
         .expect("Failed to create BigQuery provider");
 
-    let result = provider.test_connection().await;
+    // test_connection now runs a real authenticated `SELECT 1`. With no
+    // service-account credentials this fails immediately (no network), so the
+    // probe must report success=false.
+    let result = provider.test_connection().await.expect("returns Ok");
     assert!(
-        result.is_ok(),
-        "BigQuery test_connection should succeed (returns Ok with success=false for unreachable hosts)"
+        !result.success,
+        "BigQuery test_connection must fail without credentials, got: {}",
+        result.message
     );
 }
 
