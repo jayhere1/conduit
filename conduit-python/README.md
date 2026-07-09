@@ -30,7 +30,8 @@ result_json = compiler.validate_dag("/path/to/dags")
 ```
 
 **Functions:**
-- `compile_dags(path: str) -> str` — Returns JSON plan
+- `compile_dags(path: str) -> str` — Returns a summary JSON plan (id/tasks/schedule per DAG)
+- `compile_dags_full(path: str) -> str` — Returns the full canonical DAG model (same entry point as the CLI: Python + YAML parsing, SQL I/O inference); this is the input shape for `lineage.analyze_plan_impact`
 - `validate_dag(path: str) -> str` — Returns validation results with errors/warnings
 
 ### `planner` — Change Detection & Fingerprinting
@@ -68,8 +69,27 @@ diff_json = lineage.diff_schemas(old_schema_json, new_schema_json)
 
 **Functions:**
 - `extract_sql_lineage(sql: str) -> str` — Source tables, output columns, dependencies
+- `extract_sql_lineage_with_catalog(sql: str, catalog_json: str, dialect: str) -> str` — catalog-resolved, dialect-aware extraction (bare-column resolution, `SELECT *` expansion; dialects: bigquery, snowflake, postgresql, clickhouse, …)
+- `extract_sql_lineage_full(sql: str, catalog_json: str = "", dialect: str = "", dbt_manifest: str = "") -> str` — full-context extraction; `dbt_manifest` is a path to dbt's `target/manifest.json` or the manifest JSON itself, and resolves `{{ ref() }}` / `{{ source() }}` to real tables
 - `trace_column(direction: str, task_id: str, column_name: str, edges_json: str) -> str` — Upstream/downstream path
 - `diff_schemas(old_json: str, new_json: str) -> str` — Added/removed/modified columns, breaking changes
+- `validate_contract(schema_json: str, contract_json: str) -> str` — validate a schema against a `SchemaContract` (required/forbidden columns, type pins, documentation rules)
+- `analyze_plan_impact(base_json: str, head_json: str, format: str = "json") -> str` — schema-impact report between two compiled DAG sets (the engine behind `conduit impact`); pair with `compiler.compile_dags_full`
+- `to_openlineage_event(sql, job_namespace, job_name, dataset_namespace, output_dataset, event_type="COMPLETE", run_id=None, event_time=None, catalog_json="", dialect="") -> str` — spec-shaped OpenLineage RunEvent with columnLineage facets, ready for Marquez/DataHub or Conduit's ingest endpoint
+
+```python
+# dbt-aware extraction: refs resolve through the manifest
+lineage.extract_sql_lineage_full(
+    "SELECT id FROM {{ ref('users') }}",
+    dbt_manifest="target/manifest.json",
+)
+
+# Impact analysis: what breaks if this DAG change ships?
+base = compiler.compile_dags_full("dags_main/")
+head = compiler.compile_dags_full("dags_branch/")
+report = json.loads(lineage.analyze_plan_impact(base, head))
+report["summary"]["total_breaking_changes"]
+```
 
 ### `state` — Environment State Management
 Manage virtual environments, snapshots, and environment promotion (e.g., dev → staging → prod).
@@ -424,3 +444,16 @@ Contributions welcome! Please:
 ## Support
 
 For issues, questions, or feature requests, visit the [Conduit GitHub Issues](https://github.com/your-org/conduit/issues).
+
+## Releasing
+
+1. Bump `version` in `conduit-python/Cargo.toml` **and** `pyproject.toml`
+   (runtime `__version__` is single-sourced from the crate version).
+2. Update this README if the binding surface changed.
+3. Commit, then tag `native-v<version>` and push the tag — the
+   `publish-python` workflow builds abi3 wheels (manylinux x86_64/aarch64,
+   macOS x86_64/arm64), runs the binding test suite against the built
+   wheels, publishes to PyPI via trusted publishing, and attaches
+   everything to a GitHub Release.
+4. Dry run: trigger the workflow via `workflow_dispatch` — it builds and
+   tests wheels but skips the publish job (tag-gated).
