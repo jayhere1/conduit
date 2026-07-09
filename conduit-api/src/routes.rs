@@ -5,13 +5,16 @@
 //!
 //! ## Authentication
 //!
-//! When auth is enabled (`--auth-enabled`), all endpoints except `/health`
-//! require a valid `Authorization: Bearer <api-key>` header.
-//!
-//! Individual handlers check permissions via the `RequireAuth` extractor:
+//! When auth is enabled (`--auth-enabled`), the `auth_gate` middleware
+//! rejects anonymous requests on every endpoint except the public
+//! allowlist (`/health`, `/info`, `/docs*`) and enforces the coarse role
+//! gate before bodies are parsed:
 //! - GET endpoints require at least Viewer role
-//! - POST/DELETE endpoints require Operator or Admin role
-//! - Auth management endpoints require Admin role
+//! - POST/PUT/DELETE endpoints require Operator or Admin role
+//! - Auth management endpoints (`/auth/keys*`) require Admin role
+//!
+//! Individual mutating handlers additionally check fine-grained
+//! permissions via the `RequireAuth` extractor (defense in depth).
 
 use std::sync::Arc;
 
@@ -185,11 +188,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(handlers::cluster::drain_worker),
         );
 
-    // Apply per-IP rate limiting to API and WebSocket routes.
-    // The Extension layer must be outermost so the limiter is available
-    // when the rate_limit_middleware reads request extensions.
+    // Layer order (innermost first): auth_gate runs closest to the handlers,
+    // so rate limiting and the body-size cap still apply to unauthenticated
+    // requests. The Extension layer must be outermost so the limiter is
+    // available when the rate_limit_middleware reads request extensions.
     let limiter = rate_limit::create_rate_limiter();
     let api_routes = api_routes
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::auth_gate,
+        ))
         .layer(axum::middleware::from_fn(rate_limit::rate_limit_middleware))
         .layer(axum::Extension(limiter.clone()))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)); // 10 MB

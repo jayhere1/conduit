@@ -1,24 +1,101 @@
 //! Authentication middleware for Axum.
 //!
-//! Provides two extractors:
+//! Provides the router-level `auth_gate` middleware plus two extractors:
 //!
-//! - `RequireAuth`: Rejects unauthenticated requests with 401.
+//! - `auth_gate`: When auth is enabled, rejects anonymous requests (401) on
+//!   every route except the public allowlist, and applies a coarse
+//!   role gate (403) — GET requires Viewer, mutations require Operator,
+//!   `/auth/keys` requires Admin — *before* request bodies are parsed.
+//! - `RequireAuth`: Rejects unauthenticated requests with 401; reuses the
+//!   context `auth_gate` stored in request extensions when present.
 //! - `OptionalAuth`: Passes through if no token provided; validates if present.
 //!
-//! Both are no-ops when `auth_enabled` is false on the AuthStore.
+//! All are no-ops when `auth_enabled` is false on the AuthStore.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
 use crate::auth::{AuthContext, AuthError, AuthStore, Permission, Role};
 use crate::AppState;
+
+// ── Router-level auth gate ───────────────────────────────────────────────────
+
+/// Paths (relative to the `/api/v1` nest) that stay public even when auth is
+/// enabled: liveness, build info, and the API docs.
+const PUBLIC_PATHS: &[&str] = &[
+    "/health",
+    "/info",
+    "/docs",
+    "/docs/openapi.json",
+    "/docs/redoc",
+];
+
+/// The minimum role for a route, decided from method + path so that
+/// underprivileged requests are rejected before request bodies are parsed.
+/// Handlers still perform fine-grained `Permission` checks.
+fn required_role_for(method: &Method, path: &str) -> Role {
+    if path.starts_with("/auth/keys") {
+        return Role::Admin;
+    }
+    match *method {
+        Method::GET | Method::HEAD | Method::OPTIONS => Role::Viewer,
+        _ => Role::Operator,
+    }
+}
+
+/// Router middleware enforcing authentication on every non-public route.
+///
+/// On success the authenticated [`AuthContext`] is stored in request
+/// extensions, so the `RequireAuth` extractor does not re-hash the key.
+pub async fn auth_gate(State(state): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
+    let auth_store = &state.auth_store;
+    if !auth_store.auth_enabled {
+        return next.run(req).await;
+    }
+
+    // The router is nested under /api/v1, but middleware can observe either
+    // the stripped or the full path depending on where the layer sits —
+    // normalize before matching.
+    let path = req.uri().path();
+    let path = path.strip_prefix("/api/v1").unwrap_or(path).to_string();
+    if PUBLIC_PATHS.contains(&path.as_str()) {
+        return next.run(req).await;
+    }
+
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    let context = match header
+        .ok_or(AuthError::MissingToken)
+        .and_then(AuthStore::extract_bearer)
+        .and_then(|token| auth_store.authenticate(token))
+    {
+        Ok(ctx) => ctx,
+        Err(e) => return AuthApiError(e).into_response(),
+    };
+
+    let required = required_role_for(req.method(), &path);
+    if context.role < required {
+        return AuthApiError(AuthError::Forbidden {
+            required_role: required,
+            actual_role: context.role,
+        })
+        .into_response();
+    }
+
+    req.extensions_mut().insert(context);
+    next.run(req).await
+}
 
 // ── RequireAuth extractor ────────────────────────────────────────────────────
 
@@ -73,6 +150,12 @@ impl FromRequestParts<Arc<AppState>> for RequireAuth {
                 key_name: "anonymous".to_string(),
                 role: Role::Admin,
             }));
+        }
+
+        // The auth_gate middleware already authenticated this request —
+        // reuse its context instead of re-hashing the key.
+        if let Some(ctx) = parts.extensions.get::<AuthContext>() {
+            return Ok(RequireAuth(ctx.clone()));
         }
 
         // Extract the Authorization header

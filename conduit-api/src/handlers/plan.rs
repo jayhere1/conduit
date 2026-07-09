@@ -14,7 +14,9 @@ use serde_json::{json, Value};
 
 use conduit_compiler::ConduitPlan;
 
+use crate::auth::Permission;
 use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -33,9 +35,12 @@ pub struct ApplyRequest {
 
 /// POST /api/v1/plan — generate a deployment plan.
 pub async fn generate_plan(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(body): Json<PlanRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::GeneratePlan)?;
+
     let env_name = body.environment.as_deref().unwrap_or("production");
 
     // Compile current DAGs
@@ -106,9 +111,12 @@ pub async fn generate_plan(
 
 /// POST /api/v1/apply — apply a deployment plan.
 pub async fn apply_plan(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(body): Json<ApplyRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ApplyPlan)?;
+
     let env_name = body.environment.as_deref().unwrap_or("production");
 
     // Compile and generate fresh plan

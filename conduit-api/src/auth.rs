@@ -90,6 +90,7 @@ pub enum Permission {
     DrainWorker,
     ExtractLineage,
     ValidateContract,
+    IngestLineage,
 
     // Admin operations
     ManageApiKeys,
@@ -107,7 +108,7 @@ impl Permission {
             // Operators can write
             TriggerRun | CompileDags | CreateEnvironment | DeleteEnvironment
             | PromoteEnvironment | GeneratePlan | ApplyPlan | CreateBackfill | DrainWorker
-            | ExtractLineage | ValidateContract => Role::Operator,
+            | ExtractLineage | ValidateContract | IngestLineage => Role::Operator,
 
             // Admin-only
             ManageApiKeys => Role::Admin,

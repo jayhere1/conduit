@@ -8,7 +8,9 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::auth::Permission;
 use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -78,9 +80,12 @@ pub async fn list_environments(
 
 /// POST /api/v1/environments — create a new virtual environment.
 pub async fn create_environment(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateEnvRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::CreateEnvironment)?;
+
     let env = state
         .env_manager
         .create(&body.name, body.based_on.as_deref())
@@ -141,9 +146,12 @@ pub async fn get_environment(
 
 /// DELETE /api/v1/environments/:env_name — delete an environment.
 pub async fn delete_environment(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(env_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::DeleteEnvironment)?;
+
     state
         .env_manager
         .delete(&env_name)
@@ -156,9 +164,12 @@ pub async fn delete_environment(
 
 /// POST /api/v1/environments/promote — promote one environment into another.
 pub async fn promote_environment(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(body): Json<PromoteRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::PromoteEnvironment)?;
+
     let changes = state
         .env_manager
         .promote(&body.source, &body.target)
@@ -356,10 +367,13 @@ pub async fn get_env_history_version(
 /// Body fields are optional; null/missing fields clear that constraint.
 /// To clear the entire policy, POST `{}`.
 pub async fn update_env_policy(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(env_name): Path<String>,
     Json(body): Json<PolicyRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::PromoteEnvironment)?;
+
     use conduit_common::snapshot::PromotionPolicy;
 
     let policy = PromotionPolicy {
@@ -388,10 +402,13 @@ pub async fn update_env_policy(
 /// rolls back to the environment's `current_version` (undoes the most recent
 /// mutation).
 pub async fn rollback_environment(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(env_name): Path<String>,
     Json(body): Json<RollbackRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::PromoteEnvironment)?;
+
     let (new_version, changes) = state
         .env_manager
         .rollback(&env_name, body.to_version)

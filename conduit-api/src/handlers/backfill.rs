@@ -14,7 +14,9 @@ use serde_json::{json, Value};
 use conduit_common::incremental::PartitionGranularity;
 use conduit_planner::BackfillEngine;
 
+use crate::auth::Permission;
 use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::AppState;
 
 /// Request body for the backfill endpoint.
@@ -69,9 +71,12 @@ pub struct PartitionInfo {
 
 /// POST /api/v1/backfill — compute backfill partitions (dry-run preview).
 pub async fn create_backfill(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(body): Json<BackfillApiRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::CreateBackfill)?;
+
     // Parse granularity
     let granularity = match body.granularity.to_lowercase().as_str() {
         "hour" | "hourly" => PartitionGranularity::Hour,

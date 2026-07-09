@@ -25,7 +25,9 @@ use conduit_lineage::{
 };
 use conduit_providers::registry::ProviderInstance;
 
+use crate::auth::Permission;
 use crate::error::ApiError;
+use crate::middleware::RequireAuth;
 use crate::AppState;
 
 // ─── Request / Response types ────────────────────────────────────────────────
@@ -167,9 +169,12 @@ pub struct RequiredColumnInput {
 /// Without any catalog, bare columns default to the first table in FROM
 /// and `SELECT *` produces a wildcard mapping.
 pub async fn extract_sql_lineage(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(req): Json<SqlLineageRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ExtractLineage)?;
+
     // Build catalog from request or cache
     let catalog = if let Some(ref tables) = req.tables {
         // Inline table schemas provided
@@ -266,9 +271,12 @@ pub async fn extract_sql_lineage(
 /// }
 /// ```
 pub async fn refresh_catalog(
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CatalogRefreshRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ExtractLineage)?;
+
     let mut catalog = TableCatalog::new();
     let mut tables_registered = 0u64;
     let mut errors = Vec::new();
@@ -351,9 +359,12 @@ pub struct CatalogSourceInput {
 /// Given a task_id and column_name, builds a lineage graph from the provided
 /// edges and traces all upstream columns that feed into the target.
 pub async fn trace_upstream(
+    auth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     Json(req): Json<TraceWithGraphRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ExtractLineage)?;
+
     let graph = build_graph_from_edges(&req.edges);
     let column_ref = ColumnRef::new(&req.target.task_id, &req.target.column_name);
     let trace = graph.trace_upstream(&column_ref);
@@ -374,9 +385,12 @@ pub async fn trace_upstream(
 
 /// POST /api/v1/lineage/trace/downstream — Trace downstream dependents of a column.
 pub async fn trace_downstream(
+    auth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     Json(req): Json<TraceWithGraphRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ExtractLineage)?;
+
     let graph = build_graph_from_edges(&req.edges);
     let column_ref = ColumnRef::new(&req.target.task_id, &req.target.column_name);
     let trace = graph.trace_downstream(&column_ref);
@@ -400,9 +414,12 @@ pub async fn trace_downstream(
 /// Accepts a set of edges and returns D3.js-compatible visualization data
 /// with nodes (columns) and links (lineage edges).
 pub async fn lineage_graph(
+    auth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     Json(req): Json<GraphRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ExtractLineage)?;
+
     let graph = build_graph_from_edges(&req.edges);
     let viz = graph.to_visualization_data();
 
@@ -420,9 +437,12 @@ pub async fn lineage_graph(
 ///
 /// Returns classified changes: Added, Removed, TypeChanged, NullabilityChanged, Renamed.
 pub async fn schema_diff(
+    auth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     Json(req): Json<SchemaDiffRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ExtractLineage)?;
+
     let old_schema = schema_from_input(&req.old_schema);
     let new_schema = schema_from_input(&req.new_schema);
 
@@ -455,9 +475,12 @@ pub async fn schema_diff(
 /// Checks required columns, forbidden columns, documentation requirements,
 /// max column limits, and unknown types. Returns violations with severity.
 pub async fn validate_contract(
+    auth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     Json(req): Json<ContractValidateRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    auth.require(Permission::ValidateContract)?;
+
     let schema = schema_from_input(&req.schema);
     let contract = contract_from_input(&req.contract);
 

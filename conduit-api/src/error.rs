@@ -138,3 +138,12 @@ impl From<conduit_common::error::ConduitError> for ApiError {
         }
     }
 }
+
+impl From<crate::middleware::AuthApiError> for ApiError {
+    fn from(err: crate::middleware::AuthApiError) -> Self {
+        match err.0.status_code() {
+            401 => ApiError::Unauthorized(err.0.to_string()),
+            _ => ApiError::Forbidden(err.0.to_string()),
+        }
+    }
+}
