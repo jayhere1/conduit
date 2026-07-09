@@ -23,6 +23,7 @@
 - [CLI Reference](cli-reference.md)
 - [REST API Reference](api-reference.md)
 - [Python SDK Guide](python-sdk.md)
+- [Providers & Connections](reference/providers.md)
 
 # Advanced
 

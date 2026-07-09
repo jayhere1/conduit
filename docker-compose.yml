@@ -15,6 +15,10 @@
 services:
   # ── Conduit API Server ────────────────────────────────────────────────────
   conduit:
+    # Pull the published image by default; override to build locally with
+    #   CONDUIT_IMAGE= docker compose up --build
+    # (an empty CONDUIT_IMAGE makes compose fall back to the build context).
+    image: ${CONDUIT_IMAGE-ghcr.io/jayhere1/conduit:latest}
     build:
       context: .
       dockerfile: Dockerfile

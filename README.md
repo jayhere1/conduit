@@ -29,6 +29,18 @@ cargo install --path conduit-cli   # installs `conduit` into ~/.cargo/bin
 (`cargo build --release` also works — the binary lands at `target/release/conduit`;
 add it to your PATH yourself.)
 
+**Docker:**
+
+```bash
+docker run -p 9090:9090 -v "$PWD/dags:/data/dags" ghcr.io/jayhere1/conduit:latest
+```
+
+The image bundles the API server, web UI, and Python runtime. `docker compose up`
+also works from a checkout (pulls the published image; add `--build` to build
+locally).
+
+📖 **Documentation:** <https://jayhere1.github.io/conduit/>
+
 ## Quick Start
 
 ![CLI Demo](demo.gif)

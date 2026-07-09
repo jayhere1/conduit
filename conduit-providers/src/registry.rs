@@ -421,6 +421,29 @@ impl ProviderRegistry {
         }
     }
 
+    /// Whether a provider type is a stub (a placeholder whose operations
+    /// return `NotImplemented`) rather than a real implementation.
+    ///
+    /// Authoritative: instantiates the provider with a throwaway config and
+    /// reads `ProviderInfo.is_stub` — the same flag `test_connection`/`execute`
+    /// honor. Falls back to the static [`crate::is_stub_provider_type`] list if
+    /// the provider can't be constructed from the dummy config. This is the
+    /// source of truth for the generated provider reference docs (PRD §8.5).
+    pub fn provider_is_stub(conn_type: &str) -> bool {
+        let cfg = ConnectionConfig {
+            conn_type: conn_type.to_string(),
+            host: Some("doc.invalid".to_string()),
+            port: Some(0),
+            database: Some("doc".to_string()),
+            credentials: None,
+            extra: std::collections::HashMap::new(),
+        };
+        match Self::create_provider("doc", &cfg) {
+            Ok(instance) => instance.as_provider().info().is_stub,
+            Err(_) => crate::is_stub_provider_type(conn_type),
+        }
+    }
+
     /// Get a provider by connection name.
     pub fn get(&self, name: &str) -> Option<&ProviderInstance> {
         self.providers.get(name)
