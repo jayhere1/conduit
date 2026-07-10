@@ -305,8 +305,36 @@ impl Coordinator {
             }
         }
 
+        // Reconcile: recover any in-flight task whose worker is no longer
+        // live. A task can be dispatched to a worker in the narrow window
+        // between its disconnect and `handle_worker_disconnect` computing the
+        // orphan list, leaving it stranded in `inflight` for a removed worker
+        // with no recovery path. Requeue those so they get re-dispatched.
+        self.reconcile_orphaned_inflight().await;
+
         // Also try to drain the pending queue.
         self.drain_pending_queue().await;
+    }
+
+    /// Requeue in-flight tasks whose assigned worker is no longer connected.
+    /// Idempotent and safe to run every health-check tick.
+    async fn reconcile_orphaned_inflight(&self) {
+        let stranded: Vec<String> = self
+            .inflight
+            .iter()
+            .filter(|entry| !self.worker_channels.contains_key(&entry.value().worker_id))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        if !stranded.is_empty() {
+            warn!(
+                count = stranded.len(),
+                "Reconciling in-flight tasks stranded on disconnected workers"
+            );
+            for assignment_id in &stranded {
+                self.reassign_task(assignment_id).await;
+            }
+        }
     }
 
     /// Start the periodic health check background task.
@@ -670,6 +698,54 @@ mod tests {
         // (It may already be in the channel from the background drain task)
         // Check pending count went down.
         assert_eq!(coord.pending_count().await, 0);
+    }
+
+    /// A task dispatched to a worker that then vanishes (its channel removed
+    /// without going through the orphan-reassign path) must be recovered by
+    /// the health-check reconciliation sweep, not stranded in `inflight`.
+    /// Regression for the gap the soak harness surfaced.
+    #[tokio::test]
+    async fn test_reconcile_recovers_task_stranded_on_removed_worker() {
+        let (coord, _rx) = Coordinator::new(CoordinatorConfig::default());
+        let coord = Arc::new(coord);
+
+        // Two workers so the reassigned task has somewhere to land.
+        coord.register_worker(&make_register("w1", 1));
+        let _w2_rx = coord.register_worker(&make_register("w2", 4));
+
+        // Dispatch a task to w1.
+        let a = coord.create_assignment(
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
+        );
+        coord.submit_task(a, "default").await;
+        assert_eq!(coord.inflight_count(), 1);
+
+        // Simulate the disconnect-window race: w1's channel disappears WITHOUT
+        // handle_worker_disconnect running, so its in-flight task is stranded.
+        coord.worker_channels.remove("w1");
+
+        // A normal health-check tick must reconcile and recover it.
+        coord.health_check().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The task is no longer stranded on the dead worker: it was requeued
+        // and re-dispatched (to w2), so nothing is left orphaned.
+        let inflight = coord.inflight_count();
+        let pending = coord.pending_count().await;
+        assert!(
+            inflight + pending <= 1,
+            "task not recovered: inflight={inflight} pending={pending}"
+        );
+        // And whatever remains is NOT assigned to the removed worker.
+        for entry in coord.inflight.iter() {
+            assert_ne!(entry.value().worker_id, "w1", "still stranded on w1");
+        }
     }
 
     #[test]
