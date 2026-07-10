@@ -98,7 +98,8 @@ pub struct DistributedExecutor {
 }
 
 impl DistributedExecutor {
-    /// Create a new distributed executor.
+    /// Create a new distributed executor with a non-durable coordinator
+    /// (in-flight state is lost if the process restarts).
     pub fn new(config: DistributedExecutorConfig) -> Self {
         let (coordinator, result_rx) = Coordinator::new(config.coordinator.clone());
 
@@ -107,6 +108,29 @@ impl DistributedExecutor {
             coordinator: Arc::new(coordinator),
             result_rx,
         }
+    }
+
+    /// Create a distributed executor whose coordinator persists in-flight
+    /// assignments to RocksDB at `store_path` (typically
+    /// `{state_dir}/coordinator_assignments`) and recovers them on startup
+    /// (PRD E3). If the process restarts, tasks that were in flight are
+    /// reconstructed and re-queued for dispatch instead of being lost.
+    pub async fn with_persistence(
+        config: DistributedExecutorConfig,
+        store_path: &std::path::Path,
+    ) -> Result<Self, rocksdb::Error> {
+        let store = Arc::new(crate::assignment_store::RocksAssignmentStore::open(
+            store_path,
+        )?);
+        let (coordinator, result_rx) = Coordinator::with_store(config.coordinator.clone(), store);
+        let coordinator = Arc::new(coordinator);
+        coordinator.recover().await;
+
+        Ok(Self {
+            config,
+            coordinator,
+            result_rx,
+        })
     }
 
     /// Get a reference to the coordinator.

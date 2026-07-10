@@ -16,6 +16,7 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::assignment_store::{AssignmentStore, InMemoryAssignmentStore, PersistedAssignment};
 use crate::proto_types::*;
 use crate::worker_pool::{RoutingStrategy, WorkerPool};
 
@@ -111,6 +113,15 @@ pub struct Coordinator {
     /// Log entries collected from workers (ring buffer per assignment).
     task_logs: Arc<DashMap<String, Vec<TaskLogEntry>>>,
 
+    /// Durable store of dispatched assignments for crash recovery. Defaults to
+    /// a non-durable in-memory store (original behaviour).
+    assignment_store: Arc<dyn AssignmentStore>,
+
+    /// True between construction and `recover()` completing. While recovering,
+    /// new submissions are queued rather than dispatched so recovered in-flight
+    /// work keeps its place ahead of fresh tasks.
+    recovering: Arc<AtomicBool>,
+
     /// Coordinator start time.
     started_at: Instant,
 }
@@ -121,6 +132,16 @@ impl Coordinator {
     /// Returns the coordinator and a receiver for task results that the
     /// scheduler should consume.
     pub fn new(config: CoordinatorConfig) -> (Self, mpsc::UnboundedReceiver<TaskResult>) {
+        Self::with_store(config, Arc::new(InMemoryAssignmentStore::new()))
+    }
+
+    /// Create a coordinator backed by a specific [`AssignmentStore`]. Pass a
+    /// [`crate::assignment_store::RocksAssignmentStore`] for durability across
+    /// restarts, then call [`Self::recover`] before serving.
+    pub fn with_store(
+        config: CoordinatorConfig,
+        assignment_store: Arc<dyn AssignmentStore>,
+    ) -> (Self, mpsc::UnboundedReceiver<TaskResult>) {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
 
         let coordinator = Self {
@@ -130,11 +151,52 @@ impl Coordinator {
             result_tx,
             worker_channels: Arc::new(DashMap::new()),
             task_logs: Arc::new(DashMap::new()),
+            assignment_store,
+            recovering: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
             config,
         };
 
         (coordinator, result_rx)
+    }
+
+    /// Whether the coordinator is still reconstructing in-flight work from the
+    /// assignment store. New submissions are queued (not dispatched) until this
+    /// is false.
+    pub fn is_recovering(&self) -> bool {
+        self.recovering.load(Ordering::SeqCst)
+    }
+
+    /// Reconstruct in-flight assignments from the store after a restart.
+    ///
+    /// The workers from the previous coordinator instance are gone (they will
+    /// re-register), so every persisted assignment is re-queued as pending and
+    /// will be dispatched to whichever workers connect. Returns the number of
+    /// assignments recovered. Safe to call once at startup, before serving.
+    pub async fn recover(&self) -> usize {
+        self.recovering.store(true, Ordering::SeqCst);
+        let persisted = self.assignment_store.load_all();
+        let count = persisted.len();
+
+        if count > 0 {
+            warn!(
+                count,
+                "Recovering in-flight assignments after coordinator restart"
+            );
+            let mut queue = self.pending_queue.lock().await;
+            for entry in persisted {
+                queue.push_back(PendingTask {
+                    assignment: entry.assignment,
+                    queued_at: Instant::now(),
+                    pool: entry.pool,
+                });
+            }
+        }
+
+        self.recovering.store(false, Ordering::SeqCst);
+        // Now that recovery is done, dispatch what we can.
+        self.drain_pending_queue().await;
+        count
     }
 
     /// Register a worker and return a receiver for its task assignments.
@@ -157,10 +219,15 @@ impl Coordinator {
     pub async fn submit_task(&self, assignment: TaskAssignment, pool: &str) {
         let pool_name = if pool.is_empty() { "default" } else { pool };
 
-        // Try to immediately dispatch.
-        if let Some(worker_id) = self.pool.select_worker(pool_name).await {
-            self.dispatch_to_worker(&worker_id, assignment, pool_name);
-        } else {
+        // Try to immediately dispatch — unless we're still recovering, in which
+        // case queue it so recovered in-flight work keeps its place.
+        if !self.is_recovering() {
+            if let Some(worker_id) = self.pool.select_worker(pool_name).await {
+                self.dispatch_to_worker(&worker_id, assignment, pool_name);
+                return;
+            }
+        }
+        {
             // Queue it.
             let mut queue = self.pending_queue.lock().await;
             if queue.len() >= self.config.max_queue_size {
@@ -225,9 +292,11 @@ impl Coordinator {
             "Task result received"
         );
 
-        // Update pool state.
+        // Update pool state. The task reached a terminal state, so drop its
+        // durable record — it should not be recovered on a future restart.
         self.pool.complete_task(&result.assignment_id, success);
         self.inflight.remove(&result.assignment_id);
+        self.assignment_store.remove(&result.assignment_id);
 
         // Forward to scheduler.
         if let Err(e) = self.result_tx.send(result) {
@@ -240,9 +309,18 @@ impl Coordinator {
         let coord = self.worker_channels.clone();
         let inflight = self.inflight.clone();
         let pool2 = self.pool.clone();
+        let store = self.assignment_store.clone();
 
         tokio::spawn(async move {
-            Self::drain_pending_queue_inner(&pool, &pending, &coord, &inflight, &pool2).await;
+            Self::drain_pending_queue_inner(
+                &pool,
+                &pending,
+                &coord,
+                &inflight,
+                &pool2,
+                store.as_ref(),
+            )
+            .await;
         });
     }
 
@@ -373,6 +451,11 @@ impl Coordinator {
                 pool: pool.to_string(),
             },
         );
+        self.assignment_store.record(&PersistedAssignment {
+            assignment: assignment.clone(),
+            worker_id: worker_id.to_string(),
+            pool: pool.to_string(),
+        });
 
         if let Some(tx) = self.worker_channels.get(worker_id) {
             if tx.send(assignment).is_err() {
@@ -389,6 +472,7 @@ impl Coordinator {
             &self.worker_channels,
             &self.inflight,
             &self.pool,
+            self.assignment_store.as_ref(),
         )
         .await;
     }
@@ -399,6 +483,7 @@ impl Coordinator {
         worker_channels: &DashMap<String, mpsc::UnboundedSender<TaskAssignment>>,
         inflight: &DashMap<String, InflightTask>,
         pool2: &WorkerPool,
+        assignment_store: &dyn AssignmentStore,
     ) {
         let mut queue = pending.lock().await;
         let mut remaining = VecDeque::new();
@@ -423,6 +508,11 @@ impl Coordinator {
                         pool: pending_task.pool.clone(),
                     },
                 );
+                assignment_store.record(&PersistedAssignment {
+                    assignment: pending_task.assignment.clone(),
+                    worker_id: worker_id.clone(),
+                    pool: pending_task.pool.clone(),
+                });
 
                 if let Some(tx) = worker_channels.get(&worker_id) {
                     let _ = tx.send(pending_task.assignment);
