@@ -11,9 +11,9 @@
 //!      re-ran).
 //!   2. **Drain to zero** — after generation stops, inflight and pending both
 //!      reach zero (no stuck tasks, no leaked assignments).
-//!   3. **Bounded state** — inflight never exceeds total worker capacity and
-//!      pending never exceeds the configured queue cap (leak proxy for
-//!      coordinator memory growth).
+//!   3. **Bounded state** — outstanding work stays within the backpressure
+//!      cap and pending never exceeds the configured queue cap (a leak proxy
+//!      for coordinator memory growth); it never grows without limit.
 //!
 //! It also reports throughput and p50/p99 task latency.
 //!
