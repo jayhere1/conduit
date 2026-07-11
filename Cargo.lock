@@ -951,6 +951,7 @@ dependencies = [
  "proptest",
  "prost",
  "prost-types",
+ "rocksdb",
  "serde",
  "serde_json",
  "sysinfo 0.32.1",
