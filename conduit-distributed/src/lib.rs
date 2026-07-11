@@ -65,7 +65,7 @@ pub mod generated_proto {
 pub use assignment_store::{
     AssignmentStore, InMemoryAssignmentStore, PersistedAssignment, RocksAssignmentStore,
 };
-pub use coordinator::{Coordinator, CoordinatorConfig};
+pub use coordinator::{Coordinator, CoordinatorConfig, SubmitOutcome};
 pub use distributed_executor::{
     DispatchRequest, DispatchResult, DistributedExecutor, DistributedExecutorConfig, ExecutionMode,
 };

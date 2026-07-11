@@ -42,8 +42,15 @@ pub struct CoordinatorConfig {
     /// Task routing strategy.
     pub routing_strategy: RoutingStrategy,
 
-    /// Maximum number of tasks to queue before applying backpressure.
+    /// Maximum number of tasks to queue. Submissions past this are rejected
+    /// (`SubmitOutcome::Rejected`) rather than silently dropped, so the caller
+    /// can apply backpressure.
     pub max_queue_size: usize,
+
+    /// Queue depth at which the coordinator reports it is under backpressure
+    /// (via [`Coordinator::is_under_backpressure`]) so producers can throttle
+    /// *before* the queue fills. Defaults to 80% of `max_queue_size`.
+    pub high_water_mark: usize,
 
     /// How long a task can be assigned before the coordinator considers it
     /// stuck and potentially reassigns it (seconds).
@@ -64,11 +71,25 @@ impl Default for CoordinatorConfig {
             health_check_interval_secs: 10,
             routing_strategy: RoutingStrategy::LeastLoaded,
             max_queue_size: 10_000,
+            high_water_mark: 8_000,
             task_timeout_secs: 3600,
             tls_cert_path: None,
             tls_key_path: None,
         }
     }
+}
+
+/// Outcome of [`Coordinator::submit_task`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    /// Dispatched immediately to an available worker.
+    Dispatched,
+    /// No worker free; queued for later dispatch.
+    Queued,
+    /// The queue was full — the task was NOT accepted. The caller must apply
+    /// backpressure (retry with backoff, slow the producer) rather than treat
+    /// the submission as successful.
+    Rejected,
 }
 
 /// A pending task waiting for a worker.
@@ -214,9 +235,11 @@ impl Coordinator {
 
     /// Submit a task for distributed execution.
     ///
-    /// The coordinator will find a suitable worker and dispatch it.
-    /// If no worker is available, the task is queued.
-    pub async fn submit_task(&self, assignment: TaskAssignment, pool: &str) {
+    /// Dispatches immediately if a worker is free, otherwise queues the task.
+    /// Returns [`SubmitOutcome::Rejected`] — without accepting the task — when
+    /// the queue is at `max_queue_size`, so the caller applies backpressure
+    /// instead of the coordinator silently dropping work.
+    pub async fn submit_task(&self, assignment: TaskAssignment, pool: &str) -> SubmitOutcome {
         let pool_name = if pool.is_empty() { "default" } else { pool };
 
         // Try to immediately dispatch — unless we're still recovering, in which
@@ -224,19 +247,19 @@ impl Coordinator {
         if !self.is_recovering() {
             if let Some(worker_id) = self.pool.select_worker(pool_name).await {
                 self.dispatch_to_worker(&worker_id, assignment, pool_name);
-                return;
+                return SubmitOutcome::Dispatched;
             }
         }
         {
             // Queue it.
             let mut queue = self.pending_queue.lock().await;
             if queue.len() >= self.config.max_queue_size {
-                error!(
+                warn!(
                     assignment = %assignment.assignment_id,
-                    "Task queue is full ({} tasks), dropping assignment",
-                    queue.len()
+                    queue_len = queue.len(),
+                    "Task queue full — rejecting submission (backpressure)"
                 );
-                return;
+                return SubmitOutcome::Rejected;
             }
 
             info!(
@@ -251,6 +274,13 @@ impl Coordinator {
                 pool: pool_name.to_string(),
             });
         }
+        SubmitOutcome::Queued
+    }
+
+    /// Whether the pending queue has reached the high-water mark. Producers can
+    /// poll this to throttle *before* submissions start being rejected.
+    pub async fn is_under_backpressure(&self) -> bool {
+        self.pending_count().await >= self.config.high_water_mark
     }
 
     /// Create a new TaskAssignment from task parameters.
@@ -690,6 +720,61 @@ mod tests {
         // No workers registered → task should be queued.
         assert_eq!(coord.pending_count().await, 1);
         assert_eq!(coord.inflight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_full_queue_rejects_instead_of_dropping() {
+        // Tiny queue, no workers, so every submission goes to the queue.
+        let config = CoordinatorConfig {
+            max_queue_size: 2,
+            high_water_mark: 1,
+            ..CoordinatorConfig::default()
+        };
+        let (coord, _rx) = Coordinator::new(config);
+
+        let submit = |n: u32| {
+            let a = coord.create_assignment(
+                "dag1",
+                "run1",
+                &format!("task{n}"),
+                0,
+                make_spec(),
+                make_context(&format!("task{n}")),
+                300,
+            );
+            coord.submit_task(a, "default")
+        };
+
+        assert_eq!(submit(1).await, SubmitOutcome::Queued);
+        // One queued (>= high_water_mark of 1) → under backpressure.
+        assert!(coord.is_under_backpressure().await);
+
+        assert_eq!(submit(2).await, SubmitOutcome::Queued);
+        // Queue is now full (2/2): the next submission is rejected, not dropped.
+        assert_eq!(submit(3).await, SubmitOutcome::Rejected);
+        // And the rejected task did not join the queue.
+        assert_eq!(coord.pending_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_submit_dispatched_outcome_when_worker_available() {
+        let (coord, _rx) = Coordinator::new(CoordinatorConfig::default());
+        let _w = coord.register_worker(&make_register("w1", 4));
+
+        let a = coord.create_assignment(
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
+        );
+        assert_eq!(
+            coord.submit_task(a, "default").await,
+            SubmitOutcome::Dispatched
+        );
+        assert!(!coord.is_under_backpressure().await);
     }
 
     #[tokio::test]
