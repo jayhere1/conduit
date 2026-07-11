@@ -45,6 +45,7 @@
 //! conduit run my_dag --distributed --bind 0.0.0.0:9400
 //! ```
 
+pub mod assignment_store;
 pub mod convert;
 pub mod coordinator;
 pub mod distributed_executor;
@@ -61,7 +62,10 @@ pub mod generated_proto {
     include!("generated/conduit.distributed.rs");
 }
 
-pub use coordinator::{Coordinator, CoordinatorConfig};
+pub use assignment_store::{
+    AssignmentStore, InMemoryAssignmentStore, PersistedAssignment, RocksAssignmentStore,
+};
+pub use coordinator::{Coordinator, CoordinatorConfig, SubmitOutcome};
 pub use distributed_executor::{
     DispatchRequest, DispatchResult, DistributedExecutor, DistributedExecutorConfig, ExecutionMode,
 };

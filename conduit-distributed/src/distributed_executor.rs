@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use crate::coordinator::{Coordinator, CoordinatorConfig};
+use crate::coordinator::{Coordinator, CoordinatorConfig, SubmitOutcome};
 use crate::proto_types::*;
 
 /// Configuration for the distributed executor.
@@ -98,7 +98,8 @@ pub struct DistributedExecutor {
 }
 
 impl DistributedExecutor {
-    /// Create a new distributed executor.
+    /// Create a new distributed executor with a non-durable coordinator
+    /// (in-flight state is lost if the process restarts).
     pub fn new(config: DistributedExecutorConfig) -> Self {
         let (coordinator, result_rx) = Coordinator::new(config.coordinator.clone());
 
@@ -109,13 +110,40 @@ impl DistributedExecutor {
         }
     }
 
+    /// Create a distributed executor whose coordinator persists in-flight
+    /// assignments to RocksDB at `store_path` (typically
+    /// `{state_dir}/coordinator_assignments`) and recovers them on startup
+    /// (PRD E3). If the process restarts, tasks that were in flight are
+    /// reconstructed and re-queued for dispatch instead of being lost.
+    pub async fn with_persistence(
+        config: DistributedExecutorConfig,
+        store_path: &std::path::Path,
+    ) -> Result<Self, rocksdb::Error> {
+        let store = Arc::new(crate::assignment_store::RocksAssignmentStore::open(
+            store_path,
+        )?);
+        let (coordinator, result_rx) = Coordinator::with_store(config.coordinator.clone(), store);
+        let coordinator = Arc::new(coordinator);
+        coordinator.recover().await;
+
+        Ok(Self {
+            config,
+            coordinator,
+            result_rx,
+        })
+    }
+
     /// Get a reference to the coordinator.
     pub fn coordinator(&self) -> &Arc<Coordinator> {
         &self.coordinator
     }
 
     /// Dispatch a task for distributed execution.
-    pub async fn dispatch(&self, req: DispatchRequest) {
+    ///
+    /// Returns the coordinator's [`SubmitOutcome`]. A `Rejected` outcome means
+    /// the queue is full and the caller should apply backpressure rather than
+    /// consider the task submitted.
+    pub async fn dispatch(&self, req: DispatchRequest) -> SubmitOutcome {
         let spec = TaskSpec {
             task_type: req.task_type,
             script: req.script,
@@ -158,7 +186,14 @@ impl DistributedExecutor {
             &req.pool
         };
 
-        self.coordinator.submit_task(assignment, pool).await;
+        let outcome = self.coordinator.submit_task(assignment, pool).await;
+        if outcome == SubmitOutcome::Rejected {
+            error!(
+                task = %req.task_id,
+                "Coordinator queue full — task rejected; scheduler should retry (backpressure)"
+            );
+        }
+        outcome
     }
 
     /// Receive the next completed task result.
@@ -208,6 +243,12 @@ impl DistributedExecutor {
     /// Number of inflight tasks.
     pub fn inflight_count(&self) -> usize {
         self.coordinator.inflight_count()
+    }
+
+    /// Whether the coordinator is under backpressure (queue at/above the
+    /// high-water mark). Producers can poll this to throttle proactively.
+    pub async fn is_under_backpressure(&self) -> bool {
+        self.coordinator.is_under_backpressure().await
     }
 }
 

@@ -16,6 +16,7 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::assignment_store::{AssignmentStore, InMemoryAssignmentStore, PersistedAssignment};
 use crate::proto_types::*;
 use crate::worker_pool::{RoutingStrategy, WorkerPool};
 
@@ -40,8 +42,15 @@ pub struct CoordinatorConfig {
     /// Task routing strategy.
     pub routing_strategy: RoutingStrategy,
 
-    /// Maximum number of tasks to queue before applying backpressure.
+    /// Maximum number of tasks to queue. Submissions past this are rejected
+    /// (`SubmitOutcome::Rejected`) rather than silently dropped, so the caller
+    /// can apply backpressure.
     pub max_queue_size: usize,
+
+    /// Queue depth at which the coordinator reports it is under backpressure
+    /// (via [`Coordinator::is_under_backpressure`]) so producers can throttle
+    /// *before* the queue fills. Defaults to 80% of `max_queue_size`.
+    pub high_water_mark: usize,
 
     /// How long a task can be assigned before the coordinator considers it
     /// stuck and potentially reassigns it (seconds).
@@ -62,11 +71,25 @@ impl Default for CoordinatorConfig {
             health_check_interval_secs: 10,
             routing_strategy: RoutingStrategy::LeastLoaded,
             max_queue_size: 10_000,
+            high_water_mark: 8_000,
             task_timeout_secs: 3600,
             tls_cert_path: None,
             tls_key_path: None,
         }
     }
+}
+
+/// Outcome of [`Coordinator::submit_task`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    /// Dispatched immediately to an available worker.
+    Dispatched,
+    /// No worker free; queued for later dispatch.
+    Queued,
+    /// The queue was full — the task was NOT accepted. The caller must apply
+    /// backpressure (retry with backoff, slow the producer) rather than treat
+    /// the submission as successful.
+    Rejected,
 }
 
 /// A pending task waiting for a worker.
@@ -111,6 +134,15 @@ pub struct Coordinator {
     /// Log entries collected from workers (ring buffer per assignment).
     task_logs: Arc<DashMap<String, Vec<TaskLogEntry>>>,
 
+    /// Durable store of dispatched assignments for crash recovery. Defaults to
+    /// a non-durable in-memory store (original behaviour).
+    assignment_store: Arc<dyn AssignmentStore>,
+
+    /// True between construction and `recover()` completing. While recovering,
+    /// new submissions are queued rather than dispatched so recovered in-flight
+    /// work keeps its place ahead of fresh tasks.
+    recovering: Arc<AtomicBool>,
+
     /// Coordinator start time.
     started_at: Instant,
 }
@@ -121,6 +153,16 @@ impl Coordinator {
     /// Returns the coordinator and a receiver for task results that the
     /// scheduler should consume.
     pub fn new(config: CoordinatorConfig) -> (Self, mpsc::UnboundedReceiver<TaskResult>) {
+        Self::with_store(config, Arc::new(InMemoryAssignmentStore::new()))
+    }
+
+    /// Create a coordinator backed by a specific [`AssignmentStore`]. Pass a
+    /// [`crate::assignment_store::RocksAssignmentStore`] for durability across
+    /// restarts, then call [`Self::recover`] before serving.
+    pub fn with_store(
+        config: CoordinatorConfig,
+        assignment_store: Arc<dyn AssignmentStore>,
+    ) -> (Self, mpsc::UnboundedReceiver<TaskResult>) {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
 
         let coordinator = Self {
@@ -130,11 +172,52 @@ impl Coordinator {
             result_tx,
             worker_channels: Arc::new(DashMap::new()),
             task_logs: Arc::new(DashMap::new()),
+            assignment_store,
+            recovering: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
             config,
         };
 
         (coordinator, result_rx)
+    }
+
+    /// Whether the coordinator is still reconstructing in-flight work from the
+    /// assignment store. New submissions are queued (not dispatched) until this
+    /// is false.
+    pub fn is_recovering(&self) -> bool {
+        self.recovering.load(Ordering::SeqCst)
+    }
+
+    /// Reconstruct in-flight assignments from the store after a restart.
+    ///
+    /// The workers from the previous coordinator instance are gone (they will
+    /// re-register), so every persisted assignment is re-queued as pending and
+    /// will be dispatched to whichever workers connect. Returns the number of
+    /// assignments recovered. Safe to call once at startup, before serving.
+    pub async fn recover(&self) -> usize {
+        self.recovering.store(true, Ordering::SeqCst);
+        let persisted = self.assignment_store.load_all();
+        let count = persisted.len();
+
+        if count > 0 {
+            warn!(
+                count,
+                "Recovering in-flight assignments after coordinator restart"
+            );
+            let mut queue = self.pending_queue.lock().await;
+            for entry in persisted {
+                queue.push_back(PendingTask {
+                    assignment: entry.assignment,
+                    queued_at: Instant::now(),
+                    pool: entry.pool,
+                });
+            }
+        }
+
+        self.recovering.store(false, Ordering::SeqCst);
+        // Now that recovery is done, dispatch what we can.
+        self.drain_pending_queue().await;
+        count
     }
 
     /// Register a worker and return a receiver for its task assignments.
@@ -152,24 +235,31 @@ impl Coordinator {
 
     /// Submit a task for distributed execution.
     ///
-    /// The coordinator will find a suitable worker and dispatch it.
-    /// If no worker is available, the task is queued.
-    pub async fn submit_task(&self, assignment: TaskAssignment, pool: &str) {
+    /// Dispatches immediately if a worker is free, otherwise queues the task.
+    /// Returns [`SubmitOutcome::Rejected`] — without accepting the task — when
+    /// the queue is at `max_queue_size`, so the caller applies backpressure
+    /// instead of the coordinator silently dropping work.
+    pub async fn submit_task(&self, assignment: TaskAssignment, pool: &str) -> SubmitOutcome {
         let pool_name = if pool.is_empty() { "default" } else { pool };
 
-        // Try to immediately dispatch.
-        if let Some(worker_id) = self.pool.select_worker(pool_name).await {
-            self.dispatch_to_worker(&worker_id, assignment, pool_name);
-        } else {
+        // Try to immediately dispatch — unless we're still recovering, in which
+        // case queue it so recovered in-flight work keeps its place.
+        if !self.is_recovering() {
+            if let Some(worker_id) = self.pool.select_worker(pool_name).await {
+                self.dispatch_to_worker(&worker_id, assignment, pool_name);
+                return SubmitOutcome::Dispatched;
+            }
+        }
+        {
             // Queue it.
             let mut queue = self.pending_queue.lock().await;
             if queue.len() >= self.config.max_queue_size {
-                error!(
+                warn!(
                     assignment = %assignment.assignment_id,
-                    "Task queue is full ({} tasks), dropping assignment",
-                    queue.len()
+                    queue_len = queue.len(),
+                    "Task queue full — rejecting submission (backpressure)"
                 );
-                return;
+                return SubmitOutcome::Rejected;
             }
 
             info!(
@@ -184,6 +274,13 @@ impl Coordinator {
                 pool: pool_name.to_string(),
             });
         }
+        SubmitOutcome::Queued
+    }
+
+    /// Whether the pending queue has reached the high-water mark. Producers can
+    /// poll this to throttle *before* submissions start being rejected.
+    pub async fn is_under_backpressure(&self) -> bool {
+        self.pending_count().await >= self.config.high_water_mark
     }
 
     /// Create a new TaskAssignment from task parameters.
@@ -225,9 +322,11 @@ impl Coordinator {
             "Task result received"
         );
 
-        // Update pool state.
+        // Update pool state. The task reached a terminal state, so drop its
+        // durable record — it should not be recovered on a future restart.
         self.pool.complete_task(&result.assignment_id, success);
         self.inflight.remove(&result.assignment_id);
+        self.assignment_store.remove(&result.assignment_id);
 
         // Forward to scheduler.
         if let Err(e) = self.result_tx.send(result) {
@@ -240,9 +339,18 @@ impl Coordinator {
         let coord = self.worker_channels.clone();
         let inflight = self.inflight.clone();
         let pool2 = self.pool.clone();
+        let store = self.assignment_store.clone();
 
         tokio::spawn(async move {
-            Self::drain_pending_queue_inner(&pool, &pending, &coord, &inflight, &pool2).await;
+            Self::drain_pending_queue_inner(
+                &pool,
+                &pending,
+                &coord,
+                &inflight,
+                &pool2,
+                store.as_ref(),
+            )
+            .await;
         });
     }
 
@@ -305,8 +413,36 @@ impl Coordinator {
             }
         }
 
+        // Reconcile: recover any in-flight task whose worker is no longer
+        // live. A task can be dispatched to a worker in the narrow window
+        // between its disconnect and `handle_worker_disconnect` computing the
+        // orphan list, leaving it stranded in `inflight` for a removed worker
+        // with no recovery path. Requeue those so they get re-dispatched.
+        self.reconcile_orphaned_inflight().await;
+
         // Also try to drain the pending queue.
         self.drain_pending_queue().await;
+    }
+
+    /// Requeue in-flight tasks whose assigned worker is no longer connected.
+    /// Idempotent and safe to run every health-check tick.
+    async fn reconcile_orphaned_inflight(&self) {
+        let stranded: Vec<String> = self
+            .inflight
+            .iter()
+            .filter(|entry| !self.worker_channels.contains_key(&entry.value().worker_id))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        if !stranded.is_empty() {
+            warn!(
+                count = stranded.len(),
+                "Reconciling in-flight tasks stranded on disconnected workers"
+            );
+            for assignment_id in &stranded {
+                self.reassign_task(assignment_id).await;
+            }
+        }
     }
 
     /// Start the periodic health check background task.
@@ -345,6 +481,11 @@ impl Coordinator {
                 pool: pool.to_string(),
             },
         );
+        self.assignment_store.record(&PersistedAssignment {
+            assignment: assignment.clone(),
+            worker_id: worker_id.to_string(),
+            pool: pool.to_string(),
+        });
 
         if let Some(tx) = self.worker_channels.get(worker_id) {
             if tx.send(assignment).is_err() {
@@ -361,6 +502,7 @@ impl Coordinator {
             &self.worker_channels,
             &self.inflight,
             &self.pool,
+            self.assignment_store.as_ref(),
         )
         .await;
     }
@@ -371,6 +513,7 @@ impl Coordinator {
         worker_channels: &DashMap<String, mpsc::UnboundedSender<TaskAssignment>>,
         inflight: &DashMap<String, InflightTask>,
         pool2: &WorkerPool,
+        assignment_store: &dyn AssignmentStore,
     ) {
         let mut queue = pending.lock().await;
         let mut remaining = VecDeque::new();
@@ -395,6 +538,11 @@ impl Coordinator {
                         pool: pending_task.pool.clone(),
                     },
                 );
+                assignment_store.record(&PersistedAssignment {
+                    assignment: pending_task.assignment.clone(),
+                    worker_id: worker_id.clone(),
+                    pool: pending_task.pool.clone(),
+                });
 
                 if let Some(tx) = worker_channels.get(&worker_id) {
                     let _ = tx.send(pending_task.assignment);
@@ -575,6 +723,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_full_queue_rejects_instead_of_dropping() {
+        // Tiny queue, no workers, so every submission goes to the queue.
+        let config = CoordinatorConfig {
+            max_queue_size: 2,
+            high_water_mark: 1,
+            ..CoordinatorConfig::default()
+        };
+        let (coord, _rx) = Coordinator::new(config);
+
+        let submit = |n: u32| {
+            let a = coord.create_assignment(
+                "dag1",
+                "run1",
+                &format!("task{n}"),
+                0,
+                make_spec(),
+                make_context(&format!("task{n}")),
+                300,
+            );
+            coord.submit_task(a, "default")
+        };
+
+        assert_eq!(submit(1).await, SubmitOutcome::Queued);
+        // One queued (>= high_water_mark of 1) → under backpressure.
+        assert!(coord.is_under_backpressure().await);
+
+        assert_eq!(submit(2).await, SubmitOutcome::Queued);
+        // Queue is now full (2/2): the next submission is rejected, not dropped.
+        assert_eq!(submit(3).await, SubmitOutcome::Rejected);
+        // And the rejected task did not join the queue.
+        assert_eq!(coord.pending_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_submit_dispatched_outcome_when_worker_available() {
+        let (coord, _rx) = Coordinator::new(CoordinatorConfig::default());
+        let _w = coord.register_worker(&make_register("w1", 4));
+
+        let a = coord.create_assignment(
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
+        );
+        assert_eq!(
+            coord.submit_task(a, "default").await,
+            SubmitOutcome::Dispatched
+        );
+        assert!(!coord.is_under_backpressure().await);
+    }
+
+    #[tokio::test]
     async fn test_handle_result_forwards_to_scheduler() {
         let (coord, mut rx) = Coordinator::new(CoordinatorConfig::default());
         let mut _worker_rx = coord.register_worker(&make_register("w1", 4));
@@ -670,6 +873,54 @@ mod tests {
         // (It may already be in the channel from the background drain task)
         // Check pending count went down.
         assert_eq!(coord.pending_count().await, 0);
+    }
+
+    /// A task dispatched to a worker that then vanishes (its channel removed
+    /// without going through the orphan-reassign path) must be recovered by
+    /// the health-check reconciliation sweep, not stranded in `inflight`.
+    /// Regression for the gap the soak harness surfaced.
+    #[tokio::test]
+    async fn test_reconcile_recovers_task_stranded_on_removed_worker() {
+        let (coord, _rx) = Coordinator::new(CoordinatorConfig::default());
+        let coord = Arc::new(coord);
+
+        // Two workers so the reassigned task has somewhere to land.
+        coord.register_worker(&make_register("w1", 1));
+        let _w2_rx = coord.register_worker(&make_register("w2", 4));
+
+        // Dispatch a task to w1.
+        let a = coord.create_assignment(
+            "dag1",
+            "run1",
+            "task1",
+            0,
+            make_spec(),
+            make_context("task1"),
+            300,
+        );
+        coord.submit_task(a, "default").await;
+        assert_eq!(coord.inflight_count(), 1);
+
+        // Simulate the disconnect-window race: w1's channel disappears WITHOUT
+        // handle_worker_disconnect running, so its in-flight task is stranded.
+        coord.worker_channels.remove("w1");
+
+        // A normal health-check tick must reconcile and recover it.
+        coord.health_check().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The task is no longer stranded on the dead worker: it was requeued
+        // and re-dispatched (to w2), so nothing is left orphaned.
+        let inflight = coord.inflight_count();
+        let pending = coord.pending_count().await;
+        assert!(
+            inflight + pending <= 1,
+            "task not recovered: inflight={inflight} pending={pending}"
+        );
+        // And whatever remains is NOT assigned to the removed worker.
+        for entry in coord.inflight.iter() {
+            assert_ne!(entry.value().worker_id, "w1", "still stranded on w1");
+        }
     }
 
     #[test]

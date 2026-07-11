@@ -25,6 +25,7 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 dashmap = "6"
 sysinfo = "0.32"
+rocksdb = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.12"
