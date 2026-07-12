@@ -121,6 +121,7 @@ jobs:
           cp LICENSE "$staging/" 2>/dev/null || true
           cp LICENSE-MIT "$staging/" 2>/dev/null || true
           cp LICENSE-APACHE "$staging/" 2>/dev/null || true
+          cp NOTICE "$staging/" 2>/dev/null || true
           tar czf "$archive" "$staging"
           # sha256 for downstream verification
           if command -v sha256sum >/dev/null 2>&1; then
