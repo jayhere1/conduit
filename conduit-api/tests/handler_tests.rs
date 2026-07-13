@@ -579,6 +579,7 @@ async fn runs_list_with_seeded_data() {
             started_at: chrono::Utc::now(),
             finished_at: Some(chrono::Utc::now()),
             task_states: HashMap::new(),
+            task_logs: HashMap::new(),
             triggered_by: "test".to_string(),
             environment: "production".to_string(),
         });
@@ -609,6 +610,7 @@ async fn runs_list_respects_limit_param() {
             started_at: chrono::Utc::now(),
             finished_at: Some(chrono::Utc::now()),
             task_states: HashMap::new(),
+            task_logs: HashMap::new(),
             triggered_by: "test".to_string(),
             environment: "production".to_string(),
         });
@@ -633,6 +635,7 @@ async fn runs_list_filters_by_status() {
             started_at: chrono::Utc::now(),
             finished_at: None,
             task_states: HashMap::new(),
+            task_logs: HashMap::new(),
             triggered_by: "test".to_string(),
             environment: "production".to_string(),
         });
@@ -658,6 +661,7 @@ async fn runs_list_filters_by_environment() {
             started_at: chrono::Utc::now(),
             finished_at: None,
             task_states: HashMap::new(),
+            task_logs: HashMap::new(),
             triggered_by: "test".to_string(),
             environment: env.to_string(),
         });
@@ -730,6 +734,7 @@ async fn run_get_by_id() {
             ("task_a".into(), "success".into()),
             ("task_b".into(), "success".into()),
         ]),
+        task_logs: HashMap::new(),
         triggered_by: "api".to_string(),
         environment: "production".to_string(),
     });
@@ -1044,4 +1049,57 @@ async fn cluster_status_has_expected_fields() {
     assert_eq!(status, StatusCode::OK);
     // Should return an object with cluster info.
     assert!(body.is_object());
+}
+
+#[tokio::test]
+async fn runs_list_filters_by_dag_id_param() {
+    let (router, state) = app(false);
+
+    for (i, dag) in ["alpha", "beta", "alpha"].iter().enumerate() {
+        state.record_run(DagRunInfo {
+            run_id: format!("run-{}", i),
+            dag_id: dag.to_string(),
+            status: "success".to_string(),
+            started_at: chrono::Utc::now(),
+            finished_at: Some(chrono::Utc::now()),
+            task_states: HashMap::new(),
+            task_logs: HashMap::new(),
+            triggered_by: "test".to_string(),
+            environment: "production".to_string(),
+        });
+    }
+
+    // Both snake_case and camelCase spellings must filter.
+    let (_, body) = get(&router, "/api/v1/runs?dag_id=alpha").await;
+    assert_eq!(body["total"], 2, "dag_id filter must apply: {}", body);
+
+    let (_, body) = get(&router, "/api/v1/runs?dagId=beta").await;
+    assert_eq!(body["total"], 1, "dagId filter must apply: {}", body);
+}
+
+#[tokio::test]
+async fn run_detail_exposes_task_logs() {
+    let (router, state) = app(false);
+
+    let mut task_logs = HashMap::new();
+    task_logs.insert("greet".to_string(), "Hello from Conduit!\n".to_string());
+    state.record_run(DagRunInfo {
+        run_id: "run-logs".to_string(),
+        dag_id: "hello".to_string(),
+        status: "success".to_string(),
+        started_at: chrono::Utc::now(),
+        finished_at: Some(chrono::Utc::now()),
+        task_states: HashMap::new(),
+        task_logs,
+        triggered_by: "test".to_string(),
+        environment: "production".to_string(),
+    });
+
+    let (status, body) = get(&router, "/api/v1/runs/run-logs").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["taskLogs"]["greet"], "Hello from Conduit!\n",
+        "run detail must expose captured task logs: {}",
+        body
+    );
 }

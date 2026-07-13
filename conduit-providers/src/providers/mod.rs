@@ -5,6 +5,7 @@
 //! [`ConnectionConfig`].
 
 // ── Security Sanitization ────────────────────────────────────────────────
+pub mod params;
 pub mod sanitize;
 
 // ── SQL Providers ─────────────────────────────────────────────────────────

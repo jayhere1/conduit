@@ -2,7 +2,7 @@
 
 **A Rust-native data pipeline orchestrator.**
 
-Conduit is not "Airflow but faster." It solves problems that Airflow architecturally *cannot* solve — virtual pipeline environments, time-travel debugging, compile-time DAG validation, and plan/apply deployments — all in a single binary with zero external dependencies.
+Conduit is not "Airflow but faster." It solves problems that Airflow architecturally *cannot* solve — virtual pipeline environments, time-travel debugging, compile-time DAG validation, and plan/apply deployments — all in a single binary with no external services (no database, no message broker; task execution shells out to your `python3`/`bash`).
 
 ![Conduit Web UI](conduit-demo-final.gif)
 
@@ -81,8 +81,9 @@ conduit/
   conduit-executor/     Process-based task runtime with timeout, retry, and sensor polling
   conduit-planner/      Fingerprint diffing, impact analysis, and plan/apply deployment workflow
   conduit-lineage/      Column-level SQL lineage via sqlparser-rs AST + TableCatalog
-  conduit-providers/    Data source adapters: Postgres, MySQL, SQLite, CockroachDB, Redshift,
-                        TimescaleDB, HTTP/REST, and 26 additional provider stubs
+  conduit-providers/    Data source adapters: 12 implemented (Postgres, MySQL, SQLite,
+                        CockroachDB, Redshift, TimescaleDB, BigQuery, Snowflake, S3, GCS,
+                        DuckDB, HTTP/REST) plus 20 provider stubs
   conduit-api/          REST + WebSocket API with live run dispatch
   conduit-distributed/  Distributed executor for multi-node task dispatch
   conduit-ui/           React web UI (DAG visualization, run monitoring, log streaming)
@@ -99,18 +100,19 @@ conduit/
 Tree-sitter parses Python `@dag`/`@task` definitions **without executing Python**. Extracts schedules, tags, retry policies, pools, timeouts, and data-flow dependencies from call chains. Kahn's algorithm detects cycles, duplicates, and unknown references at compile time. Includes Criterion benchmarks for 10–1,000 DAG workloads.
 
 ### Event-Driven Scheduler (`conduit-scheduler`)
-Fully async tokio-channel scheduler (no database polling). Manages DAG run state machines (Pending → Queued → Running → Success/Failed/Skipped/Retrying). Evaluates trigger rules (AllSuccess, AllDone, OneSuccess, OneFailed, NoDeps), enforces named resource pools, and parses 5-field cron expressions.
+Fully async tokio-channel scheduler (no database polling). Manages task state machines (Pending → Queued → Success/Failed/Skipped/Retrying). Evaluates trigger rules (AllSuccess, AllDone, OneSuccess, OneFailed, NoDeps), enforces named resource pools declared in `conduit.yaml` (slot-limited, shared across runs), retries failed tasks with fixed or exponential backoff, and fires 5-field cron schedules (`conduit serve` ticks the scheduler every minute).
 
 ### Task Executor (`conduit-executor`)
-Process-isolated task execution with stdin/stdout protocol. Supports Python, Bash, SQL, Sensor, and generic Executable task types. Enforces timeouts via `tokio::time::timeout`, implements fixed and exponential backoff retry policies, and parses structured protocol messages (XCOM, LOG, PROGRESS, METRIC) from task output. Sensor tasks poll at configurable `poke_interval` until success or timeout. Tasks are dispatched concurrently via `tokio::spawn`.
+Process-isolated task execution with a stdout protocol (`CONDUIT::` lines) and env/file-based XCom injection. Supports Python, Bash, SQL, Sensor, and generic Executable task types. Enforces timeouts via `tokio::time::timeout` and parses structured protocol messages (XCOM, LOG, PROGRESS, METRIC) from task output. Retries are owned by the scheduler: fixed delay by default, exponential when a task sets `retry_backoff` (e.g. `@task(retries=3, retry_delay="30s", retry_backoff=2.0)`), and the scheduler re-dispatches the task itself when the delay elapses. Sensor tasks poll at configurable `poke_interval` until success or timeout. Tasks are dispatched concurrently via `tokio::spawn`.
 
 ### Data Providers (`conduit-providers`)
-7 fully implemented providers with real database/HTTP connections:
-- **SQL**: PostgreSQL, MySQL, SQLite, CockroachDB, TimescaleDB, Redshift (via sqlx connection pools)
+12 implemented providers with real database/API connections:
+- **SQL**: PostgreSQL, MySQL, SQLite, CockroachDB, TimescaleDB, Redshift (via sqlx connection pools), DuckDB (embedded)
+- **Cloud**: BigQuery and Snowflake (REST APIs), S3 and GCS (object storage)
 - **HTTP**: REST API provider (via reqwest)
-- 26 additional providers stubbed with the trait interface ready for implementation
+- 20 additional providers stubbed with the trait interface ready for implementation (they report `NotImplemented` rather than pretending to work)
 
-All SQL providers use lazy connection pooling, parameterized queries, and percent-encoded credentials.
+All sqlx providers use lazy connection pooling and percent-encoded credentials. Task SQL supports named `:param` placeholders, rewritten to native placeholders and bound as real query parameters (never string-spliced).
 
 ### SQL Lineage (`conduit-lineage`)
 Column-level lineage via `sqlparser-rs` AST walking (not regex). Handles SELECT, JOINs, CTEs, UNIONs, subqueries, window functions, INSERT...SELECT, and CREATE TABLE AS SELECT. Optional `TableCatalog` integration enables bare column resolution, `SELECT *` expansion, CTE column propagation, and view column registration. OpenLineage RunEvent generation emits output `columnLineage` facets. Lineage is currently labeled **beta** — known limitations include semantic dbt/Jinja resolution and dialect-specific constructs such as BigQuery `SELECT * EXCEPT`.
@@ -184,7 +186,7 @@ cargo bench -p conduit-compiler
 3. **Virtual environments** (not physical copies) — snapshot pointers, not data duplication
 4. **Event-driven scheduling** (not polling) — react to state changes via tokio channels
 5. **Content-addressable snapshots** — fingerprint-based reuse skips unchanged tasks automatically
-6. **Process isolation** — tasks run as child processes with cgroup resource limits
+6. **Process isolation** — tasks run as child processes with enforced timeouts (declared CPU/memory limits are carried in the task model but not yet enforced)
 
 **What makes this architecturally different from Airflow/Dagster/Prefect**:
 - They poll a database to find ready tasks; Conduit reacts to events in microseconds.

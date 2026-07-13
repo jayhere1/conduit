@@ -1,87 +1,12 @@
-//! Retry policy and backoff strategy management.
+//! Duration parsing/formatting for task execution.
 //!
-//! This module provides utilities for parsing retry delays and computing
-//! exponential backoff for task retries.
+//! Retry timing (fixed delay and exponential backoff) is owned by the
+//! scheduler (`conduit-scheduler`), which re-dispatches tasks when their
+//! retry delay elapses. This module only provides duration utilities.
 
 use conduit_common::{ConduitError, ConduitResult};
 use std::time::Duration;
 use tracing::trace;
-
-/// Retry policy configuration
-#[derive(Debug, Clone)]
-pub struct RetryPolicy {
-    pub max_retries: u32,
-    pub delay: Duration,
-    pub backoff_factor: f64,
-}
-
-impl RetryPolicy {
-    /// Create a new retry policy
-    pub fn new(max_retries: u32, delay: Duration, backoff_factor: f64) -> Self {
-        Self {
-            max_retries,
-            delay,
-            backoff_factor,
-        }
-    }
-
-    /// Create a retry policy with no retries
-    pub fn no_retries() -> Self {
-        Self {
-            max_retries: 0,
-            delay: Duration::from_secs(0),
-            backoff_factor: 1.0,
-        }
-    }
-
-    /// Create a retry policy with fixed delay
-    pub fn fixed(max_retries: u32, delay: Duration) -> Self {
-        Self {
-            max_retries,
-            delay,
-            backoff_factor: 1.0,
-        }
-    }
-
-    /// Create a retry policy with exponential backoff
-    pub fn exponential(max_retries: u32, initial_delay: Duration, backoff_factor: f64) -> Self {
-        Self {
-            max_retries,
-            delay: initial_delay,
-            backoff_factor,
-        }
-    }
-
-    /// Calculate the delay for a given attempt number
-    ///
-    /// With exponential backoff: delay * backoff_factor^attempt
-    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        if attempt == 0 || self.backoff_factor == 1.0 {
-            return self.delay;
-        }
-
-        let multiplier = self.backoff_factor.powi(attempt as i32);
-        let millis = (self.delay.as_millis() as f64 * multiplier) as u64;
-
-        Duration::from_millis(millis)
-    }
-
-    /// Calculate the next retry time
-    ///
-    /// Returns the duration to wait before retrying after the given attempt
-    pub fn next_retry_at(&self, attempt: u32) -> Option<Duration> {
-        if attempt >= self.max_retries {
-            return None;
-        }
-
-        Some(self.delay_for_attempt(attempt))
-    }
-
-    /// Check if retries are exhausted
-    pub fn is_exhausted(&self, attempt: u32) -> bool {
-        attempt >= self.max_retries
-    }
-}
 
 /// Parse a duration string to Duration
 ///
@@ -239,67 +164,6 @@ mod tests {
         assert!(parse_duration("invalid").is_err());
         assert!(parse_duration("30x").is_err());
         assert!(parse_duration("abc").is_err());
-    }
-
-    #[test]
-    fn test_retry_policy_creation() {
-        let policy = RetryPolicy::new(3, Duration::from_secs(30), 2.0);
-        assert_eq!(policy.max_retries, 3);
-        assert_eq!(policy.delay, Duration::from_secs(30));
-        assert_eq!(policy.backoff_factor, 2.0);
-    }
-
-    #[test]
-    fn test_retry_policy_no_retries() {
-        let policy = RetryPolicy::no_retries();
-        assert_eq!(policy.max_retries, 0);
-        assert!(policy.next_retry_at(0).is_none());
-        assert!(policy.is_exhausted(0));
-    }
-
-    #[test]
-    fn test_retry_policy_fixed_delay() {
-        let policy = RetryPolicy::fixed(3, Duration::from_secs(60));
-        assert_eq!(policy.max_retries, 3);
-        assert_eq!(policy.backoff_factor, 1.0);
-
-        // All attempts should have same delay
-        assert_eq!(policy.delay_for_attempt(0), Duration::from_secs(60));
-        assert_eq!(policy.delay_for_attempt(1), Duration::from_secs(60));
-        assert_eq!(policy.delay_for_attempt(2), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn test_retry_policy_exponential_backoff() {
-        let policy = RetryPolicy::exponential(5, Duration::from_secs(10), 2.0);
-
-        assert_eq!(policy.delay_for_attempt(0), Duration::from_secs(10));
-        assert_eq!(policy.delay_for_attempt(1), Duration::from_secs(20));
-        assert_eq!(policy.delay_for_attempt(2), Duration::from_secs(40));
-        assert_eq!(policy.delay_for_attempt(3), Duration::from_secs(80));
-        assert_eq!(policy.delay_for_attempt(4), Duration::from_secs(160));
-    }
-
-    #[test]
-    fn test_retry_policy_next_retry_at() {
-        let policy = RetryPolicy::fixed(3, Duration::from_secs(30));
-
-        assert!(policy.next_retry_at(0).is_some());
-        assert!(policy.next_retry_at(1).is_some());
-        assert!(policy.next_retry_at(2).is_some());
-        assert!(policy.next_retry_at(3).is_none()); // Exhausted
-        assert!(policy.next_retry_at(4).is_none());
-    }
-
-    #[test]
-    fn test_retry_policy_is_exhausted() {
-        let policy = RetryPolicy::fixed(3, Duration::from_secs(30));
-
-        assert!(!policy.is_exhausted(0));
-        assert!(!policy.is_exhausted(1));
-        assert!(!policy.is_exhausted(2));
-        assert!(policy.is_exhausted(3));
-        assert!(policy.is_exhausted(4));
     }
 
     #[test]

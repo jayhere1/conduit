@@ -157,6 +157,10 @@ pub struct YamlTask {
     #[serde(default)]
     pub retry_delay: Option<String>,
 
+    /// Exponential backoff multiplier per retry attempt (None = fixed delay).
+    #[serde(default)]
+    pub retry_backoff: Option<f64>,
+
     /// Resource pool name.
     #[serde(default)]
     pub pool: Option<String>,
@@ -411,6 +415,8 @@ impl YamlDagParser {
                 task_type,
                 retries: yaml_task.retries,
                 retry_delay: yaml_task.retry_delay.clone(),
+                retry_backoff: yaml_task.retry_backoff,
+                source_hash: None,
                 pool: yaml_task.pool.clone(),
                 timeout: yaml_task.timeout.clone(),
                 priority: yaml_task.priority,
@@ -773,6 +779,9 @@ tasks:
     connection: warehouse
     query: "SELECT * FROM source.orders"
     retries: 3
+    retry_delay: 30s
+    retry_backoff: 2.0
+    source_hash: None,
     timeout: 30m
 
   transform:
@@ -798,6 +807,8 @@ tasks:
         let extract = dag.tasks.iter().find(|t| t.id == "extract").unwrap();
         assert!(matches!(extract.task_type, TaskType::Sql { .. }));
         assert_eq!(extract.retries, 3);
+        assert_eq!(extract.retry_delay, Some("30s".to_string()));
+        assert_eq!(extract.retry_backoff, Some(2.0));
 
         let transform = dag.tasks.iter().find(|t| t.id == "transform").unwrap();
         assert!(matches!(transform.task_type, TaskType::Python { .. }));

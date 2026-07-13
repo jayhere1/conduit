@@ -77,7 +77,14 @@ impl PlanFingerprinter {
         use conduit_common::dag::TaskType;
         match &task.task_type {
             TaskType::Python { module, function } => {
-                format!("python:{}:{}", module, function)
+                // module/function only name the entry point — the compiler's
+                // source_hash carries the actual body so edits are detected.
+                format!(
+                    "python:{}:{}:{}",
+                    module,
+                    function,
+                    task.source_hash.as_deref().unwrap_or("")
+                )
             }
             TaskType::Bash { command } => {
                 format!("bash:{}", command)
@@ -149,6 +156,8 @@ mod tests {
                 .collect(),
             retries: 0,
             retry_delay: None,
+            retry_backoff: None,
+            source_hash: None,
             pool: None,
             timeout: None,
             priority: 0,
@@ -278,5 +287,29 @@ mod tests {
         let fps2 = PlanFingerprinter::fingerprint_dag(&dag2);
 
         assert_ne!(fps1["a"], fps2["a"]);
+    }
+
+    /// A Python task whose only difference is its source_hash (i.e., its
+    /// body was edited) must produce a different fingerprint.
+    #[test]
+    fn python_source_hash_change_changes_fingerprint() {
+        use conduit_common::dag::TaskType;
+        let make = |hash: &str| {
+            let mut task = make_task("a", vec![]);
+            task.task_type = TaskType::Python {
+                module: "dags.hello".to_string(),
+                function: "a".to_string(),
+            };
+            task.source_hash = Some(hash.to_string());
+            make_dag("test", vec![task], vec!["a"])
+        };
+
+        let fps1 = PlanFingerprinter::fingerprint_dag(&make("hash_v1"));
+        let fps2 = PlanFingerprinter::fingerprint_dag(&make("hash_v2"));
+
+        assert_ne!(
+            fps1["a"], fps2["a"],
+            "editing a Python task body (source_hash) must change its fingerprint"
+        );
     }
 }

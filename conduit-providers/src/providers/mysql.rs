@@ -193,9 +193,18 @@ impl SqlProvider for MySqlProvider {
     async fn execute(
         &self,
         query: &str,
-        _params: &HashMap<String, String>,
+        params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
         let query = super::sanitize::sanitize_query(query, &self.name)?;
+        let (query, bind_values) = super::params::bind_named_params(
+            &query,
+            params,
+            super::params::PlaceholderStyle::Question,
+        )
+        .map_err(|reason| ProviderError::QueryFailed {
+            connection: self.name.clone(),
+            reason,
+        })?;
         let start = std::time::Instant::now();
         let pool = self.ensure_pool().await?;
 
@@ -203,7 +212,11 @@ impl SqlProvider for MySqlProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(&query).fetch_all(pool).await.map_err(|e| {
+            let mut q = sqlx::query(&query);
+            for v in &bind_values {
+                q = super::params::bind_inferred_mysql(q, v);
+            }
+            let rows = q.fetch_all(pool).await.map_err(|e| {
                 ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
@@ -246,7 +259,11 @@ impl SqlProvider for MySqlProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(&query).execute(pool).await.map_err(|e| {
+            let mut q = sqlx::query(&query);
+            for v in &bind_values {
+                q = super::params::bind_inferred_mysql(q, v);
+            }
+            let result = q.execute(pool).await.map_err(|e| {
                 ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),

@@ -187,9 +187,18 @@ impl SqlProvider for SqliteProvider {
     async fn execute(
         &self,
         query: &str,
-        _params: &HashMap<String, String>,
+        params: &HashMap<String, String>,
     ) -> Result<SqlResult, ProviderError> {
         let query = super::sanitize::sanitize_query(query, &self.name)?;
+        let (query, bind_values) = super::params::bind_named_params(
+            &query,
+            params,
+            super::params::PlaceholderStyle::Question,
+        )
+        .map_err(|reason| ProviderError::QueryFailed {
+            connection: self.name.clone(),
+            reason,
+        })?;
         let start = std::time::Instant::now();
         let pool = self.ensure_pool().await?;
 
@@ -197,7 +206,11 @@ impl SqlProvider for SqliteProvider {
         let is_select = query_upper.starts_with("SELECT") || query_upper.starts_with("WITH");
 
         if is_select {
-            let rows = sqlx::query(&query).fetch_all(pool).await.map_err(|e| {
+            let mut q = sqlx::query(&query);
+            for v in &bind_values {
+                q = super::params::bind_inferred_sqlite(q, v);
+            }
+            let rows = q.fetch_all(pool).await.map_err(|e| {
                 ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
@@ -240,7 +253,11 @@ impl SqlProvider for SqliteProvider {
                 metrics,
             })
         } else {
-            let result = sqlx::query(&query).execute(pool).await.map_err(|e| {
+            let mut q = sqlx::query(&query);
+            for v in &bind_values {
+                q = super::params::bind_inferred_sqlite(q, v);
+            }
+            let result = q.execute(pool).await.map_err(|e| {
                 ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
@@ -326,5 +343,91 @@ impl SqlProvider for SqliteProvider {
                 },
             )
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod param_binding_tests {
+    use super::*;
+    use crate::traits::SqlProvider;
+
+    fn memory_provider() -> SqliteProvider {
+        let config = ConnectionConfig {
+            conn_type: "sqlite".to_string(),
+            host: None,
+            port: None,
+            database: Some(":memory:".to_string()),
+            credentials: None,
+            extra: HashMap::new(),
+        };
+        SqliteProvider::from_config("test_sqlite", &config).unwrap()
+    }
+
+    /// `execute` must bind named `:params` as real bind parameters —
+    /// the params map is not decorative.
+    #[tokio::test]
+    async fn execute_binds_named_params() {
+        let p = memory_provider();
+        p.execute_statement("CREATE TABLE t (id INTEGER, name TEXT)")
+            .await
+            .unwrap();
+        p.execute_statement("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')")
+            .await
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "2".to_string());
+        let result = p
+            .execute("SELECT name FROM t WHERE id = :id", &params)
+            .await
+            .unwrap();
+
+        assert_eq!(result.sample_rows.len(), 1, "bound :id must filter to one row");
+        assert_eq!(result.sample_rows[0][0], serde_json::json!("bob"));
+    }
+
+    /// A string param must not open an injection hole: the bound value is
+    /// data, never SQL.
+    #[tokio::test]
+    async fn bound_param_is_not_interpreted_as_sql() {
+        let p = memory_provider();
+        p.execute_statement("CREATE TABLE t (id INTEGER, name TEXT)")
+            .await
+            .unwrap();
+        p.execute_statement("INSERT INTO t VALUES (1, 'alice')")
+            .await
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert(
+            "name".to_string(),
+            "alice' OR '1'='1".to_string(),
+        );
+        let result = p
+            .execute("SELECT id FROM t WHERE name = :name", &params)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.sample_rows.len(),
+            0,
+            "injection payload must be treated as a literal value"
+        );
+    }
+
+    /// Referencing a param that wasn't supplied is a clear error, not a
+    /// silently-unbound query.
+    #[tokio::test]
+    async fn missing_param_is_an_error() {
+        let p = memory_provider();
+        p.execute_statement("CREATE TABLE t (id INTEGER)")
+            .await
+            .unwrap();
+
+        let params = HashMap::new();
+        let err = p
+            .execute("SELECT * FROM t WHERE id = :missing", &params)
+            .await;
+        assert!(err.is_err(), "missing param must error, got {:?}", err);
     }
 }

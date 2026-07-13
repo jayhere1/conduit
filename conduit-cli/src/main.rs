@@ -61,6 +61,9 @@ fn resolve_state_dir(dags_path: &Path) -> PathBuf {
 struct PersistentState {
     env_manager: conduit_state::EnvironmentManager,
     snapshot_store: std::sync::Arc<conduit_state::SnapshotStore>,
+    /// Best-effort event log for `conduit replay`. None when the events DB
+    /// is unavailable (e.g. locked by a running `conduit serve`).
+    event_store: Option<std::sync::Arc<conduit_state::EventStore>>,
     state_dir: PathBuf,
 }
 
@@ -117,9 +120,30 @@ impl PersistentState {
         // that gate on snapshot age can resolve snapshot IDs.
         let env_manager = env_manager.with_snapshot_store(std::sync::Arc::clone(&snapshot_store));
 
+        // Open the event log so env lifecycle and apply operations are
+        // recorded for `conduit replay`. Best-effort: a locked/unavailable
+        // DB (e.g. `conduit serve` holds it) only disables recording.
+        let events_dir = state_dir.join("events");
+        let event_store = match conduit_state::EventStore::open(&events_dir) {
+            Ok(store) => Some(std::sync::Arc::new(store)),
+            Err(e) => {
+                tracing::warn!(
+                    path = %events_dir.display(),
+                    error = %e,
+                    "Event store unavailable; state changes will not be recorded for replay"
+                );
+                None
+            }
+        };
+        let env_manager = match &event_store {
+            Some(store) => env_manager.with_event_store(std::sync::Arc::clone(store)),
+            None => env_manager,
+        };
+
         Ok(Self {
             env_manager,
             snapshot_store,
+            event_store,
             state_dir: state_dir.to_path_buf(),
         })
     }
@@ -285,6 +309,12 @@ enum Commands {
         /// --cors-origin http://localhost:3000
         #[arg(long = "cors-origin")]
         cors_origins: Vec<String>,
+
+        /// Seed fabricated demo run history (for trying out the UI with
+        /// data to look at). Never enabled by default: without this flag
+        /// the server starts with only your real runs.
+        #[arg(long)]
+        demo: bool,
     },
 
     /// Show system status
@@ -740,6 +770,7 @@ fn main() -> Result<()> {
             state_dir,
             auth_enabled,
             cors_origins,
+            demo,
         } => rt.block_on(cmd_serve(
             &host,
             port,
@@ -747,6 +778,7 @@ fn main() -> Result<()> {
             &state_dir,
             auth_enabled,
             cors_origins,
+            demo,
         )),
         Commands::Status { env, dags_path } => cmd_status(env.as_deref(), &dags_path),
         Commands::Env { action, dags_path } => match action {
@@ -1081,6 +1113,44 @@ fn cmd_compile(path: &PathBuf, output: Option<&Path>, check: bool) -> Result<()>
 }
 
 /// Walk every SQL task across every DAG; for each one, look up the named
+/// Locate the project's conduit.yaml by walking up from the dags path.
+fn find_conduit_yaml(dags_path: &Path) -> Option<PathBuf> {
+    let mut candidate = dags_path.to_path_buf();
+    if candidate.is_relative() {
+        candidate = std::env::current_dir().unwrap_or_default().join(candidate);
+    }
+    let project_root = if candidate.ends_with("dags") {
+        candidate.parent().map(Path::to_path_buf)
+    } else {
+        Some(candidate)
+    };
+    project_root.and_then(|p| {
+        let y = p.join("conduit.yaml");
+        y.exists().then_some(y)
+    })
+}
+
+/// Load named resource pools from the project's conduit.yaml (`pools:`
+/// section). Missing file/section means no declared pools — tasks that
+/// reference an undeclared pool run unlimited (the scheduler warns).
+fn load_pools(dags_path: &Path) -> Vec<conduit_common::dag::Pool> {
+    let Some(yaml_path) = find_conduit_yaml(dags_path) else {
+        return Vec::new();
+    };
+    let Ok(config) = conduit_common::config::ConduitConfig::load(&yaml_path) else {
+        return Vec::new();
+    };
+    config
+        .pools
+        .into_iter()
+        .map(|(name, p)| conduit_common::dag::Pool {
+            name,
+            slots: p.slots,
+            description: p.description,
+        })
+        .collect()
+}
+
 /// connection in the project's conduit.yaml; if its `conn_type` is a stub,
 /// print a warning. We surface the offending DAG + task so users can find
 /// and replace it before deploying.
@@ -1218,16 +1288,34 @@ async fn cmd_run(
     let mut dag_map = HashMap::new();
     dag_map.insert(dag_id.to_string(), dag.clone());
 
-    let pools = PoolManager::new(vec![]);
+    let pools = PoolManager::new(load_pools(dags_path));
     let scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map)?;
+
+    // Persist run history so `conduit replay` can reconstruct it. Best
+    // effort: if the store is locked (e.g. `conduit serve` is running) the
+    // run proceeds without persistence.
+    let events_dir = resolve_state_dir(dags_path).join("events");
+    let scheduler = match conduit_state::EventStore::open(&events_dir) {
+        Ok(store) => scheduler.with_event_store(std::sync::Arc::new(store)),
+        Err(e) => {
+            tracing::warn!(
+                path = %events_dir.display(),
+                error = %e,
+                "Event store unavailable; run will not be recorded for replay"
+            );
+            scheduler
+        }
+    };
 
     // Request the DAG run
     let run_id = format!("run_{}", Utc::now().format("%Y%m%d_%H%M%S"));
+    let mut run_config = HashMap::new();
+    run_config.insert("triggered_by".to_string(), "cli".to_string());
     event_tx.send(SchedulerEvent::DagRunRequested {
         dag_id: dag_id.to_string(),
         run_id: run_id.clone(),
         logical_date,
-        config: HashMap::new(),
+        config: run_config,
     })?;
 
     // Spawn scheduler
@@ -1236,6 +1324,8 @@ async fn cmd_run(
     // Executor loop: receives SchedulerCommands, runs real processes
     let executor_event_tx = event_tx.clone();
     let dag_for_executor = dag.clone();
+    let run_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run_failed_flag = std::sync::Arc::clone(&run_failed);
     let executor_handle = tokio::spawn(async move {
         let mut completed = 0usize;
         let total = dag_for_executor.tasks.len();
@@ -1362,6 +1452,9 @@ async fn cmd_run(
                 } => {
                     println!();
                     println!("DAG '{}' run '{}' completed: {:?}", dag_id, run_id, status);
+                    if !matches!(status, conduit_scheduler::scheduler::RunStatus::Success) {
+                        run_failed_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     let _ = executor_event_tx.send(SchedulerEvent::Shutdown);
                     break;
                 }
@@ -1372,7 +1465,12 @@ async fn cmd_run(
                     completed += 1;
                 }
                 SchedulerCommand::RetryTask { task_id, delay, .. } => {
-                    println!("  [RETRY] {} (delay: {:?})", task_id, delay);
+                    // The scheduler re-dispatches the task itself once the
+                    // delay elapses; this is just progress output. The failed
+                    // attempt wasn't final, so give its slot back to the
+                    // progress counter.
+                    completed = completed.saturating_sub(1);
+                    println!("  [RETRY] {} (retrying in {}s)", task_id, delay.num_seconds());
                 }
             }
         }
@@ -1382,6 +1480,11 @@ async fn cmd_run(
 
     let total_duration = start.elapsed();
     println!("Total time: {:.1}ms", total_duration.as_secs_f64() * 1000.0);
+
+    // A failed run must fail the command (CI gates on this exit code).
+    if run_failed.load(std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("DAG run failed — see task output above");
+    }
 
     Ok(())
 }
@@ -1641,6 +1744,16 @@ async fn cmd_apply(
                                     metadata: HashMap::new(),
                                 };
                                 let _ = state.snapshot_store.put(snapshot);
+                                if let Some(store) = &state.event_store {
+                                    let _ = store.append(
+                                        conduit_common::event::EventKind::SnapshotCreated {
+                                            snapshot_id: snap_id.clone(),
+                                            fingerprint: fp.0.clone(),
+                                            dag_id: action.dag_id.clone(),
+                                            task_id: action.task_id.clone(),
+                                        },
+                                    );
+                                }
                             }
 
                             new_snapshots
@@ -1719,6 +1832,15 @@ async fn cmd_apply(
     // Persist state to disk
     state.save()?;
 
+    if let Some(store) = &state.event_store {
+        let _ = store.append(conduit_common::event::EventKind::PlanApplied {
+            plan_id: deploy.id.clone(),
+            environment: environment.to_string(),
+            tasks_executed: executed as u32,
+            tasks_skipped: reused as u32,
+        });
+    }
+
     let duration = start.elapsed();
     println!();
     println!("Apply complete:");
@@ -1751,6 +1873,7 @@ async fn cmd_serve(
     state_dir: &PathBuf,
     auth_enabled: bool,
     cors_origins: Vec<String>,
+    demo: bool,
 ) -> Result<()> {
     use std::net::SocketAddr;
 
@@ -1824,8 +1947,12 @@ async fn cmd_serve(
         println!();
     }
 
-    // Seed realistic demo run history so the UI has data to display immediately
-    state.seed_demo_data();
+    // Demo mode only: seed fabricated run history so the UI has data to
+    // look at. A real deployment must never mix fake runs into real ones.
+    if demo {
+        println!("  Demo mode:   seeding fabricated run history (--demo)");
+        state.seed_demo_data();
+    }
     println!(
         "  Demo data:   seeded {} historical runs",
         state.get_runs(None).len()
@@ -1861,10 +1988,38 @@ async fn cmd_serve(
         // Attach event sender to AppState so trigger_run can dispatch events
         state.with_scheduler(event_tx.clone());
 
-        // Spawn the scheduler event loop
-        let pools = PoolManager::new(vec![]);
-        let scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map.clone())?;
+        // Spawn the scheduler event loop. Share the API's event store so
+        // run lifecycle events are persisted for `conduit replay` and the
+        // /events API.
+        let pools = PoolManager::new(load_pools(dags_path));
+        let mut scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map.clone())?;
+        if let Some(store) = &state.event_store {
+            scheduler = scheduler.with_event_store(std::sync::Arc::clone(store));
+        }
         tokio::spawn(async move { scheduler.run().await });
+
+        // Cron tick source: wake the scheduler at the top of every minute so
+        // DAG schedules actually fire. Five-field cron has minute resolution,
+        // and the scheduler dedupes within a minute, so once per minute is
+        // exactly right.
+        let cron_tx = event_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let now = chrono::Utc::now();
+                let millis_into_minute =
+                    (now.timestamp_millis().rem_euclid(60_000)) as u64;
+                let sleep_ms = 60_000 - millis_into_minute;
+                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                if cron_tx
+                    .send(SchedulerEvent::CronTick {
+                        timestamp: chrono::Utc::now(),
+                    })
+                    .is_err()
+                {
+                    break; // scheduler is gone; stop ticking
+                }
+            }
+        });
 
         // Spawn the executor loop — receives SchedulerCommands, runs tasks,
         // updates AppState, and broadcasts WebSocket events
@@ -1898,6 +2053,11 @@ async fn cmd_serve(
                             }
                         };
 
+                        // Scheduler-initiated runs (cron) were never recorded
+                        // via the POST /runs handler — create the run entry on
+                        // first dispatch so they show up in the UI and API.
+                        ensure_run_recorded(&exec_state, &dag_id, &run_id);
+
                         // Mark task as running
                         update_run_task_state(&exec_state, &run_id, &task_id, "running");
                         exec_state.broadcast_event(
@@ -1928,6 +2088,13 @@ async fn cmd_serve(
                             match ProcessRunner::run(&task, &context).await {
                                 Ok(output) => {
                                     let duration = task_start.elapsed();
+                                    update_run_task_logs(
+                                        &spawn_state,
+                                        &run_id,
+                                        &task_id,
+                                        &output.stdout,
+                                        &output.stderr,
+                                    );
                                     if output.exit_code == 0 {
                                         update_run_task_state(
                                             &spawn_state,
@@ -1979,6 +2146,13 @@ async fn cmd_serve(
                                     }
                                 }
                                 Err(e) => {
+                                    update_run_task_logs(
+                                        &spawn_state,
+                                        &run_id,
+                                        &task_id,
+                                        "",
+                                        &e.to_string(),
+                                    );
                                     update_run_task_state(
                                         &spawn_state,
                                         &run_id,
@@ -2056,6 +2230,68 @@ async fn cmd_serve(
     conduit_api::serve(state, addr).await?;
 
     Ok(())
+}
+
+/// Record a scheduler-initiated run (e.g. cron) in the API run cache if it
+/// isn't already there. Runs triggered via POST /runs are recorded by the
+/// handler; this covers every other dispatch source.
+fn ensure_run_recorded(state: &conduit_api::AppState, dag_id: &str, run_id: &str) {
+    if let Ok(runs) = state.runs.read() {
+        if runs.iter().any(|r| r.run_id == run_id) {
+            return;
+        }
+    }
+    state.record_run(conduit_api::DagRunInfo {
+        run_id: run_id.to_string(),
+        dag_id: dag_id.to_string(),
+        status: "running".to_string(),
+        started_at: chrono::Utc::now(),
+        finished_at: None,
+        task_states: std::collections::HashMap::new(),
+        task_logs: std::collections::HashMap::new(),
+        triggered_by: "scheduler".to_string(),
+        environment: "production".to_string(),
+    });
+}
+
+/// Store a completed task's captured output on its run so the run detail
+/// view can show logs after the fact. Capped per task to bound memory; the
+/// live WebSocket stream remains the full-fidelity path.
+fn update_run_task_logs(
+    state: &conduit_api::AppState,
+    run_id: &str,
+    task_id: &str,
+    stdout: &str,
+    stderr: &str,
+) {
+    const MAX_LOG_BYTES: usize = 16 * 1024;
+    let mut text = String::new();
+    if !stdout.trim().is_empty() {
+        text.push_str(stdout.trim_end());
+        text.push('\n');
+    }
+    if !stderr.trim().is_empty() {
+        text.push_str("--- stderr ---\n");
+        text.push_str(stderr.trim_end());
+        text.push('\n');
+    }
+    if text.is_empty() {
+        return;
+    }
+    if text.len() > MAX_LOG_BYTES {
+        let cut = text.len() - MAX_LOG_BYTES;
+        // keep the tail — failures usually end with the interesting part
+        let mut idx = cut;
+        while !text.is_char_boundary(idx) {
+            idx += 1;
+        }
+        text = format!("… (truncated {} bytes)\n{}", cut, &text[idx..]);
+    }
+    if let Ok(mut runs) = state.runs.write() {
+        if let Some(run) = runs.iter_mut().find(|r| r.run_id == run_id) {
+            run.task_logs.insert(task_id.to_string(), text);
+        }
+    }
 }
 
 /// Update a specific task's state within a run.
@@ -2194,10 +2430,9 @@ fn cmd_env_diff(a: &str, b: &str, dags_path: &PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    let short = |s: &str| -> String {
-        let n = s.len().min(12);
-        s[..n].to_string()
-    };
+    // Snapshot IDs are "snap_<task>_<timestamp>"; the unique part is the
+    // tail, so truncating to a prefix would render every version identical.
+    let short = |s: &str| -> String { s.to_string() };
 
     let mut removed = diff.removed.clone();
     removed.sort_by(|x, y| (&x.dag_id, &x.task_id).cmp(&(&y.dag_id, &y.task_id)));
@@ -3106,6 +3341,21 @@ async fn cmd_backfill(
     println!("Executing partitions...");
     println!();
 
+    // Open the event store once for the whole backfill; each partition's
+    // scheduler shares it so runs are recorded for `conduit replay`.
+    let backfill_events_dir = resolve_state_dir(dags_path).join("events");
+    let backfill_event_store = match conduit_state::EventStore::open(&backfill_events_dir) {
+        Ok(store) => Some(std::sync::Arc::new(store)),
+        Err(e) => {
+            tracing::warn!(
+                path = %backfill_events_dir.display(),
+                error = %e,
+                "Event store unavailable; backfill runs will not be recorded for replay"
+            );
+            None
+        }
+    };
+
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let skipped = 0usize;
@@ -3130,8 +3380,11 @@ async fn cmd_backfill(
         let mut dag_map = HashMap::new();
         dag_map.insert(dag_id.to_string(), dag.clone());
 
-        let pools = PoolManager::new(vec![]);
-        let scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map)?;
+        let pools = PoolManager::new(load_pools(dags_path));
+        let mut scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map)?;
+        if let Some(store) = &backfill_event_store {
+            scheduler = scheduler.with_event_store(std::sync::Arc::clone(store));
+        }
 
         let run_id = format!("bf_{}_{}", dag_id, partition.partition_key);
         event_tx.send(SchedulerEvent::DagRunRequested {

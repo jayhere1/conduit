@@ -13,6 +13,8 @@ fn make_bash_task(id: &str, command: &str) -> Task {
         dependencies: vec![],
         retries: 0,
         retry_delay: None,
+        retry_backoff: None,
+        source_hash: None,
         timeout: None,
         trigger_rule: TriggerRule::AllSuccess,
         pool: None,

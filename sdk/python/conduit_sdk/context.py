@@ -2,8 +2,8 @@
 Task execution context — runtime information available to tasks.
 
 When Conduit's executor runs a task, it provides context via environment
-variables and stdin JSON. This module reads that context and exposes it
-as a clean Python API.
+variables (including upstream XCom as JSON in CONDUIT_XCOM_JSON). This
+module reads that context and exposes it as a clean Python API.
 
 Environment variables set by the executor:
     CONDUIT_DAG_ID        - The current DAG ID
@@ -96,7 +96,7 @@ def get_context() -> TaskContext:
         except ValueError:
             pass
 
-    # Read upstream XCom values from stdin (injected by executor)
+    # Read upstream XCom values injected by the executor via environment
     upstream_xcom = _read_upstream_xcom()
 
     return TaskContext(
@@ -112,10 +112,9 @@ def get_context() -> TaskContext:
 
 def _read_upstream_xcom() -> dict[str, Any]:
     """
-    Read upstream XCom values from stdin.
-
-    The executor writes a JSON object to stdin before the task starts:
-    {"extract_orders.return_value": [...], "extract_orders.row_count": 1000}
+    Read upstream XCom values from the CONDUIT_XCOM_JSON environment
+    variable, which the executor sets to a JSON object before the task
+    starts: {"extract_orders.return_value": [...], "extract_orders.row_count": 1000}
     """
     xcom_json = os.environ.get("CONDUIT_XCOM_JSON")
     if xcom_json:

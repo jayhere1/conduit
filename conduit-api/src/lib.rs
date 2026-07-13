@@ -19,7 +19,7 @@ pub mod routes;
 pub mod state;
 pub mod websocket;
 
-pub use state::AppState;
+pub use state::{AppState, DagRunInfo};
 
 use std::net::SocketAddr;
 use std::sync::Arc;

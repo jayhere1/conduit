@@ -3,7 +3,7 @@ name = "conduit-executor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Task runtime: process isolation, resource limits, stdin/stdout protocol"
+description = "Task runtime: process isolation, timeouts, stdout protocol with env/file XCom"
 
 [dependencies]
 conduit-common = { path = "../conduit-common" }

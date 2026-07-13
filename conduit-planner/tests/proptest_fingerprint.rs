@@ -26,6 +26,8 @@ fn make_task(id: &str, deps: Vec<&str>, command: &str) -> (String, Task) {
                 .collect(),
             retries: 0,
             retry_delay: None,
+            retry_backoff: None,
+            source_hash: None,
             pool: None,
             timeout: None,
             priority: 0,

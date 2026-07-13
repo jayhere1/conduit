@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// A content-addressable fingerprint (SHA-256 hex string).
+/// A content-addressable fingerprint (64-bit SipHash of content, config,
+/// and upstream fingerprints, rendered as a hex string).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Fingerprint(pub String);
 

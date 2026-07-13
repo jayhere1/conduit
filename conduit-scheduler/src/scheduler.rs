@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use conduit_common::dag::{Dag, DagId, TaskId, TriggerRule};
 use conduit_common::error::ConduitResult;
+use conduit_common::event::{EventKind, RunStatus as EventRunStatus};
 use conduit_common::metrics;
 use conduit_state::EventStore;
 
@@ -56,6 +57,13 @@ pub enum SchedulerEvent {
     SensorTriggered {
         sensor_id: String,
         payload: HashMap<String, String>,
+    },
+    /// A task's retry delay has elapsed; re-dispatch it. Produced internally
+    /// by the scheduler's own retry timers, never by external callers.
+    TaskRetryReady {
+        dag_id: DagId,
+        run_id: String,
+        task_id: TaskId,
     },
     /// Graceful shutdown signal.
     Shutdown,
@@ -153,13 +161,21 @@ pub enum TaskState {
 pub struct Scheduler {
     event_rx: mpsc::UnboundedReceiver<SchedulerEvent>,
     command_tx: mpsc::UnboundedSender<SchedulerCommand>,
+    /// Internal wake channel for the scheduler's own timers (retry delays).
+    /// Kept separate from `event_rx` so retry wakeups work even when the
+    /// external event sender has been cloned/dropped by the embedding app.
+    self_tx: mpsc::UnboundedSender<SchedulerEvent>,
+    self_rx: mpsc::UnboundedReceiver<SchedulerEvent>,
     dag_runs: HashMap<String, DagRunState>,
-    #[allow(dead_code)]
     pools: PoolManager,
     plans: HashMap<DagId, Dag>,
     cron_schedules: HashMap<DagId, CronSchedule>,
     /// Optional persistent event store for catchup queries.
     event_store: Option<Arc<EventStore>>,
+    /// Last minute (unix_ts / 60) each DAG was cron-fired. Five-field cron
+    /// has minute resolution; this guard makes ticks idempotent within a
+    /// minute so the tick source's frequency can't create duplicate runs.
+    last_cron_fire: HashMap<DagId, i64>,
     /// Alert hooks fired on every non-success DAG-run completion. Each hook
     /// is spawned on the tokio runtime so a slow notifier (PagerDuty, Slack)
     /// can't stall the scheduler event loop. Empty by default.
@@ -193,14 +209,19 @@ impl Scheduler {
             }
         }
 
+        let (self_tx, self_rx) = mpsc::unbounded_channel();
+
         Ok(Self {
             event_rx,
             command_tx,
+            self_tx,
+            self_rx,
             dag_runs: HashMap::new(),
             pools,
             plans,
             cron_schedules,
             event_store: None,
+            last_cron_fire: HashMap::new(),
             alert_hooks: Vec::new(),
         })
     }
@@ -259,6 +280,55 @@ impl Scheduler {
             }
         }
         self
+    }
+
+    /// Release the pool slot a task held, if it draws from a pool.
+    /// Returns true when a slot was actually freed.
+    fn release_pool_slot(&mut self, dag_id: &DagId, run_key: &str, task_id: &TaskId) -> bool {
+        let Some(pool) = self
+            .plans
+            .get(dag_id)
+            .and_then(|d| d.tasks.get(task_id))
+            .and_then(|t| t.pool.clone())
+        else {
+            return false;
+        };
+        self.pools
+            .release(&pool, &format!("{}/{}", run_key, task_id));
+        true
+    }
+
+    /// Re-evaluate every active run and dispatch newly-eligible tasks.
+    /// Called after a pool slot frees up: the waiter may live in a
+    /// different run than the task that released the slot.
+    fn dispatch_waiting_runs(&mut self) {
+        let runs: Vec<(DagId, String)> = self
+            .dag_runs
+            .values()
+            .map(|rs| (rs.dag_id.clone(), format!("{}/{}", rs.dag_id, rs.run_id)))
+            .collect();
+        for (dag_id, run_key) in runs {
+            let ready = {
+                let (Some(dag), Some(rs)) =
+                    (self.plans.get(&dag_id), self.dag_runs.get(&run_key))
+                else {
+                    continue;
+                };
+                self.evaluate_ready_tasks(dag, rs)
+            };
+            self.transition_and_dispatch(&dag_id, &run_key, ready);
+        }
+    }
+
+    /// Best-effort append to the attached event store. Persistence powers
+    /// `conduit replay` and post-hoc debugging; it must never stall or fail
+    /// scheduling, so errors are logged and swallowed.
+    fn persist_event(&self, kind: EventKind) {
+        if let Some(store) = &self.event_store {
+            if let Err(e) = store.append(kind) {
+                warn!(error = %e, "Failed to persist scheduler event");
+            }
+        }
     }
 
     /// Send a command to the executor, logging and recording metrics on failure.
@@ -353,7 +423,21 @@ impl Scheduler {
         // Perform catchup on startup before processing new events
         self.perform_catchup();
 
-        while let Some(event) = self.event_rx.recv().await {
+        loop {
+            // Merge external events with the scheduler's own timer wakeups.
+            // `self_rx` can never yield None while `self` holds `self_tx`;
+            // a closed external channel ends the loop like it always did.
+            let event = tokio::select! {
+                ev = self.event_rx.recv() => match ev {
+                    Some(e) => e,
+                    None => break,
+                },
+                ev = self.self_rx.recv() => match ev {
+                    Some(e) => e,
+                    None => break,
+                },
+            };
+
             // Record scheduler event metric
             if let Some(m) = metrics::try_global() {
                 let event_type = match &event {
@@ -362,6 +446,7 @@ impl Scheduler {
                     SchedulerEvent::TaskFailed { .. } => "task_failed",
                     SchedulerEvent::CronTick { .. } => "cron_tick",
                     SchedulerEvent::SensorTriggered { .. } => "sensor_triggered",
+                    SchedulerEvent::TaskRetryReady { .. } => "task_retry_ready",
                     SchedulerEvent::Shutdown => "shutdown",
                 };
                 m.scheduler_events_total
@@ -412,6 +497,13 @@ impl Scheduler {
                 }
                 SchedulerEvent::SensorTriggered { sensor_id, payload } => {
                     self.handle_sensor_triggered(&sensor_id, payload);
+                }
+                SchedulerEvent::TaskRetryReady {
+                    dag_id,
+                    run_id,
+                    task_id,
+                } => {
+                    self.handle_task_retry_ready(&dag_id, &run_id, &task_id);
                 }
                 SchedulerEvent::Shutdown => {
                     info!("Scheduler shutdown requested");
@@ -466,6 +558,28 @@ impl Scheduler {
             "DAG run created"
         );
 
+        // Callers can pass environment/triggered_by via run config.
+        let (environment, triggered_by) = {
+            let config = &self.dag_runs[&run_key].config;
+            (
+                config
+                    .get("environment")
+                    .cloned()
+                    .unwrap_or_else(|| "production".to_string()),
+                config
+                    .get("triggered_by")
+                    .cloned()
+                    .unwrap_or_else(|| "scheduler".to_string()),
+            )
+        };
+        self.persist_event(EventKind::DagRunCreated {
+            dag_id: dag_id.clone(),
+            run_id: run_id.to_string(),
+            logical_date,
+            environment,
+            triggered_by,
+        });
+
         // Record metrics
         if let Some(m) = metrics::try_global() {
             m.dag_runs_total
@@ -498,6 +612,7 @@ impl Scheduler {
         duration_ms: u64,
     ) {
         let run_key = format!("{}/{}", dag_id, run_id);
+        let snapshot_id_for_event = snapshot_id.clone();
 
         // Mutate first, then drop the mutable borrow. Drop late or duplicate
         // completion events for already-terminal tasks instead of overwriting
@@ -542,6 +657,16 @@ impl Scheduler {
             "Task completed"
         );
 
+        self.persist_event(EventKind::TaskCompleted {
+            dag_id: dag_id.clone(),
+            run_id: run_id.to_string(),
+            task_id: task_id.clone(),
+            duration_ms,
+            snapshot_id: snapshot_id_for_event,
+        });
+
+        let released_pool_slot = self.release_pool_slot(dag_id, &run_key, task_id);
+
         // Record metrics
         if let Some(m) = metrics::try_global() {
             m.record_task_event(dag_id, task_id, "completed");
@@ -566,6 +691,11 @@ impl Scheduler {
 
         self.transition_and_dispatch(dag_id, &run_key, ready);
 
+        // A freed pool slot may unblock tasks in other runs.
+        if released_pool_slot {
+            self.dispatch_waiting_runs();
+        }
+
         // Re-borrow to check completion after dispatch state mutations.
         if let (Some(dag), Some(rs)) = (self.plans.get(dag_id), self.dag_runs.get(&run_key)) {
             self.check_dag_run_complete(dag, rs);
@@ -588,7 +718,11 @@ impl Scheduler {
             Some(dag) => match dag.tasks.get(task_id) {
                 Some(task) => {
                     if attempt < task.retries {
-                        (true, parse_duration(&task.retry_delay))
+                        let base = parse_duration(&task.retry_delay);
+                        (
+                            true,
+                            retry_delay_for_attempt(base, attempt, task.retry_backoff),
+                        )
                     } else {
                         (false, Duration::zero())
                     }
@@ -634,6 +768,12 @@ impl Scheduler {
             }
         }
 
+        // The failed attempt no longer occupies its pool slot. A retry will
+        // re-acquire when it is re-dispatched.
+        if self.release_pool_slot(dag_id, &run_key, task_id) {
+            self.dispatch_waiting_runs();
+        }
+
         if should_retry {
             debug!(
                 dag_id = %dag_id,
@@ -642,6 +782,14 @@ impl Scheduler {
                 attempt = %attempt,
                 "Task will be retried"
             );
+
+            self.persist_event(EventKind::TaskRetrying {
+                dag_id: dag_id.clone(),
+                run_id: run_id.to_string(),
+                task_id: task_id.clone(),
+                attempt: attempt + 1,
+                next_retry_at: Utc::now() + retry_delay,
+            });
 
             if let Some(m) = metrics::try_global() {
                 m.record_task_event(dag_id, task_id, "retried");
@@ -653,6 +801,23 @@ impl Scheduler {
                 task_id: task_id.clone(),
                 delay: retry_delay,
             });
+
+            // Arm the retry timer: once the delay elapses, wake the event
+            // loop via the internal channel and re-dispatch the task. The
+            // RetryTask command above is a notification for executors/UIs;
+            // this timer is what actually makes the retry happen.
+            let self_tx = self.self_tx.clone();
+            let (wake_dag, wake_run, wake_task) =
+                (dag_id.clone(), run_id.to_string(), task_id.clone());
+            let sleep_for = retry_delay.to_std().unwrap_or_default();
+            tokio::spawn(async move {
+                tokio::time::sleep(sleep_for).await;
+                let _ = self_tx.send(SchedulerEvent::TaskRetryReady {
+                    dag_id: wake_dag,
+                    run_id: wake_run,
+                    task_id: wake_task,
+                });
+            });
         } else {
             warn!(
                 dag_id = %dag_id,
@@ -661,6 +826,15 @@ impl Scheduler {
                 error = %error,
                 "Task failed with no retries remaining"
             );
+
+            self.persist_event(EventKind::TaskFailed {
+                dag_id: dag_id.clone(),
+                run_id: run_id.to_string(),
+                task_id: task_id.clone(),
+                error: error.clone(),
+                traceback: None,
+                attempt,
+            });
 
             if let Some(m) = metrics::try_global() {
                 m.record_task_event(dag_id, task_id, "failed");
@@ -674,17 +848,105 @@ impl Scheduler {
         }
     }
 
+    /// Re-dispatch a task whose retry delay has elapsed.
+    ///
+    /// Idempotent: only acts if the task is still `Retrying` — a duplicate
+    /// or stale wakeup (run finished, task re-resolved some other way) is
+    /// silently ignored.
+    fn handle_task_retry_ready(&mut self, dag_id: &DagId, run_id: &str, task_id: &TaskId) {
+        let run_key = format!("{}/{}", dag_id, run_id);
+
+        let attempt = match self
+            .dag_runs
+            .get(&run_key)
+            .and_then(|rs| rs.task_states.get(task_id))
+        {
+            Some(TaskState::Retrying { attempt, .. }) => *attempt,
+            _ => {
+                debug!(
+                    dag_id = %dag_id,
+                    run_id = %run_id,
+                    task_id = %task_id,
+                    "Ignoring stale retry wakeup — task no longer Retrying"
+                );
+                return;
+            }
+        };
+
+        // Pooled retries re-acquire their slot; if the pool is full, check
+        // again shortly rather than stealing or deadlocking.
+        let pool = self
+            .plans
+            .get(dag_id)
+            .and_then(|d| d.tasks.get(task_id))
+            .and_then(|t| t.pool.clone());
+        if let Some(p) = &pool {
+            if !self.pools.acquire(p, &format!("{}/{}", run_key, task_id)) {
+                debug!(
+                    dag_id = %dag_id,
+                    task_id = %task_id,
+                    pool = %p,
+                    "Pool full at retry time — re-checking in 1s"
+                );
+                let self_tx = self.self_tx.clone();
+                let (wake_dag, wake_run, wake_task) =
+                    (dag_id.clone(), run_id.to_string(), task_id.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let _ = self_tx.send(SchedulerEvent::TaskRetryReady {
+                        dag_id: wake_dag,
+                        run_id: wake_run,
+                        task_id: wake_task,
+                    });
+                });
+                return;
+            }
+        }
+
+        if let Some(rs) = self.dag_runs.get_mut(&run_key) {
+            rs.task_states.insert(task_id.clone(), TaskState::Queued);
+        }
+
+        info!(
+            dag_id = %dag_id,
+            run_id = %run_id,
+            task_id = %task_id,
+            attempt = %attempt,
+            "Retry delay elapsed — re-dispatching task"
+        );
+
+        if let Some(m) = metrics::try_global() {
+            m.record_task_event(dag_id, task_id, "dispatched");
+            m.active_tasks.inc();
+        }
+
+        self.send_command(SchedulerCommand::DispatchTask {
+            dag_id: dag_id.clone(),
+            run_id: run_id.to_string(),
+            task_id: task_id.clone(),
+            attempt,
+        });
+    }
+
     /// Handle periodic cron tick.
     fn handle_cron_tick(&mut self, timestamp: DateTime<Utc>) {
-        // Collect due DAGs first to avoid borrowing self immutably while mutating
+        let minute = timestamp.timestamp() / 60;
+
+        // Collect due DAGs first to avoid borrowing self immutably while
+        // mutating. Skip DAGs already fired this minute — `is_due` matches
+        // the whole minute, so ticks arriving more frequently than 1/min
+        // must not create duplicate runs.
         let due_dags: Vec<DagId> = self
             .cron_schedules
             .iter()
-            .filter(|(_, cron)| cron.is_due(timestamp))
+            .filter(|(dag_id, cron)| {
+                cron.is_due(timestamp) && self.last_cron_fire.get(*dag_id) != Some(&minute)
+            })
             .map(|(dag_id, _)| dag_id.clone())
             .collect();
 
         for dag_id in due_dags {
+            self.last_cron_fire.insert(dag_id.clone(), minute);
             let run_id = format!("{}_{}", dag_id, timestamp.timestamp());
 
             info!(
@@ -777,6 +1039,18 @@ impl Scheduler {
                 status = ?status,
                 "DAG run completed"
             );
+
+            self.persist_event(EventKind::DagRunCompleted {
+                dag_id: dag.id.clone(),
+                run_id: run_state.run_id.clone(),
+                status: match status {
+                    RunStatus::Success => EventRunStatus::Success,
+                    RunStatus::Failed => EventRunStatus::Failed,
+                    RunStatus::Cancelled => EventRunStatus::Cancelled,
+                },
+                duration_ms: (Utc::now() - run_state.started_at).num_milliseconds().max(0)
+                    as u64,
+            });
 
             // Record metrics
             if let Some(m) = metrics::try_global() {
@@ -914,6 +1188,20 @@ impl Scheduler {
 
         // Send commands after releasing the mutable borrow.
         for cmd in commands_to_send {
+            if let SchedulerCommand::SkipTask {
+                dag_id,
+                run_id,
+                task_id,
+                reason,
+            } = &cmd
+            {
+                self.persist_event(EventKind::TaskSkipped {
+                    dag_id: dag_id.clone(),
+                    run_id: run_id.clone(),
+                    task_id: task_id.clone(),
+                    reason: reason.clone(),
+                });
+            }
             self.send_command(cmd);
         }
 
@@ -941,21 +1229,67 @@ impl Scheduler {
             return;
         }
 
+        // Pool gate: a task in a full pool stays Pending and is re-elected
+        // on a later event (a pooled task completing releases its slot and
+        // re-evaluates all runs).
+        let mut dispatchable = Vec::new();
+        for task_id in ready {
+            let pool = self
+                .plans
+                .get(dag_id)
+                .and_then(|d| d.tasks.get(&task_id))
+                .and_then(|t| t.pool.clone());
+            let acquired = match &pool {
+                Some(p) => self
+                    .pools
+                    .acquire(p, &format!("{}/{}", run_key, task_id)),
+                None => true,
+            };
+            if acquired {
+                dispatchable.push(task_id);
+            } else {
+                debug!(
+                    dag_id = %dag_id,
+                    task_id = %task_id,
+                    pool = %pool.as_deref().unwrap_or(""),
+                    "Pool full — task waits for a slot"
+                );
+            }
+        }
+        if dispatchable.is_empty() {
+            return;
+        }
+
         let run_id = {
             let Some(rs) = self.dag_runs.get_mut(run_key) else {
                 return;
             };
-            for task_id in &ready {
+            for task_id in &dispatchable {
                 rs.task_states.insert(task_id.clone(), TaskState::Queued);
             }
             rs.run_id.clone()
         };
 
-        for task_id in ready {
+        for task_id in dispatchable {
             if let Some(m) = metrics::try_global() {
                 m.record_task_event(dag_id, &task_id, "dispatched");
                 m.active_tasks.inc();
             }
+
+            let (priority, pool) = self
+                .plans
+                .get(dag_id)
+                .and_then(|d| d.tasks.get(&task_id))
+                .map(|t| (t.priority, t.pool.clone()))
+                .unwrap_or((0, None));
+            self.persist_event(EventKind::TaskQueued {
+                dag_id: dag_id.clone(),
+                run_id: run_id.clone(),
+                task_id: task_id.clone(),
+                priority,
+                pool,
+                snapshot_fingerprint: None,
+            });
 
             self.send_command(SchedulerCommand::DispatchTask {
                 dag_id: dag_id.clone(),
@@ -972,6 +1306,26 @@ impl Scheduler {
             );
         }
     }
+}
+
+/// Compute the retry delay for a given attempt.
+///
+/// Without a backoff multiplier (or with a multiplier <= 1.0) the delay is
+/// fixed at `base` for every attempt. With a multiplier > 1.0 the delay
+/// grows exponentially: `base * backoff^attempt`, capped at one day so a
+/// large attempt count can never overflow or park a task for years.
+fn retry_delay_for_attempt(base: Duration, attempt: u32, backoff: Option<f64>) -> Duration {
+    const MAX_DELAY_SECS: f64 = 86_400.0; // 1 day
+
+    let factor = match backoff {
+        Some(b) if b > 1.0 => b,
+        _ => return base,
+    };
+
+    let base_secs = base.num_milliseconds() as f64 / 1000.0;
+    let scaled = base_secs * factor.powi(attempt.min(1_000) as i32);
+    let capped = scaled.min(MAX_DELAY_SECS);
+    Duration::milliseconds((capped * 1000.0) as i64)
 }
 
 /// Parse a duration string (e.g., "5m", "30s", "1h").
@@ -1020,5 +1374,46 @@ mod tests {
     #[test]
     fn test_parse_duration_default() {
         assert_eq!(parse_duration(&None), Duration::minutes(5));
+    }
+
+    #[test]
+    fn retry_delay_without_backoff_is_fixed_across_attempts() {
+        let base = Duration::seconds(10);
+        assert_eq!(retry_delay_for_attempt(base, 0, None), base);
+        assert_eq!(retry_delay_for_attempt(base, 3, None), base);
+    }
+
+    #[test]
+    fn retry_delay_with_backoff_grows_exponentially() {
+        let base = Duration::seconds(10);
+        assert_eq!(
+            retry_delay_for_attempt(base, 0, Some(2.0)),
+            Duration::seconds(10)
+        );
+        assert_eq!(
+            retry_delay_for_attempt(base, 1, Some(2.0)),
+            Duration::seconds(20)
+        );
+        assert_eq!(
+            retry_delay_for_attempt(base, 2, Some(2.0)),
+            Duration::seconds(40)
+        );
+    }
+
+    #[test]
+    fn retry_delay_with_backoff_is_capped() {
+        // A huge attempt count must not overflow — capped at 1 day.
+        let base = Duration::seconds(60);
+        assert_eq!(
+            retry_delay_for_attempt(base, 1000, Some(10.0)),
+            Duration::days(1)
+        );
+    }
+
+    #[test]
+    fn retry_delay_backoff_of_one_or_less_behaves_as_fixed() {
+        let base = Duration::seconds(10);
+        assert_eq!(retry_delay_for_attempt(base, 5, Some(1.0)), base);
+        assert_eq!(retry_delay_for_attempt(base, 5, Some(0.5)), base);
     }
 }

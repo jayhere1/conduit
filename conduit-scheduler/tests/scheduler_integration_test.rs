@@ -39,6 +39,8 @@ fn make_task(
             .collect(),
         retries,
         retry_delay: retry_delay.map(|s| s.to_string()),
+        retry_backoff: None,
+        source_hash: None,
         pool: None,
         timeout: None,
         priority: 0,
@@ -658,4 +660,536 @@ async fn alert_hook_does_not_fire_on_success() {
         hook.calls().is_empty(),
         "hook must not fire for a successful run"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Retry re-dispatch (the scheduler must act on its own retry decision)
+// ---------------------------------------------------------------------------
+
+/// Await the next command, panicking after `secs` seconds.
+async fn next_command(
+    rx: &mut mpsc::UnboundedReceiver<SchedulerCommand>,
+    secs: u64,
+    context: &str,
+) -> SchedulerCommand {
+    tokio::time::timeout(std::time::Duration::from_secs(secs), rx.recv())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for command: {}", context))
+        .unwrap_or_else(|| panic!("command channel closed while waiting for: {}", context))
+}
+
+/// A failing task with retries must be re-dispatched after its retry delay,
+/// and the run must complete once the retried attempt succeeds.
+#[tokio::test]
+async fn failed_task_with_retries_is_redispatched_and_run_completes() {
+    let task_a = make_task("A", vec![], TriggerRule::AllSuccess, 1, Some("1s"));
+    let dag = make_dag("dag1", vec![task_a], vec!["A"]);
+
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (tx, mut rx, scheduler_fut) = create_test_scheduler(plans);
+    let driver = tokio::spawn(scheduler_fut);
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+
+    // Initial dispatch, attempt 0.
+    let cmd = next_command(&mut rx, 5, "initial DispatchTask for A").await;
+    assert!(
+        matches!(&cmd, SchedulerCommand::DispatchTask { task_id, attempt: 0, .. } if task_id == "A"),
+        "expected initial DispatchTask for A attempt 0, got: {:?}",
+        cmd
+    );
+
+    // The task fails on attempt 0 — one retry remains.
+    tx.send(SchedulerEvent::TaskFailed {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: "A".to_string(),
+        error: "boom".to_string(),
+        attempt: 0,
+    })
+    .unwrap();
+
+    // The scheduler announces the retry...
+    let cmd = next_command(&mut rx, 5, "RetryTask notification for A").await;
+    assert!(
+        matches!(&cmd, SchedulerCommand::RetryTask { task_id, .. } if task_id == "A"),
+        "expected RetryTask for A, got: {:?}",
+        cmd
+    );
+
+    // ...and after the delay elapses it must RE-DISPATCH the task itself.
+    let cmd = next_command(&mut rx, 5, "re-dispatch of A after retry delay").await;
+    assert!(
+        matches!(&cmd, SchedulerCommand::DispatchTask { task_id, attempt: 1, .. } if task_id == "A"),
+        "expected re-dispatched DispatchTask for A attempt 1, got: {:?}",
+        cmd
+    );
+
+    // The retried attempt succeeds — the run must complete Success.
+    tx.send(SchedulerEvent::TaskCompleted {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: "A".to_string(),
+        snapshot_id: None,
+        duration_ms: 5,
+    })
+    .unwrap();
+
+    let cmd = next_command(&mut rx, 5, "CompleteDagRun after retried success").await;
+    assert!(
+        matches!(
+            &cmd,
+            SchedulerCommand::CompleteDagRun {
+                status: conduit_scheduler::RunStatus::Success,
+                ..
+            }
+        ),
+        "expected CompleteDagRun Success, got: {:?}",
+        cmd
+    );
+
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    let _ = driver.await;
+}
+
+/// When retries are exhausted the run must complete Failed (no hang).
+#[tokio::test]
+async fn exhausted_retries_complete_the_run_as_failed() {
+    let task_a = make_task("A", vec![], TriggerRule::AllSuccess, 1, Some("1s"));
+    let dag = make_dag("dag1", vec![task_a], vec!["A"]);
+
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (tx, mut rx, scheduler_fut) = create_test_scheduler(plans);
+    let driver = tokio::spawn(scheduler_fut);
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+
+    let _ = next_command(&mut rx, 5, "initial DispatchTask for A").await;
+    tx.send(SchedulerEvent::TaskFailed {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: "A".to_string(),
+        error: "boom".to_string(),
+        attempt: 0,
+    })
+    .unwrap();
+
+    let _ = next_command(&mut rx, 5, "RetryTask notification").await;
+    let cmd = next_command(&mut rx, 5, "re-dispatch attempt 1").await;
+    assert!(
+        matches!(&cmd, SchedulerCommand::DispatchTask { attempt: 1, .. }),
+        "expected re-dispatch attempt 1, got: {:?}",
+        cmd
+    );
+
+    // Fail the retried attempt too — retries are now exhausted.
+    tx.send(SchedulerEvent::TaskFailed {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: "A".to_string(),
+        error: "boom again".to_string(),
+        attempt: 1,
+    })
+    .unwrap();
+
+    let cmd = next_command(&mut rx, 5, "CompleteDagRun Failed").await;
+    assert!(
+        matches!(
+            &cmd,
+            SchedulerCommand::CompleteDagRun {
+                status: conduit_scheduler::RunStatus::Failed,
+                ..
+            }
+        ),
+        "expected CompleteDagRun Failed after exhausted retries, got: {:?}",
+        cmd
+    );
+
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    let _ = driver.await;
+}
+
+/// With a retry_backoff multiplier, each successive retry's announced delay
+/// must grow exponentially (1s, then 2s for backoff=2.0).
+#[tokio::test]
+async fn retry_backoff_multiplier_grows_the_delay() {
+    let mut task_a = make_task("A", vec![], TriggerRule::AllSuccess, 2, Some("1s"));
+    task_a.retry_backoff = Some(2.0);
+    let dag = make_dag("dag1", vec![task_a], vec!["A"]);
+
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (tx, mut rx, scheduler_fut) = create_test_scheduler(plans);
+    let driver = tokio::spawn(scheduler_fut);
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+
+    let _ = next_command(&mut rx, 5, "initial DispatchTask").await;
+
+    let fail = |attempt: u32| SchedulerEvent::TaskFailed {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: "A".to_string(),
+        error: "boom".to_string(),
+        attempt,
+    };
+
+    // Attempt 0 fails → first retry delay = base = 1s.
+    tx.send(fail(0)).unwrap();
+    let cmd = next_command(&mut rx, 5, "first RetryTask").await;
+    match &cmd {
+        SchedulerCommand::RetryTask { delay, .. } => {
+            assert_eq!(delay.num_seconds(), 1, "first retry delay must be 1s (base)")
+        }
+        other => panic!("expected RetryTask, got {:?}", other),
+    }
+    let _ = next_command(&mut rx, 5, "re-dispatch attempt 1").await;
+
+    // Attempt 1 fails → second retry delay = base * 2.0 = 2s.
+    tx.send(fail(1)).unwrap();
+    let cmd = next_command(&mut rx, 5, "second RetryTask").await;
+    match &cmd {
+        SchedulerCommand::RetryTask { delay, .. } => {
+            assert_eq!(
+                delay.num_seconds(),
+                2,
+                "second retry delay must double with backoff=2.0"
+            )
+        }
+        other => panic!("expected RetryTask, got {:?}", other),
+    }
+
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    let _ = driver.await;
+}
+
+// ---------------------------------------------------------------------------
+// Event persistence (event sourcing must actually record run history)
+// ---------------------------------------------------------------------------
+
+/// With an event store attached, a completed run must leave a persistent
+/// TaskCompleted + DagRunCompleted trail that `conduit replay` can fold.
+#[tokio::test]
+async fn scheduler_persists_run_lifecycle_events() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(conduit_state::EventStore::open(tmp.path()).unwrap());
+
+    let task_a = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    let dag = make_dag("dag1", vec![task_a], vec!["A"]);
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+    let scheduler = Scheduler::new(event_rx, command_tx, PoolManager::new(vec![]), plans)
+        .unwrap()
+        .with_event_store(Arc::clone(&store));
+    let driver = tokio::spawn(async move {
+        let _ = scheduler.run().await;
+    });
+
+    event_tx
+        .send(SchedulerEvent::DagRunRequested {
+            dag_id: "dag1".to_string(),
+            run_id: "run1".to_string(),
+            logical_date: Utc::now(),
+            config: HashMap::new(),
+        })
+        .unwrap();
+
+    let _ = next_command(&mut command_rx, 5, "DispatchTask A").await;
+    event_tx
+        .send(SchedulerEvent::TaskCompleted {
+            dag_id: "dag1".to_string(),
+            run_id: "run1".to_string(),
+            task_id: "A".to_string(),
+            snapshot_id: None,
+            duration_ms: 7,
+        })
+        .unwrap();
+
+    let _ = next_command(&mut command_rx, 5, "CompleteDagRun").await;
+    event_tx.send(SchedulerEvent::Shutdown).unwrap();
+    let _ = driver.await;
+
+    let events = store.range(0, store.current_sequence()).unwrap();
+    use conduit_common::event::EventKind;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::DagRunCreated { dag_id, run_id, .. }
+                if dag_id == "dag1" && run_id == "run1"
+        )),
+        "expected a persisted DagRunCreated event, got: {:?}",
+        events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::TaskCompleted { task_id, .. } if task_id == "A"
+        )),
+        "expected a persisted TaskCompleted event"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::DagRunCompleted {
+                status: conduit_common::event::RunStatus::Success,
+                ..
+            }
+        )),
+        "expected a persisted DagRunCompleted Success event"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cron scheduling
+// ---------------------------------------------------------------------------
+
+/// Two cron ticks inside the same minute must create exactly one run for a
+/// `* * * * *` DAG; a tick in the next minute creates the second run.
+#[tokio::test]
+async fn cron_tick_fires_due_dag_once_per_minute() {
+    let task_a = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    let mut dag = make_dag("cron_dag", vec![task_a], vec!["A"]);
+    dag.schedule = Some("* * * * *".to_string());
+
+    let mut plans = HashMap::new();
+    plans.insert("cron_dag".to_string(), dag);
+
+    let (tx, mut rx, scheduler_fut) = create_test_scheduler(plans);
+    let driver = tokio::spawn(scheduler_fut);
+
+    let t0 = Utc.with_ymd_and_hms(2026, 7, 13, 10, 30, 5).unwrap();
+    let t0_later = Utc.with_ymd_and_hms(2026, 7, 13, 10, 30, 45).unwrap(); // same minute
+    let t1 = Utc.with_ymd_and_hms(2026, 7, 13, 10, 31, 5).unwrap(); // next minute
+
+    tx.send(SchedulerEvent::CronTick { timestamp: t0 }).unwrap();
+    tx.send(SchedulerEvent::CronTick { timestamp: t0_later })
+        .unwrap();
+    tx.send(SchedulerEvent::CronTick { timestamp: t1 }).unwrap();
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    let _ = driver.await;
+
+    let cmds = drain_commands(&mut rx);
+    let dispatches = cmds
+        .iter()
+        .filter(|c| matches!(c, SchedulerCommand::DispatchTask { dag_id, .. } if dag_id == "cron_dag"))
+        .count();
+    assert_eq!(
+        dispatches, 2,
+        "expected exactly 2 dispatches (one per due minute, deduped within a minute), got {} in {:?}",
+        dispatches, cmds
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Resource pool enforcement
+// ---------------------------------------------------------------------------
+
+fn create_pool_scheduler(
+    plans: HashMap<String, Dag>,
+    pools: Vec<Pool>,
+) -> (
+    mpsc::UnboundedSender<SchedulerEvent>,
+    mpsc::UnboundedReceiver<SchedulerCommand>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let scheduler =
+        Scheduler::new(event_rx, command_tx, PoolManager::new(pools), plans).unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = scheduler.run().await;
+    });
+    (event_tx, command_rx, handle)
+}
+
+/// Two independent tasks sharing a 1-slot pool must execute serially:
+/// only one dispatches up front; the second dispatches after the first
+/// completes and releases the slot.
+#[tokio::test]
+async fn one_slot_pool_serializes_independent_tasks() {
+    let mut task_a = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    let mut task_b = make_task("B", vec![], TriggerRule::AllSuccess, 0, None);
+    task_a.pool = Some("solo".to_string());
+    task_b.pool = Some("solo".to_string());
+    let dag = make_dag("dag1", vec![task_a, task_b], vec!["A", "B"]);
+
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (tx, mut rx, driver) = create_pool_scheduler(
+        plans,
+        vec![Pool {
+            name: "solo".to_string(),
+            slots: 1,
+            description: None,
+        }],
+    );
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+
+    // Exactly one task may dispatch while the pool has one slot.
+    let first = next_command(&mut rx, 5, "first pooled dispatch").await;
+    let first_task = match &first {
+        SchedulerCommand::DispatchTask { task_id, .. } => task_id.clone(),
+        other => panic!("expected DispatchTask, got {:?}", other),
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "second task must NOT dispatch while the 1-slot pool is occupied"
+    );
+
+    // Completing the first frees the slot; the second must now dispatch.
+    tx.send(SchedulerEvent::TaskCompleted {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        task_id: first_task.clone(),
+        snapshot_id: None,
+        duration_ms: 1,
+    })
+    .unwrap();
+
+    let second = next_command(&mut rx, 5, "second pooled dispatch after release").await;
+    match &second {
+        SchedulerCommand::DispatchTask { task_id, .. } => {
+            assert_ne!(task_id, &first_task, "the other task must dispatch next")
+        }
+        other => panic!("expected DispatchTask, got {:?}", other),
+    }
+
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    let _ = driver.await;
+}
+
+/// Pool slots are shared across runs: a waiter in run2 must wake up when
+/// run1's task releases the slot.
+#[tokio::test]
+async fn pool_release_wakes_waiters_in_other_runs() {
+    let mut task_a = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    task_a.pool = Some("solo".to_string());
+    let dag = make_dag("dag1", vec![task_a], vec!["A"]);
+
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (tx, mut rx, driver) = create_pool_scheduler(
+        plans,
+        vec![Pool {
+            name: "solo".to_string(),
+            slots: 1,
+            description: None,
+        }],
+    );
+
+    for run in ["run1", "run2"] {
+        tx.send(SchedulerEvent::DagRunRequested {
+            dag_id: "dag1".to_string(),
+            run_id: run.to_string(),
+            logical_date: Utc::now(),
+            config: HashMap::new(),
+        })
+        .unwrap();
+    }
+
+    let first = next_command(&mut rx, 5, "first cross-run dispatch").await;
+    let first_run = match &first {
+        SchedulerCommand::DispatchTask { run_id, .. } => run_id.clone(),
+        other => panic!("expected DispatchTask, got {:?}", other),
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "run2's task must wait for the pool slot"
+    );
+
+    tx.send(SchedulerEvent::TaskCompleted {
+        dag_id: "dag1".to_string(),
+        run_id: first_run.clone(),
+        task_id: "A".to_string(),
+        snapshot_id: None,
+        duration_ms: 1,
+    })
+    .unwrap();
+
+    // run1 completes (CompleteDagRun) and run2's task dispatches.
+    let mut saw_second_dispatch = false;
+    for _ in 0..3 {
+        let cmd = next_command(&mut rx, 5, "commands after release").await;
+        if let SchedulerCommand::DispatchTask { run_id, .. } = &cmd {
+            assert_ne!(run_id, &first_run);
+            saw_second_dispatch = true;
+            break;
+        }
+    }
+    assert!(saw_second_dispatch, "run2's task must dispatch after release");
+
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    let _ = driver.await;
+}
+
+/// A task referencing an undefined pool must still run (unlimited, warn)
+/// rather than deadlock.
+#[tokio::test]
+async fn undefined_pool_does_not_block_dispatch() {
+    let mut task_a = make_task("A", vec![], TriggerRule::AllSuccess, 0, None);
+    task_a.pool = Some("never_defined".to_string());
+    let dag = make_dag("dag1", vec![task_a], vec!["A"]);
+
+    let mut plans = HashMap::new();
+    plans.insert("dag1".to_string(), dag);
+
+    let (tx, mut rx, driver) = create_pool_scheduler(plans, vec![]);
+
+    tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: "dag1".to_string(),
+        run_id: "run1".to_string(),
+        logical_date: Utc::now(),
+        config: HashMap::new(),
+    })
+    .unwrap();
+
+    let cmd = next_command(&mut rx, 5, "dispatch with undefined pool").await;
+    assert!(
+        matches!(&cmd, SchedulerCommand::DispatchTask { task_id, .. } if task_id == "A"),
+        "task with undefined pool must dispatch, got {:?}",
+        cmd
+    );
+
+    tx.send(SchedulerEvent::Shutdown).unwrap();
+    let _ = driver.await;
 }
