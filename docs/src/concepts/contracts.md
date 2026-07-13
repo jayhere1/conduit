@@ -288,21 +288,45 @@ Contracts: 11 checks across 3 tasks (validated during apply)
     expected metrics: accuracy, pass.model_convergence
 ```
 
-During `conduit apply`, the executor collects evidence from each task's stdout,
-then validates contracts against it. If any Error-severity contract fails,
-deployment is blocked:
+During `conduit apply`, immediately after each task executes, its evidence is
+validated against that task's contracts. A passing task prints an inline
+`[CHK ]` line; a violation prints `[CVIO]` plus the failing check(s) to
+stderr:
+
+```
+  [EXEC]  contract_ok.emit
+  [CHK ] contract_ok.emit contracts: 1/1 checks passed
+  [OK]    contract_ok.emit (5ms)
+```
+
+```
+  [EXEC]  contract_bad.emit
+  [CVIO] contract_bad.emit contracts: 0/1 checks passed
+          ! row_count:emit: 5 rows, expected at least 1000
+```
+
+If any Error-severity contract fails, the apply stops before the environment
+is updated and prints the `DeploymentValidation` summary (this is the actual
+output from `conduit apply` against a task whose `row_count` contract
+requires `min: 1000` but the task only emitted `CONDUIT::METRIC::row_count::5`):
 
 ```
 Contract Validation Summary
 ─────────────────────────────
-Contracts for 'daily_etl.extract_orders': PASSED (6/6 checks passed, 0 errors, 0 warnings)
-Contracts for 'daily_etl.build_customer_360': FAILED (2/3 checks passed, 1 errors, 0 warnings)
-  [PASS ] row_count(min=1)
-  [PASS ] unique(id)
-  [ERROR] custom(no_negative_spend): Missing evidence: metric 'pass.no_negative_spend' not emitted by task
+Contracts for 'contract_bad.emit': FAILED (0/1 checks passed, 1 errors, 0 warnings)
+  [ERROR] row_count:emit: 5 rows, expected at least 1000
 
 Result: BLOCKED — 1 errors must be fixed before deployment (0 warnings)
+
+Error: apply blocked: contract validation failed for contract_bad.emit — environment not updated
 ```
+
+The environment's snapshot pointers are left untouched — `conduit status` /
+`conduit env list` show no change, and a subsequent `conduit plan` still
+reports the task as pending execution. Warning-severity failures print the
+same way but do not block; `DeploymentValidation.can_deploy` (and
+`DeploymentPlan::can_apply`) is only `false` when at least one Error-severity
+check fails.
 
 ## API
 

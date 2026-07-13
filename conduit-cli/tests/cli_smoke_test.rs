@@ -581,6 +581,66 @@ fn cli_apply_rejects_plan_for_different_environment() {
         .stderr(predicate::str::contains("targets environment 'staging'"));
 }
 
+#[test]
+fn cli_apply_validates_contracts_and_passes() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let dag = r#"
+id: contract_ok
+tasks:
+  emit:
+    type: bash
+    command: "echo CONDUIT::METRIC::row_count::100"
+    contracts:
+      - type: row_count
+        min: 1
+"#;
+    fs::write(dags.join("contract_ok.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["apply", "production", "-y", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Contract"));
+}
+
+#[test]
+fn cli_apply_blocks_on_contract_violation() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let dag = r#"
+id: contract_bad
+tasks:
+  emit:
+    type: bash
+    command: "echo CONDUIT::METRIC::row_count::5"
+    contracts:
+      - type: row_count
+        min: 1000
+"#;
+    fs::write(dags.join("contract_bad.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["apply", "production", "-y", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("contract"));
+
+    // A blocked apply must not update the environment: a second `plan` must
+    // still show the task as pending execution (cmd_status only prints
+    // snapshot counts, not per-task pointers, so it can't distinguish this).
+    conduit()
+        .args(["plan", "production", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[EXEC ] contract_bad.emit"));
+}
+
 // ─── README contract ────────────────────────────────────────────────────────
 
 /// Every command documented in the README's command table must parse.

@@ -1734,7 +1734,7 @@ async fn cmd_apply(
     // upstream. Pure Skip upstream are dropped; the env preserves unselected
     // pointers because `apply_to_environment` only mutates entries that have
     // an action in the plan.
-    let deploy = if !only.is_empty() {
+    let mut deploy = if !only.is_empty() {
         let selectors: Result<Vec<(String, String)>, _> = only
             .iter()
             .map(|s| {
@@ -1802,6 +1802,22 @@ async fn cmd_apply(
     let mut removed = 0usize;
     let logical_date = chrono::Utc::now();
 
+    // Contracts indexed by (dag_id, task_id) — evaluated against the evidence
+    // each executed task emits. Error-severity failures block the deployment
+    // (docs/src/concepts/contracts.md "Plan/Apply Integration").
+    let contract_index: HashMap<(String, String), &conduit_common::contracts::TaskContracts> =
+        deploy
+            .pending_contracts
+            .iter()
+            .map(|tc| {
+                (
+                    (tc.dag_id.clone().unwrap_or_default(), tc.task_id.clone()),
+                    tc,
+                )
+            })
+            .collect();
+    let mut contract_results: Vec<conduit_common::contracts::ValidationResult> = Vec::new();
+
     for action in &deploy.actions {
         match &action.action {
             ActionKind::Execute => {
@@ -1840,6 +1856,43 @@ async fn cmd_apply(
                         let duration_ms = task_start.elapsed().as_secs_f64() * 1000.0;
 
                         if output.exit_code == 0 {
+                            if let Some(tc) =
+                                contract_index.get(&(action.dag_id.clone(), action.task_id.clone()))
+                            {
+                                let result = conduit_common::contracts::ContractEvaluator::evaluate(
+                                    tc,
+                                    &output.evidence,
+                                );
+                                let blocked = !result.passed;
+                                println!(
+                                    "  [{}] {}.{} contracts: {}/{} checks passed",
+                                    if blocked { "CVIO" } else { "CHK " },
+                                    action.dag_id,
+                                    action.task_id,
+                                    result.passed_checks,
+                                    result.total_checks
+                                );
+                                for check in result.checks.iter().filter(|c| !c.passed) {
+                                    eprintln!(
+                                        "          ! {}: {}",
+                                        check.contract_name, check.message
+                                    );
+                                }
+                                contract_results.push(result);
+                                if blocked {
+                                    let validation =
+                                        conduit_common::contracts::DeploymentValidation::from_results(
+                                            contract_results,
+                                        );
+                                    eprintln!();
+                                    eprintln!("{}", validation);
+                                    anyhow::bail!(
+                                        "apply blocked: contract validation failed for {}.{} — environment not updated",
+                                        action.dag_id, action.task_id
+                                    );
+                                }
+                            }
+
                             let snap_id = format!(
                                 "snap_{}_{}",
                                 action.task_id,
@@ -1922,6 +1975,21 @@ async fn cmd_apply(
                 println!("  [DEL]   {}.{}", action.dag_id, action.task_id);
                 removed += 1;
             }
+        }
+    }
+
+    // `contract_index` borrows from `deploy.pending_contracts`; drop it before
+    // taking a mutable borrow of `deploy` below.
+    drop(contract_index);
+
+    if !contract_results.is_empty() {
+        let validation =
+            conduit_common::contracts::DeploymentValidation::from_results(contract_results);
+        println!();
+        println!("{}", validation);
+        deploy.set_validation(validation);
+        if !deploy.can_apply() {
+            anyhow::bail!("apply blocked: contract validation failed — environment not updated");
         }
     }
 
