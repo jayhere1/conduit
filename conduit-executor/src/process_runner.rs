@@ -753,6 +753,8 @@ mod tests {
             dependencies: vec![],
             retries: 0,
             retry_delay: None,
+            retry_backoff: None,
+            source_hash: None,
             pool: None,
             timeout: None,
             priority: 0,

@@ -15,7 +15,7 @@ pub use conduit_providers::ProviderRegistry;
 pub use executor::{ExecutorCommand, ExecutorEvent, TaskExecutor, TaskOutcome};
 pub use process_runner::{ProcessOutput, ProcessRunner, TaskContext};
 pub use protocol::{parse_stdout_line, ProtocolMessage};
-pub use retry::{parse_duration, RetryPolicy};
+pub use retry::parse_duration;
 
 #[cfg(test)]
 mod tests {
@@ -27,6 +27,5 @@ mod tests {
         let _ = std::any::type_name::<TaskExecutor>();
         let _ = std::any::type_name::<ProcessRunner>();
         let _ = std::any::type_name::<ProtocolMessage>();
-        let _ = std::any::type_name::<RetryPolicy>();
     }
 }

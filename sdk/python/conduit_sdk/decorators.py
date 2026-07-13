@@ -48,6 +48,7 @@ class TaskDefinition:
     function: Callable
     retries: int = 0
     retry_delay: Optional[str] = None
+    retry_backoff: Optional[float] = None
     pool: Optional[str] = None
     timeout: Optional[str] = None
     priority: int = 0
@@ -160,6 +161,7 @@ def dag(
 def task(
     retries: int = 0,
     retry_delay: Optional[str] = None,
+    retry_backoff: Optional[float] = None,
     pool: Optional[str] = None,
     timeout: Optional[str] = None,
     priority: int = 0,
@@ -174,6 +176,9 @@ def task(
     Args:
         retries: Number of retry attempts on failure.
         retry_delay: Delay between retries (e.g., "5m", "30s").
+        retry_backoff: Exponential backoff multiplier applied to retry_delay
+            per attempt (e.g., 2.0 doubles the delay each retry; omit for a
+            fixed delay).
         pool: Named resource pool for concurrency control.
         timeout: Maximum execution time (e.g., "1h", "30m").
         priority: Execution priority (higher = runs first within pool).
@@ -193,6 +198,7 @@ def task(
             function=func,
             retries=retries,
             retry_delay=retry_delay,
+            retry_backoff=retry_backoff,
             pool=pool,
             timeout=timeout,
             priority=priority,

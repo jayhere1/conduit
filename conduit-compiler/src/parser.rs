@@ -42,6 +42,13 @@ pub struct ParsedTask {
     pub task_type: TaskType,
     pub retries: u32,
     pub retry_delay: Option<String>,
+    /// Exponential backoff multiplier per retry attempt (None = fixed delay).
+    pub retry_backoff: Option<f64>,
+    /// Stable hash of the task's source text (nested @task def plus any
+    /// module-level function of the same name). Lets the planner detect
+    /// Python body edits. None for task types whose content is already
+    /// carried verbatim (SQL query text, bash command).
+    pub source_hash: Option<String>,
     pub pool: Option<String>,
     pub timeout: Option<String>,
     pub priority: i32,
@@ -57,6 +64,16 @@ pub struct ParsedTask {
     pub inputs: Vec<Dataset>,
     /// Datasets written by this task, as declared via `@task(outputs=[…])`.
     pub outputs: Vec<Dataset>,
+}
+
+/// Stable, deterministic hash of task source text, used for change
+/// detection in the planner (same construction as `Fingerprint::compute`).
+fn hash_source(text: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 impl DagParser {
@@ -114,7 +131,53 @@ impl DagParser {
             debug!(file = file_name, "No DAG definitions found");
         }
 
+        // Fold module-level function bodies into task source hashes. The
+        // SDK's executable-body pattern defines the code that actually runs
+        // at module level under the same name as the nested @task stub —
+        // editing it must invalidate the task's fingerprint too.
+        let module_fns = self.collect_module_functions(&root, source_bytes);
+        for dag in &mut dags {
+            for task in &mut dag.tasks {
+                if let Some(module_text) = module_fns.get(&task.id) {
+                    let combined = format!(
+                        "{}\n{}",
+                        task.source_hash.as_deref().unwrap_or(""),
+                        hash_source(module_text)
+                    );
+                    task.source_hash = Some(hash_source(&combined));
+                }
+            }
+        }
+
         Ok(dags)
+    }
+
+    /// Map every module-level function name to its full source text
+    /// (including any decorators).
+    fn collect_module_functions(
+        &self,
+        root: &tree_sitter::Node,
+        source: &[u8],
+    ) -> HashMap<String, String> {
+        let mut fns = HashMap::new();
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            let mut inner = child.walk();
+            let func = match child.kind() {
+                "function_definition" => Some(child),
+                "decorated_definition" => child
+                    .children(&mut inner)
+                    .find(|c| c.kind() == "function_definition"),
+                _ => None,
+            };
+            if let Some(f) = func {
+                if let Some(name_node) = f.child_by_field_name("name") {
+                    let name = self.node_text(&name_node, source);
+                    fns.insert(name, self.node_text(&child, source));
+                }
+            }
+        }
+        fns
     }
 
     /// Try to parse a decorated_definition as a @dag-decorated function.
@@ -376,6 +439,8 @@ impl DagParser {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
             retry_delay: task_args.get("retry_delay").cloned(),
+            retry_backoff: task_args.get("retry_backoff").and_then(|s| s.parse().ok()),
+            source_hash: Some(hash_source(&self.node_text(node, source))),
             pool: task_args.get("pool").cloned(),
             timeout: task_args.get("timeout").cloned(),
             priority: task_args
@@ -864,7 +929,7 @@ from conduit import dag, task, Param
 def daily_warehouse_refresh(date: Param[str] = "{{ ds }}"):
     """Refresh the warehouse daily."""
 
-    @task(retries=3, retry_delay="5m", pool="snowflake")
+    @task(retries=3, retry_delay="5m", retry_backoff=2.0, pool="snowflake")
     def extract_orders(date: str):
         """Pull orders from source."""
         pass
@@ -907,6 +972,7 @@ def daily_warehouse_refresh(date: Param[str] = "{{ ds }}"):
         let extract = dag.tasks.iter().find(|t| t.id == "extract_orders").unwrap();
         assert_eq!(extract.retries, 3);
         assert_eq!(extract.retry_delay, Some("5m".to_string()));
+        assert_eq!(extract.retry_backoff, Some(2.0));
         assert_eq!(extract.pool, Some("snowflake".to_string()));
 
         let transform = dag
@@ -1016,5 +1082,94 @@ def bad():
             "unexpected error: {}",
             msg
         );
+    }
+}
+
+#[cfg(test)]
+mod source_hash_tests {
+    use super::*;
+
+    const DAG_V1: &str = r#"
+from conduit_sdk import dag, task
+
+@dag(schedule="@daily")
+def my_dag():
+    @task()
+    def work():
+        print("v1")
+"#;
+
+    // Identical to V1 except for the task body.
+    const DAG_V2: &str = r#"
+from conduit_sdk import dag, task
+
+@dag(schedule="@daily")
+def my_dag():
+    @task()
+    def work():
+        print("v2 - changed body")
+"#;
+
+    // V1 plus a module-level function that shares the task's name (the
+    // executable-body pattern used by the SDK / demo pipelines).
+    const DAG_V1_WITH_MODULE_BODY: &str = r#"
+from conduit_sdk import dag, task
+
+@dag(schedule="@daily")
+def my_dag():
+    @task()
+    def work():
+        print("v1")
+
+def work():
+    print("module-level body v1")
+"#;
+
+    const DAG_V1_WITH_CHANGED_MODULE_BODY: &str = r#"
+from conduit_sdk import dag, task
+
+@dag(schedule="@daily")
+def my_dag():
+    @task()
+    def work():
+        print("v1")
+
+def work():
+    print("module-level body v2 - changed")
+"#;
+
+    fn parse_hash(source: &str) -> Option<String> {
+        let mut parser = DagParser::new().unwrap();
+        let dags = parser.parse_source(source, "test.py").unwrap();
+        dags[0]
+            .tasks
+            .iter()
+            .find(|t| t.id == "work")
+            .unwrap()
+            .source_hash
+            .clone()
+    }
+
+    #[test]
+    fn task_body_change_changes_source_hash() {
+        let h1 = parse_hash(DAG_V1);
+        let h2 = parse_hash(DAG_V2);
+        assert!(h1.is_some(), "python tasks must carry a source hash");
+        assert_ne!(h1, h2, "editing a task body must change its source hash");
+    }
+
+    #[test]
+    fn module_level_body_change_changes_source_hash() {
+        let h1 = parse_hash(DAG_V1_WITH_MODULE_BODY);
+        let h2 = parse_hash(DAG_V1_WITH_CHANGED_MODULE_BODY);
+        assert_ne!(
+            h1, h2,
+            "editing a module-level task body must change its source hash"
+        );
+    }
+
+    #[test]
+    fn unchanged_source_produces_stable_hash() {
+        assert_eq!(parse_hash(DAG_V1), parse_hash(DAG_V1));
     }
 }

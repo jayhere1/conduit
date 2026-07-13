@@ -32,6 +32,8 @@ fn task(id: &str, deps: &[&str], retries: u32) -> Task {
             .collect(),
         retries,
         retry_delay: None,
+        retry_backoff: None,
+        source_hash: None,
         pool: None,
         timeout: None,
         priority: 0,

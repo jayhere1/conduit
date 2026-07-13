@@ -217,6 +217,16 @@ export default function RunDetail() {
                             <p className="text-gray-300 capitalize">{status}</p>
                           </div>
                         </div>
+
+                        {/* Captured task logs */}
+                        {run.taskLogs?.[taskId] && (
+                          <div className="mt-4">
+                            <p className="text-gray-500 text-xs mb-1">Logs</p>
+                            <pre className="bg-conduit-950 border border-conduit-700/30 rounded-lg p-3 text-xs text-gray-300 font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">
+                              {run.taskLogs[taskId]}
+                            </pre>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

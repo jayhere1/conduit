@@ -16,13 +16,16 @@ use conduit_common::snapshot::{
 use tracing::info;
 
 use crate::env_history_store::EnvHistoryStore;
+use crate::event_store::EventStore;
 use crate::snapshot_store::SnapshotStore;
+use conduit_common::event::EventKind;
 
 /// Manages virtual pipeline environments.
 pub struct EnvironmentManager {
     environments: RwLock<HashMap<EnvironmentId, Environment>>,
     history: Option<EnvHistoryStore>,
     snapshots: Option<std::sync::Arc<SnapshotStore>>,
+    events: Option<std::sync::Arc<EventStore>>,
 }
 
 impl EnvironmentManager {
@@ -35,6 +38,7 @@ impl EnvironmentManager {
             environments: RwLock::new(envs),
             history: None,
             snapshots: None,
+            events: None,
         }
     }
 
@@ -55,9 +59,27 @@ impl EnvironmentManager {
         self
     }
 
+    /// Attach an event store. Environment lifecycle operations (create,
+    /// promote, rollback) will leave a persistent event trail that
+    /// `conduit replay` can fold. Best-effort: append failures are logged,
+    /// never propagated.
+    pub fn with_event_store(mut self, store: std::sync::Arc<EventStore>) -> Self {
+        self.events = Some(store);
+        self
+    }
+
     /// Reference to the attached history store, if any.
     pub fn history_store(&self) -> Option<&EnvHistoryStore> {
         self.history.as_ref()
+    }
+
+    /// Best-effort append to the attached event store.
+    fn persist_event(&self, kind: EventKind) {
+        if let Some(store) = &self.events {
+            if let Err(e) = store.append(kind) {
+                tracing::warn!(error = %e, "Failed to persist environment event");
+            }
+        }
     }
 
     /// Update the promotion policy for an environment.
@@ -112,6 +134,7 @@ impl EnvironmentManager {
             environments: RwLock::new(map),
             history: None,
             snapshots: None,
+            events: None,
         })
     }
 
@@ -161,6 +184,11 @@ impl EnvironmentManager {
         );
 
         envs.insert(name.to_string(), env.clone());
+        drop(envs);
+        self.persist_event(EventKind::EnvironmentCreated {
+            env_name: name.to_string(),
+            based_on: based_on.map(|s| s.to_string()),
+        });
         Ok(env)
     }
 
@@ -258,6 +286,13 @@ impl EnvironmentManager {
             version = target_env.current_version,
             "Environment promoted"
         );
+
+        drop(envs);
+        self.persist_event(EventKind::EnvironmentPromoted {
+            source_env: source.to_string(),
+            target_env: target.to_string(),
+            snapshot_changes: diff,
+        });
 
         Ok(diff)
     }
@@ -408,6 +443,12 @@ impl EnvironmentManager {
             changes = changes,
             "Environment rolled back"
         );
+
+        drop(envs);
+        self.persist_event(EventKind::EnvironmentRolledBack {
+            env_name: env_name.to_string(),
+            rolled_back_to: target_version as u64,
+        });
 
         Ok((next, changes))
     }
@@ -599,6 +640,44 @@ mod tests {
         let all = loaded.list().unwrap();
         assert!(all.iter().any(|e| e.id == "production"));
         assert!(all.iter().any(|e| e.id == "custom-only"));
+    }
+
+    /// Environment lifecycle operations must leave a persistent event
+    /// trail when an event store is attached (powers `conduit replay`).
+    #[test]
+    fn env_lifecycle_emits_events_when_store_attached() {
+        use conduit_common::event::EventKind;
+
+        let hist_dir = tempfile::tempdir().unwrap();
+        let events_dir = tempfile::tempdir().unwrap();
+        let history = EnvHistoryStore::open(hist_dir.path()).unwrap();
+        let events = std::sync::Arc::new(crate::EventStore::open(events_dir.path()).unwrap());
+
+        let mgr = EnvironmentManager::new()
+            .with_history_store(history)
+            .with_event_store(std::sync::Arc::clone(&events));
+
+        mgr.create("staging", Some("production")).unwrap();
+        mgr.promote("staging", "production").unwrap();
+
+        let recorded = events.range(0, events.current_sequence()).unwrap();
+        assert!(
+            recorded.iter().any(|e| matches!(
+                &e.kind,
+                EventKind::EnvironmentCreated { env_name, based_on }
+                    if env_name == "staging" && based_on.as_deref() == Some("production")
+            )),
+            "expected EnvironmentCreated event, got {:?}",
+            recorded.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+        assert!(
+            recorded.iter().any(|e| matches!(
+                &e.kind,
+                EventKind::EnvironmentPromoted { source_env, target_env, .. }
+                    if source_env == "staging" && target_env == "production"
+            )),
+            "expected EnvironmentPromoted event"
+        );
     }
 
     #[test]

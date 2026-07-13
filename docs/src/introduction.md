@@ -118,7 +118,7 @@ Tree-sitter extracts the DAG structure, task dependencies, schedules, and retry 
 Each task runs as an **isolated child process** with:
 - Timeout enforcement (no hung tasks)
 - Exit-code based success/failure detection
-- Resource limits via cgroups (CPU, memory, file descriptors)
+- Enforced per-task timeouts (declared CPU/memory limits are not yet enforced)
 - Structured protocol for logging, metrics, and XCom
 
 Tasks communicate via stdout:

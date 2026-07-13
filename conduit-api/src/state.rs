@@ -37,6 +37,10 @@ pub struct DagRunInfo {
     #[serde(rename = "endedAt")]
     pub finished_at: Option<DateTime<Utc>>,
     pub task_states: HashMap<String, String>,
+    /// Captured stdout/stderr per task (truncated), for post-hoc debugging
+    /// of completed runs. Live streaming still happens over the WebSocket.
+    #[serde(default)]
+    pub task_logs: HashMap<String, String>,
     pub triggered_by: String,
     /// Virtual environment this run targets. Persisted JSON written before
     /// this field existed deserializes as "production".
@@ -131,6 +135,22 @@ impl AppState {
             }
         }
 
+        // Open (creating if missing) the persistent event store. Failure is
+        // non-fatal: the events API reports empty and lifecycle events are
+        // simply not recorded. The CLI's replay command reads the same DB.
+        let events_dir = state_dir.join("events");
+        let event_store = match conduit_state::EventStore::open(&events_dir) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(e) => {
+                tracing::warn!(
+                    path = %events_dir.display(),
+                    error = %e,
+                    "Failed to open event store; events will not be recorded",
+                );
+                None
+            }
+        };
+
         // Attach env history store so promote/rollback record versions on disk.
         let env_manager = EnvironmentManager::new();
         let env_manager = match conduit_state::EnvHistoryStore::open(state_dir.join("env_history"))
@@ -140,29 +160,13 @@ impl AppState {
         };
         let snapshot_store = Arc::new(SnapshotStore::new());
         let env_manager = env_manager.with_snapshot_store(Arc::clone(&snapshot_store));
+        let env_manager = match &event_store {
+            Some(store) => env_manager.with_event_store(Arc::clone(store)),
+            None => env_manager,
+        };
 
         let external_lineage = Arc::new(open_external_lineage_store(&state_dir));
         let plan_cache = Arc::new(PlanCache::new(dags_path.clone()));
-
-        // Open the persistent event store if it exists. Failure is non-fatal:
-        // the events API just reports an empty result with a clear note. The
-        // CLI's audit/replay commands open the same DB at the same location.
-        let events_dir = state_dir.join("events");
-        let event_store = if events_dir.exists() {
-            match conduit_state::EventStore::open(&events_dir) {
-                Ok(store) => Some(Arc::new(store)),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %events_dir.display(),
-                        error = %e,
-                        "Failed to open event store; /events API will return empty",
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
 
         Arc::new(Self {
             dags_path,
@@ -309,8 +313,10 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Seed the state with realistic demo run history.
-    /// Called at startup when `--demo` flag is passed.
+    /// Seed the state with fabricated demo run history so the UI has data
+    /// to display. Only called when `conduit serve --demo` is passed; all
+    /// seeded runs carry `triggered_by: "demo"` so they are distinguishable
+    /// from real runs.
     pub fn seed_demo_data(&self) {
         let now = Utc::now();
 
@@ -365,7 +371,8 @@ impl AppState {
                 started_at: started,
                 finished_at: ended,
                 task_states,
-                triggered_by: "scheduler".to_string(),
+                task_logs: HashMap::new(),
+                triggered_by: "demo".to_string(),
                 environment: "production".to_string(),
             });
         }
@@ -402,7 +409,8 @@ impl AppState {
                 started_at: started,
                 finished_at: Some(started + Duration::hours(1) + Duration::minutes(23)),
                 task_states,
-                triggered_by: "scheduler".to_string(),
+                task_logs: HashMap::new(),
+                triggered_by: "demo".to_string(),
                 environment: "production".to_string(),
             });
         }
@@ -465,11 +473,8 @@ impl AppState {
                 started_at: started,
                 finished_at: ended,
                 task_states,
-                triggered_by: if day == 3 {
-                    "api".to_string()
-                } else {
-                    "scheduler".to_string()
-                },
+                task_logs: HashMap::new(),
+                triggered_by: "demo".to_string(),
                 environment: if day == 4 {
                     "staging".to_string()
                 } else {
@@ -504,7 +509,8 @@ impl AppState {
                 started_at: started,
                 finished_at: Some(started + Duration::minutes(28 + day * 3)),
                 task_states,
-                triggered_by: "scheduler".to_string(),
+                task_logs: HashMap::new(),
+                triggered_by: "demo".to_string(),
                 environment: if day < 2 {
                     "staging".to_string()
                 } else {

@@ -66,13 +66,30 @@ impl PoolManager {
     /// Try to acquire a slot in the named pool for the given task.
     ///
     /// Returns `true` if a slot was acquired, `false` if no slots available.
+    ///
+    /// A pool that was never defined is auto-registered as unlimited (with a
+    /// warning): tasks referencing an undeclared pool must run, not deadlock.
     pub fn acquire(&mut self, pool_name: &str, task_id: &str) -> bool {
+        if !self.pools.contains_key(pool_name) {
+            warn!(
+                pool = %pool_name,
+                task = %task_id,
+                "Pool not defined in config; treating as unlimited"
+            );
+            self.pools.insert(
+                pool_name.to_string(),
+                PoolState {
+                    name: pool_name.to_string(),
+                    total_slots: u32::MAX,
+                    available_slots: u32::MAX,
+                    description: None,
+                    occupants: HashSet::new(),
+                },
+            );
+        }
         let pool = match self.pools.get_mut(pool_name) {
             Some(p) => p,
-            None => {
-                warn!(pool = %pool_name, task = %task_id, "Pool not found");
-                return false;
-            }
+            None => unreachable!("pool was just inserted"),
         };
 
         if pool.available_slots > 0 {
@@ -271,15 +288,18 @@ mod tests {
     }
 
     #[test]
-    fn test_nonexistent_pool() {
+    fn test_nonexistent_pool_is_treated_as_unlimited() {
+        // An undeclared pool must not block (or deadlock) tasks that
+        // reference it — it is auto-registered as unlimited with a warning.
         let pools = vec![];
         let mut mgr = PoolManager::new(pools);
 
-        assert!(!mgr.acquire("nonexistent", "task_1"));
-        assert_eq!(mgr.available("nonexistent"), 0);
-        assert_eq!(mgr.total("nonexistent"), 0);
+        assert!(mgr.acquire("nonexistent", "task_1"));
+        assert!(mgr.acquire("nonexistent", "task_2"));
+        assert_eq!(mgr.total("nonexistent"), u32::MAX);
 
         mgr.release("nonexistent", "task_1");
+        mgr.release("nonexistent", "task_2");
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub struct ListRunsQuery {
     pub status: Option<String>,
     /// Filter to runs that targeted this environment (e.g. "production", "staging").
     pub environment: Option<String>,
+    /// Filter to runs of one DAG (accepts `dag_id` or `dagId`).
+    #[serde(alias = "dagId")]
+    pub dag_id: Option<String>,
 }
 
 /// Request body for triggering a DAG run.
@@ -96,6 +99,7 @@ pub async fn trigger_run(
         started_at: now,
         finished_at: None,
         task_states: task_states.clone(),
+        task_logs: HashMap::new(),
         triggered_by: "api".to_string(),
         environment: environment.clone(),
     };
@@ -181,6 +185,7 @@ pub async fn get_run(
         "startedAt": run.started_at.to_rfc3339(),
         "endedAt": run.finished_at.map(|t| t.to_rfc3339()),
         "taskStates": run.task_states,
+        "taskLogs": run.task_logs,
         "triggeredBy": run.triggered_by,
         "environment": run.environment,
     })))
@@ -192,7 +197,7 @@ pub async fn list_all_runs(
     Query(params): Query<ListRunsQuery>,
 ) -> Json<Value> {
     let limit = params.limit.unwrap_or(100);
-    let mut runs = state.get_runs(None);
+    let mut runs = state.get_runs(params.dag_id.as_deref());
 
     if let Some(ref status) = params.status {
         runs.retain(|r| r.status == *status);

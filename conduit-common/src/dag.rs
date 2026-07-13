@@ -152,6 +152,17 @@ pub struct Task {
     /// Delay between retries (e.g., "5m", "30s").
     pub retry_delay: Option<String>,
 
+    /// Exponential backoff multiplier applied to `retry_delay` per attempt
+    /// (e.g., 2.0 doubles the delay each retry). None or <= 1.0 = fixed delay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_backoff: Option<f64>,
+
+    /// Stable hash of the task's source text, set by the compiler for
+    /// Python tasks (whose `task_type` carries only module/function names).
+    /// Folded into the planner fingerprint so body edits are detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
+
     /// Named resource pool this task draws from.
     pub pool: Option<String>,
 
@@ -246,7 +257,8 @@ impl TaskType {
     }
 }
 
-/// Resource limits for a task's cgroup.
+/// Declared resource limits for a task. Carried through the task model
+/// and distributed protocol, but not yet enforced at process spawn time.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResourceLimits {
     /// CPU limit in millicores (e.g., 1000 = 1 core).

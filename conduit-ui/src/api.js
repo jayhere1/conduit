@@ -151,6 +151,7 @@ function normalizeRun(run) {
     startedAt: run.startedAt || run.started_at,
     endedAt: run.endedAt || run.finished_at || run.ended_at,
     taskStates: run.taskStates || run.task_states || {},
+    taskLogs: run.taskLogs || run.task_logs || {},
     tasks: run.tasks || [],
     triggeredBy: run.triggeredBy || run.triggered_by,
     environment: run.environment,

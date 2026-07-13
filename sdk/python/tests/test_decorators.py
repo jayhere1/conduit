@@ -46,7 +46,7 @@ def test_task_metadata():
 
     @dag()
     def test_dag():
-        @task(retries=3, retry_delay="5m", pool="my_pool", timeout="30m", priority=10)
+        @task(retries=3, retry_delay="5m", retry_backoff=2.0, pool="my_pool", timeout="30m", priority=10)
         def my_task():
             """A task with lots of config."""
             pass
@@ -54,6 +54,7 @@ def test_task_metadata():
     t = test_dag.tasks["my_task"]
     assert t.retries == 3
     assert t.retry_delay == "5m"
+    assert t.retry_backoff == 2.0
     assert t.pool == "my_pool"
     assert t.timeout == "30m"
     assert t.priority == 10

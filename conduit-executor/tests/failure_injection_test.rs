@@ -24,6 +24,8 @@ fn make_task(id: &str, command: &str, timeout: Option<&str>) -> Task {
         dependencies: vec![],
         retries: 0,
         retry_delay: None,
+        retry_backoff: None,
+        source_hash: None,
         timeout: timeout.map(String::from),
         trigger_rule: TriggerRule::AllSuccess,
         pool: None,
