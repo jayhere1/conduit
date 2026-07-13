@@ -148,6 +148,14 @@ impl ProviderRegistry {
         }
     }
 
+    /// Register a pre-built provider instance under a connection name.
+    ///
+    /// Config-driven setups should use `from_configs`; this is for tests and
+    /// embedders that construct providers directly.
+    pub fn register(&mut self, name: impl Into<String>, instance: ProviderInstance) {
+        self.providers.insert(name.into(), instance);
+    }
+
     /// Initialize the registry from a map of connection configs.
     ///
     /// For each connection, resolves the provider type and creates an instance.

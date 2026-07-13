@@ -413,7 +413,7 @@ impl ProcessRunner {
         let col_count = result.columns.len();
 
         stdout.push_str(&format!(
-            "[INFO] SQL execution completed: {} rows, {} columns\n",
+            "[INFO] SQL execution finished via provider: {} rows, {} columns\n",
             row_count, col_count
         ));
 
@@ -466,26 +466,12 @@ impl ProcessRunner {
                 cmd.arg("-c").arg(command);
                 Ok(cmd)
             }
-            TaskType::Sql { query, .. } => {
-                let mut cmd = Command::new("python3");
-                Self::inject_context_env(&mut cmd, context);
-                // Encode the SQL as a JSON string literal so newlines, quotes,
-                // and backslashes are properly escaped for the embedded Python.
-                // JSON string syntax is a subset of Python string syntax.
-                let query_literal = serde_json::to_string(query)
-                    .unwrap_or_else(|_| "\"<unserializable SQL>\"".to_string());
-                let sql_executor = format!(
-                    r#"
-print("CONDUIT::LOG::INFO::SQL execution started")
-print("CONDUIT::LOG::INFO::Executing: " + {query_lit})
-print("CONDUIT::LOG::INFO::SQL execution completed")
-print('CONDUIT::XCOM::{{"rows_affected": 0}}')
-"#,
-                    query_lit = query_literal
-                );
-                cmd.arg("-c").arg(sql_executor);
-                Ok(cmd)
-            }
+            TaskType::Sql { connection, .. } => Err(ConduitError::ExecutionError(format!(
+                "SQL task '{}' requires a provider for connection '{}', but none is \
+                 configured. Add the connection to conduit.yaml under `connections:` \
+                 (e.g. type: duckdb / postgres / sqlite). Refusing to fake SQL execution.",
+                task.id, connection
+            ))),
             TaskType::Executable { command, args } => {
                 let mut cmd = Command::new(command);
                 Self::inject_context_env(&mut cmd, context);

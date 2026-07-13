@@ -111,6 +111,24 @@ tasks:
     dags
 }
 
+/// Write a conduit.yaml declaring a real (bundled) DuckDB connection named
+/// `warehouse`, pointing at a file DB inside the temp project.
+fn write_duckdb_project_config(dir: &TempDir) {
+    let db_path = dir.path().join("warehouse.duckdb");
+    let config = format!(
+        r#"
+name: smoke_project
+dags_path: ./dags
+connections:
+  warehouse:
+    type: duckdb
+    database: "{}"
+"#,
+        db_path.display()
+    );
+    fs::write(dir.path().join("conduit.yaml"), config).unwrap();
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -220,6 +238,49 @@ fn cli_run_nonexistent_dag_fails() {
         .arg(dags.to_str().unwrap())
         .assert()
         .failure();
+}
+
+#[test]
+fn cli_run_sql_dag_without_connection_fails_loudly() {
+    let dir = TempDir::new().unwrap();
+    let dags = write_sql_dag(&dir); // references connection `warehouse`, no conduit.yaml
+
+    conduit()
+        .args(["run", "sql_lineage", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("warehouse").and(predicate::str::contains("conduit.yaml")),
+        );
+}
+
+#[test]
+fn cli_run_sql_dag_with_duckdb_executes_for_real() {
+    let dir = TempDir::new().unwrap();
+    write_duckdb_project_config(&dir);
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    // Self-contained query (no pre-existing tables needed).
+    let dag = r#"
+id: duck_smoke
+tasks:
+  select_two:
+    type: sql
+    connection: warehouse
+    query: "SELECT 1 AS a UNION ALL SELECT 2"
+"#;
+    fs::write(dags.join("duck_smoke.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["run", "duck_smoke", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("row_count")
+                .and(predicate::str::contains("SQL execution completed").not()),
+        );
 }
 
 #[test]

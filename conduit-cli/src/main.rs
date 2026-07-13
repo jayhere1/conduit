@@ -1218,6 +1218,38 @@ fn warn_on_stub_connections(dags_path: &Path, plan: &conduit_compiler::ConduitPl
     }
 }
 
+/// Build a provider registry from the project's conduit.yaml `connections:`.
+///
+/// Returns an empty registry when no config file or no connections exist —
+/// SQL tasks then fail loudly instead of pretending to run.
+async fn build_provider_registry(
+    dags_path: &Path,
+) -> std::sync::Arc<conduit_providers::ProviderRegistry> {
+    let registry = match find_conduit_yaml(dags_path) {
+        Some(config_path) => match conduit_common::config::ConduitConfig::load(&config_path) {
+            Ok(cfg) if !cfg.connections.is_empty() => {
+                let secrets: conduit_providers::SecretsConfig = cfg.secrets.clone().into();
+                conduit_providers::ProviderRegistry::from_configs_with_secrets(
+                    &cfg.connections,
+                    &secrets,
+                )
+                .await
+            }
+            Ok(_) => conduit_providers::ProviderRegistry::new(),
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load {}: {} — SQL tasks will fail without providers",
+                    config_path.display(),
+                    e
+                );
+                conduit_providers::ProviderRegistry::new()
+            }
+        },
+        None => conduit_providers::ProviderRegistry::new(),
+    };
+    std::sync::Arc::new(registry)
+}
+
 // ─── conduit run ─────────────────────────────────────────────────────────────
 // Compiles DAGs, schedules one, and executes tasks via real ProcessRunner.
 
@@ -1281,6 +1313,10 @@ async fn cmd_run(
         None => Utc::now(),
     };
 
+    // Build the provider registry from conduit.yaml so SQL tasks execute for
+    // real (or fail loudly if the connection isn't configured).
+    let registry = build_provider_registry(dags_path).await;
+
     // Create scheduler channels
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
@@ -1326,6 +1362,13 @@ async fn cmd_run(
     let dag_for_executor = dag.clone();
     let run_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let run_failed_flag = std::sync::Arc::clone(&run_failed);
+    // Captures the most recent task failure reason so the final error
+    // (printed to stderr) names the actual cause instead of a generic
+    // "see task output above" — e.g. an unconfigured SQL connection.
+    let last_error: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let last_error_flag = std::sync::Arc::clone(&last_error);
+    let registry_for_exec = std::sync::Arc::clone(&registry);
     let executor_handle = tokio::spawn(async move {
         let mut completed = 0usize;
         let total = dag_for_executor.tasks.len();
@@ -1370,7 +1413,13 @@ async fn cmd_run(
 
                     // Execute for real via ProcessRunner
                     let task_start = Instant::now();
-                    match ProcessRunner::run(task, &context).await {
+                    match ProcessRunner::run_with_providers(
+                        task,
+                        &context,
+                        Some(&registry_for_exec),
+                    )
+                    .await
+                    {
                         Ok(output) => {
                             let duration = task_start.elapsed();
                             completed += 1;
@@ -1422,6 +1471,14 @@ async fn cmd_run(
                                         println!("          ! {}", line);
                                     }
                                 }
+                                if let Ok(mut guard) = last_error_flag.lock() {
+                                    *guard = Some(format!(
+                                        "{} exited {}: {}",
+                                        task_id,
+                                        output.exit_code,
+                                        output.stderr.trim()
+                                    ));
+                                }
                                 let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
                                     dag_id,
                                     run_id,
@@ -1435,6 +1492,9 @@ async fn cmd_run(
                             _failed = true;
                             completed += 1;
                             println!("  [ERR]   {} — {}", task_id, e);
+                            if let Ok(mut guard) = last_error_flag.lock() {
+                                *guard = Some(e.to_string());
+                            }
                             let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
                                 dag_id,
                                 run_id,
@@ -1487,7 +1547,12 @@ async fn cmd_run(
 
     // A failed run must fail the command (CI gates on this exit code).
     if run_failed.load(std::sync::atomic::Ordering::SeqCst) {
-        anyhow::bail!("DAG run failed — see task output above");
+        let detail = last_error
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "see task output above".to_string());
+        anyhow::bail!("DAG run failed: {}", detail);
     }
 
     Ok(())
@@ -1602,6 +1667,10 @@ async fn cmd_apply(
 
     // Load persistent state
     let state = PersistentState::open(&state_dir)?;
+
+    // Build the provider registry from conduit.yaml so SQL tasks execute for
+    // real (or fail loudly if the connection isn't configured).
+    let registry = build_provider_registry(dags_path).await;
 
     let deploy = if let Some(pf) = plan_file {
         println!("Loading plan from {}...", pf.display());
@@ -1725,7 +1794,7 @@ async fn cmd_apply(
                 };
 
                 let task_start = Instant::now();
-                match ProcessRunner::run(task, &context).await {
+                match ProcessRunner::run_with_providers(task, &context, Some(&registry)).await {
                     Ok(output) => {
                         let duration_ms = task_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1929,6 +1998,24 @@ async fn cmd_serve(
         auth_enabled,
     );
 
+    // Initialize SQL providers from conduit.yaml so both the /connections API
+    // and the server-side executor run SQL for real.
+    if let Some(config_path) = find_conduit_yaml(dags_path) {
+        match conduit_common::config::ConduitConfig::load(&config_path) {
+            Ok(cfg) => {
+                state.init_providers(&cfg.connections).await;
+                println!(
+                    "  Providers:   {} connection(s) registered",
+                    cfg.connections.len()
+                );
+            }
+            Err(e) => eprintln!(
+                "  Providers:   WARNING — failed to load conduit.yaml: {}",
+                e
+            ),
+        }
+    }
+
     if !cors_origins.is_empty() {
         println!("  CORS:        allowing {}", cors_origins.join(", "));
         state.set_cors_origins(cors_origins);
@@ -2082,13 +2169,25 @@ async fn cmd_serve(
                             params: HashMap::new(),
                         };
 
+                        let registry = exec_state
+                            .provider_registry
+                            .read()
+                            .ok()
+                            .and_then(|guard| guard.clone());
+
                         // Spawn each task so independent tasks run concurrently
                         // instead of blocking the command dispatch loop.
                         let spawn_state = exec_state.clone();
                         let spawn_event_tx = exec_event_tx.clone();
                         tokio::spawn(async move {
                             let task_start = Instant::now();
-                            match ProcessRunner::run(&task, &context).await {
+                            match ProcessRunner::run_with_providers(
+                                &task,
+                                &context,
+                                registry.as_deref(),
+                            )
+                            .await
+                            {
                                 Ok(output) => {
                                     let duration = task_start.elapsed();
                                     update_run_task_logs(
@@ -3359,6 +3458,10 @@ async fn cmd_backfill(
         }
     };
 
+    // Build the provider registry once for the whole backfill so SQL tasks
+    // execute for real (or fail loudly if the connection isn't configured).
+    let registry = build_provider_registry(dags_path).await;
+
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let skipped = 0usize;
@@ -3405,6 +3508,7 @@ async fn cmd_backfill(
             BackfillEngine::partition_env_vars(&request, partition, idx, total)
                 .into_iter()
                 .collect();
+        let registry_for_exec = std::sync::Arc::clone(&registry);
         let executor_handle = tokio::spawn(async move {
             let mut partition_failed = false;
             while let Some(cmd) = cmd_rx.recv().await {
@@ -3447,7 +3551,13 @@ async fn cmd_backfill(
                         }
 
                         let task_start = Instant::now();
-                        match ProcessRunner::run(task, &context).await {
+                        match ProcessRunner::run_with_providers(
+                            task,
+                            &context,
+                            Some(&registry_for_exec),
+                        )
+                        .await
+                        {
                             Ok(output) => {
                                 let duration = task_start.elapsed();
                                 if output.exit_code == 0 {
