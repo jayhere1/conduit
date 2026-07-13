@@ -85,7 +85,7 @@ pub struct DeploymentAction {
 
 /// A complete deployment plan — the minimum set of actions to
 /// bring an environment up to date with the compiled plan.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentPlan {
     /// Unique plan ID.
     pub id: String,

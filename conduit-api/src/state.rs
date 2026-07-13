@@ -98,6 +98,9 @@ pub struct AppState {
     /// stays `None` and the events endpoint reports an empty result rather
     /// than failing the request.
     pub event_store: Option<Arc<conduit_state::EventStore>>,
+    /// Recently generated deployment plans, newest last, capped. POST /apply
+    /// looks plans up here by id so the client applies exactly what it reviewed.
+    pub deployment_plans: RwLock<Vec<conduit_planner::DeploymentPlan>>,
 }
 
 impl AppState {
@@ -211,6 +214,7 @@ impl AppState {
             plan_cache,
             cors_allowed_origins: RwLock::new(Vec::new()),
             event_store,
+            deployment_plans: RwLock::new(Vec::new()),
         })
     }
 
@@ -430,6 +434,32 @@ impl AppState {
         if let Err(e) = self.env_manager.save_to_file(&path) {
             tracing::warn!(error = %e, path = %path.display(), "Failed to persist environments");
         }
+    }
+
+    /// Maximum number of generated deployment plans kept in the in-memory
+    /// cache (see `deployment_plans`).
+    const MAX_CACHED_PLANS: usize = 50;
+
+    /// Cache a generated deployment plan so a later POST /apply can look it
+    /// up by id and apply exactly what was reviewed. Evicts the oldest
+    /// entries once the cache exceeds `MAX_CACHED_PLANS`.
+    pub fn store_plan(&self, plan: &conduit_planner::DeploymentPlan) {
+        if let Ok(mut plans) = self.deployment_plans.write() {
+            plans.push(plan.clone());
+            if plans.len() > Self::MAX_CACHED_PLANS {
+                let excess = plans.len() - Self::MAX_CACHED_PLANS;
+                plans.drain(0..excess);
+            }
+        }
+    }
+
+    /// Look up a cached deployment plan by id. Newest-wins if ids ever
+    /// collide (they shouldn't — plan ids embed a UUID).
+    pub fn get_plan(&self, plan_id: &str) -> Option<conduit_planner::DeploymentPlan> {
+        self.deployment_plans
+            .read()
+            .ok()
+            .and_then(|plans| plans.iter().rev().find(|p| p.id == plan_id).cloned())
     }
 
     /// Seed the state with fabricated demo run history so the UI has data

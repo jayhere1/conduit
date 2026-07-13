@@ -16,6 +16,8 @@ pub enum ApiError {
     Unauthorized(String),
     Forbidden(String),
     PromotionPolicyViolation(String),
+    Conflict(String),
+    ApplyFailed(String),
 }
 
 impl IntoResponse for ApiError {
@@ -52,6 +54,8 @@ impl IntoResponse for ApiError {
                 "promotion_policy_violation",
                 msg,
             ),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
+            ApiError::ApplyFailed(msg) => (StatusCode::UNPROCESSABLE_ENTITY, "apply_failed", msg),
         };
 
         let body = json!({
