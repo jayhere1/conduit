@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documentation placeholders and test fixtures, not real credentials"
+regexes = [
+  '''your-api-key''',
+  '''cdt_abc123def456abc123def456abc123''',
+]
