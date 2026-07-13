@@ -309,8 +309,7 @@ impl Scheduler {
             .collect();
         for (dag_id, run_key) in runs {
             let ready = {
-                let (Some(dag), Some(rs)) =
-                    (self.plans.get(&dag_id), self.dag_runs.get(&run_key))
+                let (Some(dag), Some(rs)) = (self.plans.get(&dag_id), self.dag_runs.get(&run_key))
                 else {
                     continue;
                 };
@@ -1048,8 +1047,9 @@ impl Scheduler {
                     RunStatus::Failed => EventRunStatus::Failed,
                     RunStatus::Cancelled => EventRunStatus::Cancelled,
                 },
-                duration_ms: (Utc::now() - run_state.started_at).num_milliseconds().max(0)
-                    as u64,
+                duration_ms: (Utc::now() - run_state.started_at)
+                    .num_milliseconds()
+                    .max(0) as u64,
             });
 
             // Record metrics
@@ -1240,9 +1240,7 @@ impl Scheduler {
                 .and_then(|d| d.tasks.get(&task_id))
                 .and_then(|t| t.pool.clone());
             let acquired = match &pool {
-                Some(p) => self
-                    .pools
-                    .acquire(p, &format!("{}/{}", run_key, task_id)),
+                Some(p) => self.pools.acquire(p, &format!("{}/{}", run_key, task_id)),
                 None => true,
             };
             if acquired {

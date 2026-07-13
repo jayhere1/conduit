@@ -99,9 +99,7 @@ pub fn bind_named_params(
             && ((bytes[i + 1] as char).is_ascii_alphabetic() || bytes[i + 1] == b'_')
         {
             let mut j = i + 1;
-            while j < n
-                && ((bytes[j] as char).is_ascii_alphanumeric() || bytes[j] == b'_')
-            {
+            while j < n && ((bytes[j] as char).is_ascii_alphanumeric() || bytes[j] == b'_') {
                 j += 1;
             }
             let name = &query[i + 1..j];

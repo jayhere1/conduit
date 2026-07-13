@@ -237,12 +237,13 @@ impl SqlProvider for RedshiftProvider {
             for v in &bind_values {
                 q = super::params::bind_inferred_postgres(q, v);
             }
-            let rows = q.fetch_all(pool).await.map_err(|e| {
-                ProviderError::QueryFailed {
+            let rows = q
+                .fetch_all(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
-                }
-            })?;
+                })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
@@ -284,12 +285,13 @@ impl SqlProvider for RedshiftProvider {
             for v in &bind_values {
                 q = super::params::bind_inferred_postgres(q, v);
             }
-            let result = q.execute(pool).await.map_err(|e| {
-                ProviderError::QueryFailed {
+            let result = q
+                .execute(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
-                }
-            })?;
+                })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 

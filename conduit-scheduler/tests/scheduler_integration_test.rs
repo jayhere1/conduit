@@ -862,7 +862,11 @@ async fn retry_backoff_multiplier_grows_the_delay() {
     let cmd = next_command(&mut rx, 5, "first RetryTask").await;
     match &cmd {
         SchedulerCommand::RetryTask { delay, .. } => {
-            assert_eq!(delay.num_seconds(), 1, "first retry delay must be 1s (base)")
+            assert_eq!(
+                delay.num_seconds(),
+                1,
+                "first retry delay must be 1s (base)"
+            )
         }
         other => panic!("expected RetryTask, got {:?}", other),
     }
@@ -991,8 +995,10 @@ async fn cron_tick_fires_due_dag_once_per_minute() {
     let t1 = Utc.with_ymd_and_hms(2026, 7, 13, 10, 31, 5).unwrap(); // next minute
 
     tx.send(SchedulerEvent::CronTick { timestamp: t0 }).unwrap();
-    tx.send(SchedulerEvent::CronTick { timestamp: t0_later })
-        .unwrap();
+    tx.send(SchedulerEvent::CronTick {
+        timestamp: t0_later,
+    })
+    .unwrap();
     tx.send(SchedulerEvent::CronTick { timestamp: t1 }).unwrap();
     tx.send(SchedulerEvent::Shutdown).unwrap();
     let _ = driver.await;
@@ -1000,7 +1006,9 @@ async fn cron_tick_fires_due_dag_once_per_minute() {
     let cmds = drain_commands(&mut rx);
     let dispatches = cmds
         .iter()
-        .filter(|c| matches!(c, SchedulerCommand::DispatchTask { dag_id, .. } if dag_id == "cron_dag"))
+        .filter(
+            |c| matches!(c, SchedulerCommand::DispatchTask { dag_id, .. } if dag_id == "cron_dag"),
+        )
         .count();
     assert_eq!(
         dispatches, 2,
@@ -1023,8 +1031,7 @@ fn create_pool_scheduler(
 ) {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
-    let scheduler =
-        Scheduler::new(event_rx, command_tx, PoolManager::new(pools), plans).unwrap();
+    let scheduler = Scheduler::new(event_rx, command_tx, PoolManager::new(pools), plans).unwrap();
     let handle = tokio::spawn(async move {
         let _ = scheduler.run().await;
     });
@@ -1156,7 +1163,10 @@ async fn pool_release_wakes_waiters_in_other_runs() {
             break;
         }
     }
-    assert!(saw_second_dispatch, "run2's task must dispatch after release");
+    assert!(
+        saw_second_dispatch,
+        "run2's task must dispatch after release"
+    );
 
     tx.send(SchedulerEvent::Shutdown).unwrap();
     let _ = driver.await;

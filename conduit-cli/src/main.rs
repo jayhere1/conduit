@@ -1470,7 +1470,11 @@ async fn cmd_run(
                     // attempt wasn't final, so give its slot back to the
                     // progress counter.
                     completed = completed.saturating_sub(1);
-                    println!("  [RETRY] {} (retrying in {}s)", task_id, delay.num_seconds());
+                    println!(
+                        "  [RETRY] {} (retrying in {}s)",
+                        task_id,
+                        delay.num_seconds()
+                    );
                 }
             }
         }
@@ -2006,8 +2010,7 @@ async fn cmd_serve(
         tokio::spawn(async move {
             loop {
                 let now = chrono::Utc::now();
-                let millis_into_minute =
-                    (now.timestamp_millis().rem_euclid(60_000)) as u64;
+                let millis_into_minute = (now.timestamp_millis().rem_euclid(60_000)) as u64;
                 let sleep_ms = 60_000 - millis_into_minute;
                 tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
                 if cron_tx

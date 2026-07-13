@@ -210,12 +210,13 @@ impl SqlProvider for SqliteProvider {
             for v in &bind_values {
                 q = super::params::bind_inferred_sqlite(q, v);
             }
-            let rows = q.fetch_all(pool).await.map_err(|e| {
-                ProviderError::QueryFailed {
+            let rows = q
+                .fetch_all(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
-                }
-            })?;
+                })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
@@ -257,12 +258,13 @@ impl SqlProvider for SqliteProvider {
             for v in &bind_values {
                 q = super::params::bind_inferred_sqlite(q, v);
             }
-            let result = q.execute(pool).await.map_err(|e| {
-                ProviderError::QueryFailed {
+            let result = q
+                .execute(pool)
+                .await
+                .map_err(|e| ProviderError::QueryFailed {
                     connection: self.name.clone(),
                     reason: super::sanitize::sanitize_error(&e.to_string()),
-                }
-            })?;
+                })?;
 
             let execution_time = start.elapsed().as_millis() as u64;
 
@@ -382,7 +384,11 @@ mod param_binding_tests {
             .await
             .unwrap();
 
-        assert_eq!(result.sample_rows.len(), 1, "bound :id must filter to one row");
+        assert_eq!(
+            result.sample_rows.len(),
+            1,
+            "bound :id must filter to one row"
+        );
         assert_eq!(result.sample_rows[0][0], serde_json::json!("bob"));
     }
 
@@ -399,10 +405,7 @@ mod param_binding_tests {
             .unwrap();
 
         let mut params = HashMap::new();
-        params.insert(
-            "name".to_string(),
-            "alice' OR '1'='1".to_string(),
-        );
+        params.insert("name".to_string(), "alice' OR '1'='1".to_string());
         let result = p
             .execute("SELECT id FROM t WHERE name = :name", &params)
             .await
