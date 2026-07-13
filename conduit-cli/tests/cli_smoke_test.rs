@@ -227,6 +227,25 @@ fn cli_run_yaml_dag() {
 }
 
 #[test]
+fn cli_run_env_flag_reaches_task_context() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    fs::write(
+        dags.join("envcheck.yaml"),
+        "id: envcheck\ntasks:\n  show:\n    type: bash\n    command: \"echo env=$CONDUIT_ENVIRONMENT\"\n",
+    )
+    .unwrap();
+
+    conduit()
+        .args(["run", "envcheck", "--env", "staging", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("env=staging"));
+}
+
+#[test]
 fn cli_run_nonexistent_dag_fails() {
     let tmp = TempDir::new().unwrap();
     let dags = write_yaml_dag(&tmp);

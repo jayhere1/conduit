@@ -240,6 +240,11 @@ enum Commands {
         #[arg(long)]
         full_refresh: bool,
 
+        /// Target environment recorded for this run (context only; snapshots
+        /// are managed by plan/apply).
+        #[arg(long, default_value = "production")]
+        env: String,
+
         /// Enable distributed execution mode
         #[arg(long)]
         distributed: bool,
@@ -736,6 +741,7 @@ fn main() -> Result<()> {
             date,
             max_tasks,
             full_refresh,
+            env,
             distributed,
             bind,
         } => {
@@ -755,6 +761,7 @@ fn main() -> Result<()> {
                 date.as_deref(),
                 max_tasks,
                 full_refresh,
+                &env,
             ))
         }
         Commands::Plan {
@@ -1273,6 +1280,7 @@ async fn cmd_run(
     date: Option<&str>,
     _max_tasks: usize,
     full_refresh: bool,
+    environment: &str,
 ) -> Result<()> {
     use chrono::Utc;
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
@@ -1369,6 +1377,7 @@ async fn cmd_run(
     let run_id = format!("run_{}", Utc::now().format("%Y%m%d_%H%M%S"));
     let mut run_config = HashMap::new();
     run_config.insert("triggered_by".to_string(), "cli".to_string());
+    run_config.insert("environment".to_string(), environment.to_string());
     event_tx.send(SchedulerEvent::DagRunRequested {
         dag_id: dag_id.to_string(),
         run_id: run_id.clone(),
@@ -1392,6 +1401,7 @@ async fn cmd_run(
     let last_error_flag = std::sync::Arc::clone(&last_error);
     let registry_for_exec = std::sync::Arc::clone(&registry);
     let watermarks_for_exec = std::sync::Arc::clone(&watermarks);
+    let environment_for_exec = environment.to_string();
     let executor_handle = tokio::spawn(async move {
         let mut completed = 0usize;
         let total = dag_for_executor.tasks.len();
@@ -1461,7 +1471,7 @@ async fn cmd_run(
                         task_id: task_id.clone(),
                         attempt,
                         logical_date,
-                        environment: "production".to_string(),
+                        environment: environment_for_exec.clone(),
                         params: HashMap::new(),
                         extra_env,
                     };
@@ -2423,13 +2433,24 @@ async fn cmd_serve(
                             .to_string(),
                         );
 
+                        let environment = exec_state
+                            .runs
+                            .read()
+                            .ok()
+                            .and_then(|runs| {
+                                runs.iter()
+                                    .find(|r| r.run_id == run_id)
+                                    .map(|r| r.environment.clone())
+                            })
+                            .unwrap_or_else(|| "production".to_string());
+
                         let context = TaskContext {
                             dag_id: dag_id.clone(),
                             run_id: run_id.clone(),
                             task_id: task_id.clone(),
                             attempt,
                             logical_date: chrono::Utc::now(),
-                            environment: "production".to_string(),
+                            environment,
                             params: HashMap::new(),
                             extra_env: Vec::new(),
                         };

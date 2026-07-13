@@ -721,6 +721,40 @@ async fn trigger_run_records_environment() {
 }
 
 #[tokio::test]
+async fn trigger_run_inserts_environment_into_scheduler_config() {
+    let (router, state) = app(false);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    state.with_scheduler(tx);
+
+    // A dag must exist to trigger; write a minimal yaml dag into state.dags_path.
+    std::fs::write(
+        state.dags_path.join("env_dag.yaml"),
+        "id: env_dag\ntasks:\n  t1:\n    type: bash\n    command: \"echo hi\"\n",
+    )
+    .unwrap();
+
+    let (status, _body) = post(
+        &router,
+        "/api/v1/dags/env_dag/runs",
+        &serde_json::json!({ "environment": "staging" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let event = rx.recv().await.expect("scheduler event dispatched");
+    match event {
+        conduit_scheduler::SchedulerEvent::DagRunRequested { config, .. } => {
+            assert_eq!(
+                config.get("environment").map(String::as_str),
+                Some("staging")
+            );
+            assert_eq!(config.get("triggered_by").map(String::as_str), Some("api"));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn run_get_by_id() {
     let (router, state) = app(false);
 
