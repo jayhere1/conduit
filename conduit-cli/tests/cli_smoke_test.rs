@@ -603,7 +603,9 @@ tasks:
         .arg(&dags)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Contract"));
+        .stdout(predicate::str::contains(
+            "contract_ok.emit contracts: 1/1 checks passed",
+        ));
 }
 
 #[test]
