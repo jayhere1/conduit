@@ -41,6 +41,30 @@ fn make_context(task_id: &str) -> TaskContext {
         logical_date: chrono::Utc::now(),
         environment: "test".to_string(),
         params: HashMap::new(),
+        extra_env: Vec::new(),
+    }
+}
+
+fn make_bash_task(id: &str, command: &str) -> Task {
+    Task {
+        id: id.to_string(),
+        task_type: TaskType::Bash {
+            command: command.to_string(),
+        },
+        dependencies: vec![],
+        retries: 0,
+        retry_delay: None,
+        retry_backoff: None,
+        source_hash: None,
+        pool: None,
+        timeout: None,
+        priority: 0,
+        resources: ResourceLimits::default(),
+        trigger_rule: TriggerRule::default(),
+        incremental: None,
+        contracts: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 
@@ -97,4 +121,25 @@ async fn sql_task_with_registry_missing_connection_fails_loudly() {
 
     let result = ProcessRunner::run_with_providers(&task, &ctx, Some(&registry)).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn extra_env_vars_reach_the_child_process() {
+    let task = make_bash_task(
+        "env_echo",
+        "echo watermark=$CONDUIT_WATERMARK_VALUE full=$CONDUIT_FULL_REFRESH",
+    );
+    let mut ctx = make_context("env_echo");
+    ctx.extra_env = vec![
+        (
+            "CONDUIT_WATERMARK_VALUE".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+        ),
+        ("CONDUIT_FULL_REFRESH".to_string(), "false".to_string()),
+    ];
+
+    let output = ProcessRunner::run(&task, &ctx).await.unwrap();
+    assert_eq!(output.exit_code, 0);
+    assert!(output.stdout.contains("watermark=2026-01-01T00:00:00Z"));
+    assert!(output.stdout.contains("full=false"));
 }

@@ -28,6 +28,7 @@ fn make_task(id: &str, deps: &[String]) -> ParsedTask {
         priority: 0,
         raw_dependencies: deps.to_vec(),
         contracts: None,
+        incremental: None,
         parameters_text: String::new(),
         inputs: Vec::new(),
         outputs: Vec::new(),

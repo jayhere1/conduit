@@ -765,3 +765,60 @@ fn impact_identical_plans_report_clean() {
         Some(0)
     );
 }
+
+/// End-to-end: first run of an incremental task has no watermark so it's a
+/// full refresh; the emitted watermark is persisted to `.conduit/watermarks.json`;
+/// the second run picks it up and runs incrementally; `--full-refresh`
+/// forces a full refresh even with a watermark on file.
+#[test]
+fn cli_run_incremental_watermarks_and_full_refresh() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let dag = r#"
+id: incr_demo
+tasks:
+  ingest:
+    type: bash
+    command: "echo refresh=$CONDUIT_FULL_REFRESH; echo CONDUIT::WATERMARK::2026-01-02T00:00:00Z"
+    incremental:
+      strategy: append
+      time_column: created_at
+"#;
+    fs::write(dags.join("incr_demo.yaml"), dag).unwrap();
+
+    // First run: no watermark → full refresh.
+    conduit()
+        .args(["run", "incr_demo", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("full refresh"));
+
+    // Watermark file was persisted next to the project.
+    let wm_file = dir.path().join(".conduit").join("watermarks.json");
+    assert!(wm_file.exists(), "watermarks.json must be persisted");
+    let wm_json = fs::read_to_string(&wm_file).unwrap();
+    assert!(
+        wm_json.contains("2026-01-02T00:00:00"),
+        "emitted watermark stored: {wm_json}"
+    );
+
+    // Second run: incremental, and the task sees CONDUIT_FULL_REFRESH=false.
+    conduit()
+        .args(["run", "incr_demo", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("incremental").and(predicate::str::contains("refresh=false")),
+        );
+
+    // --full-refresh overrides the watermark.
+    conduit()
+        .args(["run", "incr_demo", "--full-refresh", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("full refresh"));
+}

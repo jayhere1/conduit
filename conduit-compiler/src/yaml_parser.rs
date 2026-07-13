@@ -410,6 +410,12 @@ impl YamlDagParser {
                 )?)
             };
 
+            // Resolve incremental config if any
+            let incremental = match &yaml_task.incremental {
+                Some(yaml_inc) => Some(Self::resolve_incremental_config(yaml_inc)?),
+                None => None,
+            };
+
             tasks.push(ParsedTask {
                 id: task_id.clone(),
                 task_type,
@@ -422,6 +428,7 @@ impl YamlDagParser {
                 priority: yaml_task.priority,
                 raw_dependencies: yaml_task.depends_on.clone(),
                 contracts,
+                incremental,
                 parameters_text: String::new(),
                 inputs: Vec::new(),
                 outputs: Vec::new(),

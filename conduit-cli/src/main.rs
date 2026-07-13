@@ -64,6 +64,7 @@ struct PersistentState {
     /// Best-effort event log for `conduit replay`. None when the events DB
     /// is unavailable (e.g. locked by a running `conduit serve`).
     event_store: Option<std::sync::Arc<conduit_state::EventStore>>,
+    watermark_store: std::sync::Arc<conduit_planner::WatermarkStore>,
     state_dir: PathBuf,
 }
 
@@ -140,10 +141,20 @@ impl PersistentState {
             None => env_manager,
         };
 
+        // Load watermarks so incremental tasks resume from where the last
+        // successful run left off. Best-effort: a missing/corrupt file
+        // starts fresh (first run behaves like a full refresh).
+        let watermarks_path = state_dir.join("watermarks.json");
+        let watermark_store = std::sync::Arc::new(
+            conduit_planner::WatermarkStore::from_file(&watermarks_path)
+                .unwrap_or_else(|_| conduit_planner::WatermarkStore::new()),
+        );
+
         Ok(Self {
             env_manager,
             snapshot_store,
             event_store,
+            watermark_store,
             state_dir: state_dir.to_path_buf(),
         })
     }
@@ -158,6 +169,9 @@ impl PersistentState {
         }
 
         // Snapshots are persisted via RocksDB — no explicit save needed
+
+        self.watermark_store
+            .save_to_file(&self.state_dir.join("watermarks.json"))?;
 
         Ok(())
     }
@@ -1258,7 +1272,7 @@ async fn cmd_run(
     dags_path: &PathBuf,
     date: Option<&str>,
     _max_tasks: usize,
-    _full_refresh: bool,
+    full_refresh: bool,
 ) -> Result<()> {
     use chrono::Utc;
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
@@ -1317,6 +1331,14 @@ async fn cmd_run(
     // real (or fail loudly if the connection isn't configured).
     let registry = build_provider_registry(dags_path).await;
 
+    // Load watermarks so incremental tasks resume where the last successful
+    // run left off; persisted back to disk after the run joins.
+    let watermarks_path = resolve_state_dir(dags_path).join("watermarks.json");
+    let watermarks = std::sync::Arc::new(
+        conduit_planner::WatermarkStore::from_file(&watermarks_path)
+            .unwrap_or_else(|_| conduit_planner::WatermarkStore::new()),
+    );
+
     // Create scheduler channels
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
@@ -1369,6 +1391,7 @@ async fn cmd_run(
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let last_error_flag = std::sync::Arc::clone(&last_error);
     let registry_for_exec = std::sync::Arc::clone(&registry);
+    let watermarks_for_exec = std::sync::Arc::clone(&watermarks);
     let executor_handle = tokio::spawn(async move {
         let mut completed = 0usize;
         let total = dag_for_executor.tasks.len();
@@ -1400,6 +1423,37 @@ async fn cmd_run(
                         }
                     };
 
+                    // Resolve incremental context, if this task declares one:
+                    // rewrite SQL queries and/or inject CONDUIT_* env vars.
+                    let run_time = chrono::Utc::now();
+                    let mut task_to_run = task.clone();
+                    let mut extra_env: Vec<(String, String)> = Vec::new();
+                    if let Some(inc_cfg) = &task.incremental {
+                        let wm = watermarks_for_exec.get(&dag_id, &task_id);
+                        let inc_ctx = conduit_planner::IncrementalEngine::build_context(
+                            inc_cfg,
+                            wm.as_ref(),
+                            full_refresh,
+                            run_time,
+                        );
+                        if inc_ctx.is_full_refresh {
+                            println!("  [INCR]  {} → full refresh", task_id);
+                        } else {
+                            println!(
+                                "  [INCR]  {} → incremental (watermark {:?})",
+                                task_id, inc_ctx.watermark
+                            );
+                        }
+                        if let conduit_common::dag::TaskType::Sql { query, .. } =
+                            &mut task_to_run.task_type
+                        {
+                            *query = conduit_planner::IncrementalEngine::rewrite_sql(
+                                query, inc_cfg, &inc_ctx,
+                            );
+                        }
+                        extra_env = inc_ctx.to_env_vars();
+                    }
+
                     // Build execution context
                     let context = TaskContext {
                         dag_id: dag_id.clone(),
@@ -1409,12 +1463,13 @@ async fn cmd_run(
                         logical_date,
                         environment: "production".to_string(),
                         params: HashMap::new(),
+                        extra_env,
                     };
 
                     // Execute for real via ProcessRunner
                     let task_start = Instant::now();
                     match ProcessRunner::run_with_providers(
-                        task,
+                        &task_to_run,
                         &context,
                         Some(&registry_for_exec),
                     )
@@ -1437,6 +1492,30 @@ async fn cmd_run(
                                 if !trimmed.is_empty() {
                                     for line in trimmed.lines().take(10) {
                                         println!("          | {}", line);
+                                    }
+                                }
+
+                                if let Some(inc_cfg) = &task.incremental {
+                                    if inc_cfg.emit_watermark {
+                                        let emitted = output.stdout.lines().rev().find_map(|l| {
+                                            l.trim()
+                                                .strip_prefix("CONDUIT::WATERMARK::")
+                                                .map(|s| s.trim().to_string())
+                                        });
+                                        let mut wm = watermarks_for_exec
+                                            .get(&dag_id, &task_id)
+                                            .unwrap_or_else(|| {
+                                                conduit_common::incremental::Watermark::new(
+                                                    &dag_id, &task_id,
+                                                )
+                                            });
+                                        conduit_planner::IncrementalEngine::advance_watermark(
+                                            &mut wm,
+                                            emitted.as_deref(),
+                                            run_time,
+                                            &run_id,
+                                        );
+                                        let _ = watermarks_for_exec.set(wm);
                                     }
                                 }
 
@@ -1542,6 +1621,10 @@ async fn cmd_run(
 
     let _ = tokio::join!(scheduler_handle, executor_handle);
 
+    if let Err(e) = watermarks.save_to_file(&watermarks_path) {
+        tracing::warn!(error = %e, "Failed to persist watermarks");
+    }
+
     let total_duration = start.elapsed();
     println!("Total time: {:.1}ms", total_duration.as_secs_f64() * 1000.0);
 
@@ -1645,7 +1728,7 @@ async fn cmd_apply(
     dags_path: &PathBuf,
     plan_file: Option<&Path>,
     auto_approve: bool,
-    _full_refresh: bool,
+    full_refresh: bool,
     only: &[String],
 ) -> Result<()> {
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
@@ -1840,18 +1923,56 @@ async fn cmd_apply(
 
                 println!("  [EXEC]  {}.{}", action.dag_id, action.task_id);
 
+                let run_id = format!("apply_{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+
+                // Resolve incremental context, if this task declares one:
+                // rewrite SQL queries and/or inject CONDUIT_* env vars.
+                let mut task_to_run = task.clone();
+                let mut extra_env: Vec<(String, String)> = Vec::new();
+                if let Some(inc_cfg) = &task.incremental {
+                    let wm = state.watermark_store.get(&action.dag_id, &action.task_id);
+                    let inc_ctx = conduit_planner::IncrementalEngine::build_context(
+                        inc_cfg,
+                        wm.as_ref(),
+                        full_refresh,
+                        logical_date,
+                    );
+                    if inc_ctx.is_full_refresh {
+                        println!(
+                            "  [INCR]  {}.{} → full refresh",
+                            action.dag_id, action.task_id
+                        );
+                    } else {
+                        println!(
+                            "  [INCR]  {}.{} → incremental (watermark {:?})",
+                            action.dag_id, action.task_id, inc_ctx.watermark
+                        );
+                    }
+                    if let conduit_common::dag::TaskType::Sql { query, .. } =
+                        &mut task_to_run.task_type
+                    {
+                        *query = conduit_planner::IncrementalEngine::rewrite_sql(
+                            query, inc_cfg, &inc_ctx,
+                        );
+                    }
+                    extra_env = inc_ctx.to_env_vars();
+                }
+
                 let context = TaskContext {
                     dag_id: action.dag_id.clone(),
-                    run_id: format!("apply_{}", chrono::Utc::now().format("%Y%m%d%H%M%S")),
+                    run_id: run_id.clone(),
                     task_id: action.task_id.clone(),
                     attempt: 1,
                     logical_date,
                     environment: environment.to_string(),
                     params: HashMap::new(),
+                    extra_env,
                 };
 
                 let task_start = Instant::now();
-                match ProcessRunner::run_with_providers(task, &context, Some(&registry)).await {
+                match ProcessRunner::run_with_providers(&task_to_run, &context, Some(&registry))
+                    .await
+                {
                     Ok(output) => {
                         let duration_ms = task_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1890,6 +2011,32 @@ async fn cmd_apply(
                                         "apply blocked: contract validation failed for {}.{} — environment not updated",
                                         action.dag_id, action.task_id
                                     );
+                                }
+                            }
+
+                            if let Some(inc_cfg) = &task.incremental {
+                                if inc_cfg.emit_watermark {
+                                    let emitted = output.stdout.lines().rev().find_map(|l| {
+                                        l.trim()
+                                            .strip_prefix("CONDUIT::WATERMARK::")
+                                            .map(|s| s.trim().to_string())
+                                    });
+                                    let mut wm = state
+                                        .watermark_store
+                                        .get(&action.dag_id, &action.task_id)
+                                        .unwrap_or_else(|| {
+                                            conduit_common::incremental::Watermark::new(
+                                                &action.dag_id,
+                                                &action.task_id,
+                                            )
+                                        });
+                                    conduit_planner::IncrementalEngine::advance_watermark(
+                                        &mut wm,
+                                        emitted.as_deref(),
+                                        logical_date,
+                                        &run_id,
+                                    );
+                                    let _ = state.watermark_store.set(wm);
                                 }
                             }
 
@@ -2284,6 +2431,7 @@ async fn cmd_serve(
                             logical_date: chrono::Utc::now(),
                             environment: "production".to_string(),
                             params: HashMap::new(),
+                            extra_env: Vec::new(),
                         };
 
                         let registry = exec_state
@@ -3661,6 +3809,7 @@ async fn cmd_backfill(
                                 .cloned()
                                 .unwrap_or_else(|| "production".to_string()),
                             params: partition_env.clone(),
+                            extra_env: Vec::new(),
                         };
                         // Inject backfill env vars into params
                         for (k, v) in &partition_env {
