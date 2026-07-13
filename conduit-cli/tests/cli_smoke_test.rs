@@ -522,6 +522,65 @@ tasks:
         .stderr(predicate::str::contains("apply aborted"));
 }
 
+#[test]
+fn cli_apply_rejects_stale_plan_file() {
+    let dir = TempDir::new().unwrap();
+    let dags = write_yaml_dag(&dir);
+    let plan_path = dir.path().join("plan.json");
+
+    // Save a plan against the empty environment (version 0).
+    conduit()
+        .args(["plan", "production", "--dags-path"])
+        .arg(&dags)
+        .arg("--output")
+        .arg(&plan_path)
+        .assert()
+        .success();
+
+    // Applying the saved plan while the env is still at version 0 works.
+    conduit()
+        .args(["apply", "production", "-y", "--plan-file"])
+        .arg(&plan_path)
+        .arg("--dags-path")
+        .arg(&dags)
+        .assert()
+        .success();
+
+    // The apply bumped the env to version 1 — the same plan is now stale.
+    conduit()
+        .args(["apply", "production", "-y", "--plan-file"])
+        .arg(&plan_path)
+        .arg("--dags-path")
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stale plan"));
+}
+
+#[test]
+fn cli_apply_rejects_plan_for_different_environment() {
+    let dir = TempDir::new().unwrap();
+    let dags = write_yaml_dag(&dir);
+    let plan_path = dir.path().join("plan.json");
+
+    conduit()
+        .args(["plan", "staging", "--dags-path"])
+        .arg(&dags)
+        .arg("--output")
+        .arg(&plan_path)
+        .assert()
+        .success();
+
+    conduit()
+        .args(["apply", "production", "-y", "--plan-file"])
+        .arg(&plan_path)
+        .arg("--dags-path")
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("targets environment 'staging'"));
+}
+
 // ─── README contract ────────────────────────────────────────────────────────
 
 /// Every command documented in the README's command table must parse.

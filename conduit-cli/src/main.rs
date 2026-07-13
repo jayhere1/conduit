@@ -1674,7 +1674,48 @@ async fn cmd_apply(
 
     let deploy = if let Some(pf) = plan_file {
         println!("Loading plan from {}...", pf.display());
-        DeploymentPlan::from_json(&std::fs::read_to_string(pf)?)?
+        let deploy = DeploymentPlan::from_json(&std::fs::read_to_string(pf)?)?;
+
+        if deploy.target_environment != environment {
+            anyhow::bail!(
+                "plan file targets environment '{}' but apply was invoked for '{}'.\n  \
+                 Re-run as: conduit apply {} --plan-file {}",
+                deploy.target_environment,
+                environment,
+                deploy.target_environment,
+                pf.display()
+            );
+        }
+
+        let current_version = state
+            .env_manager
+            .get(environment)
+            .map(|e| e.current_version)
+            .unwrap_or(0);
+        if current_version != deploy.base_environment_version {
+            eprintln!(
+                "Error: stale plan — environment '{}' changed since this plan was generated.",
+                environment
+            );
+            eprintln!("  Current environment version: {}", current_version);
+            eprintln!(
+                "  Plan was based on version:    {}",
+                deploy.base_environment_version
+            );
+            eprintln!();
+            eprintln!("Recommended action:");
+            eprintln!(
+                "  conduit plan {} --output <plan.json>   # regenerate against current state",
+                environment
+            );
+            eprintln!("  conduit apply {} --plan-file <plan.json> -y", environment);
+            anyhow::bail!(
+                "stale plan rejected (environment version {} != plan base version {})",
+                current_version,
+                deploy.base_environment_version
+            );
+        }
+        deploy
     } else {
         println!("Generating deployment plan for '{}'...", environment);
         println!();

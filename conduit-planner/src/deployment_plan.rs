@@ -91,6 +91,12 @@ pub struct DeploymentPlan {
     pub id: String,
     /// Target environment.
     pub target_environment: EnvironmentId,
+    /// The environment revision (`Environment::current_version`) this plan
+    /// was generated against. `apply` refuses the plan when the live
+    /// environment has moved past it. Plans saved before this field existed
+    /// deserialize as 0.
+    #[serde(default)]
+    pub base_environment_version: u32,
     /// When the plan was generated.
     pub created_at: DateTime<Utc>,
     /// All actions, in a valid execution order.
@@ -166,6 +172,7 @@ impl DeploymentPlan {
         DeploymentPlan {
             id: plan_id,
             target_environment: environment.id.clone(),
+            base_environment_version: environment.current_version,
             created_at: Utc::now(),
             actions,
             stats,
@@ -561,6 +568,7 @@ impl DeploymentPlan {
         Ok(DeploymentPlan {
             id: self.id.clone(),
             target_environment: self.target_environment.clone(),
+            base_environment_version: self.base_environment_version,
             created_at: self.created_at,
             actions: kept_actions,
             stats,
@@ -860,6 +868,37 @@ mod tests {
 
         assert_eq!(restored.target_environment, "staging");
         assert_eq!(restored.actions.len(), deploy.actions.len());
+    }
+
+    #[test]
+    fn plan_records_base_environment_version() {
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
+        let mut env = Environment::new("staging");
+        env.current_version = 3;
+        let store = SnapshotStore::new();
+
+        let deploy = DeploymentPlan::generate(&plan, &env, &store);
+        assert_eq!(deploy.base_environment_version, 3);
+
+        let restored = DeploymentPlan::from_json(&deploy.to_json().unwrap()).unwrap();
+        assert_eq!(restored.base_environment_version, 3);
+    }
+
+    #[test]
+    fn old_plan_json_without_base_version_defaults_to_zero() {
+        let plan = make_plan("etl", vec![make_task("extract", vec![])], vec!["extract"]);
+        let env = Environment::new("staging");
+        let store = SnapshotStore::new();
+
+        let deploy = DeploymentPlan::generate(&plan, &env, &store);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&deploy.to_json().unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("base_environment_version");
+        let restored = DeploymentPlan::from_json(&value.to_string()).unwrap();
+        assert_eq!(restored.base_environment_version, 0);
     }
 
     #[test]

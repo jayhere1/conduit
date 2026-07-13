@@ -292,31 +292,39 @@ Only load is recompiled. Extract and transform are byte-for-byte identical, so t
 
 ## Conflict Detection
 
-If the environment changes while you're planning, Conduit detects conflicts:
+Every saved plan records `base_environment_version` — the environment's
+revision counter (`Environment.current_version`) at the moment the plan was
+generated. That counter is bumped by every apply, promote, and rollback. If
+the environment changes while you're holding a saved plan, Conduit detects
+the conflict at apply time and refuses to apply it:
 
 ```bash
 # Generate a plan
-conduit plan production > plan.json
+conduit plan production --output plan.json
 
 # Someone else applies a different change
 # (in another shell)
 
-# Try to apply your plan
-conduit apply production plan.json -y
+# Try to apply your (now stale) plan
+conduit apply production --plan-file plan.json -y
 ```
 
 Output:
 
 ```
-Error: Snapshot conflict
-  Current environment: prod-snap-20240322-145456
-  Plan was based on: prod-snap-20240322-143215
-  Conflict: extract task changed between plan and apply
+Error: stale plan — environment 'production' changed since this plan was generated.
+  Current environment version: 4
+  Plan was based on version:    3
 
 Recommended action:
-  conduit plan production  # Regenerate plan with current state
-  conduit apply production -y
+  conduit plan production --output plan.json   # regenerate against current state
+  conduit apply production --plan-file plan.json -y
 ```
+
+Conduit also rejects a plan file applied against the wrong environment: if a
+plan's `target_environment` doesn't match the environment named on the
+`apply` command line, the apply fails immediately with an error telling you
+which environment the plan actually targets.
 
 Conduit prevents applying stale plans.
 
