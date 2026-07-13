@@ -1846,14 +1846,22 @@ async fn cmd_apply(
                                     eprintln!("          ! {}", line);
                                 }
                             }
-                            eprintln!("Apply aborted due to task failure.");
-                            return Ok(());
+                            anyhow::bail!(
+                                "apply aborted: task {}.{} failed with exit code {}",
+                                action.dag_id,
+                                action.task_id,
+                                output.exit_code
+                            );
                         }
                     }
                     Err(e) => {
                         eprintln!("  [ERR]   {}.{} — {}", action.dag_id, action.task_id, e);
-                        eprintln!("Apply aborted due to execution error.");
-                        return Ok(());
+                        anyhow::bail!(
+                            "apply aborted: task {}.{} execution error: {}",
+                            action.dag_id,
+                            action.task_id,
+                            e
+                        );
                     }
                 }
             }

@@ -498,6 +498,30 @@ fn cli_lineage_trace_unknown_column_fails() {
         ));
 }
 
+// ─── conduit apply ──────────────────────────────────────────────────────────
+
+#[test]
+fn cli_apply_fails_with_nonzero_exit_when_task_fails() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let dag = r#"
+id: failing_apply
+tasks:
+  boom:
+    type: bash
+    command: "echo about-to-fail >&2; exit 1"
+"#;
+    fs::write(dags.join("failing_apply.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["apply", "production", "-y", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("apply aborted"));
+}
+
 // ─── README contract ────────────────────────────────────────────────────────
 
 /// Every command documented in the README's command table must parse.
