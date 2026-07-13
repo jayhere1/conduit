@@ -151,14 +151,36 @@ impl AppState {
             }
         };
 
+        // Live environment set: JSON file shared with the CLI (`conduit apply`
+        // writes the same file), so serve and the CLI see one world.
+        let env_file = state_dir.join("environments.json");
+        let env_manager = if env_file.exists() {
+            EnvironmentManager::from_file(&env_file).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to load environments.json; starting fresh");
+                EnvironmentManager::new()
+            })
+        } else {
+            EnvironmentManager::new()
+        };
         // Attach env history store so promote/rollback record versions on disk.
-        let env_manager = EnvironmentManager::new();
         let env_manager = match conduit_state::EnvHistoryStore::open(state_dir.join("env_history"))
         {
             Ok(store) => env_manager.with_history_store(store),
             Err(_) => env_manager,
         };
-        let snapshot_store = Arc::new(SnapshotStore::new());
+        // Durable snapshot store at the same path the CLI uses. Falls back to
+        // the in-memory temp store only if the DB can't be opened (e.g. the
+        // CLI holds the lock) — that fallback loses data on restart, so warn.
+        let snapshot_store = match SnapshotStore::open(&state_dir.join("snapshots_db")) {
+            Ok(store) => Arc::new(store),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to open snapshots_db; falling back to in-memory snapshots (lost on restart)"
+                );
+                Arc::new(SnapshotStore::new())
+            }
+        };
         let env_manager = env_manager.with_snapshot_store(Arc::clone(&snapshot_store));
         let env_manager = match &event_store {
             Some(store) => env_manager.with_event_store(Arc::clone(store)),
@@ -168,13 +190,18 @@ impl AppState {
         let external_lineage = Arc::new(open_external_lineage_store(&state_dir));
         let plan_cache = Arc::new(PlanCache::new(dags_path.clone()));
 
+        let rehydrated_runs = event_store
+            .as_ref()
+            .map(|s| Self::rehydrate_runs(s))
+            .unwrap_or_default();
+
         Arc::new(Self {
             dags_path,
             state_dir,
             ui_dir,
             env_manager,
             snapshot_store,
-            runs: RwLock::new(Vec::new()),
+            runs: RwLock::new(rehydrated_runs),
             event_tx,
             provider_registry: RwLock::new(None),
             auth_store,
@@ -311,6 +338,98 @@ impl AppState {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Rebuild the run cache by folding the durable event log. Keeps at most
+    /// MAX_CACHED_RUNS most-recent runs (same cap as record_run).
+    fn rehydrate_runs(event_store: &conduit_state::EventStore) -> Vec<DagRunInfo> {
+        use conduit_common::event::{EventKind, RunStatus};
+        use std::collections::HashMap;
+
+        let Ok(events) = event_store.all_events() else {
+            return Vec::new();
+        };
+        let mut runs: Vec<DagRunInfo> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+
+        for event in events {
+            match event.kind {
+                EventKind::DagRunCreated {
+                    dag_id,
+                    run_id,
+                    environment,
+                    triggered_by,
+                    ..
+                } => {
+                    index.insert(run_id.clone(), runs.len());
+                    runs.push(DagRunInfo {
+                        run_id,
+                        dag_id,
+                        status: "running".to_string(),
+                        started_at: event.timestamp,
+                        finished_at: None,
+                        task_states: HashMap::new(),
+                        task_logs: HashMap::new(),
+                        triggered_by,
+                        environment,
+                    });
+                }
+                EventKind::TaskStarted {
+                    run_id, task_id, ..
+                } => {
+                    if let Some(&i) = index.get(&run_id) {
+                        runs[i].task_states.insert(task_id, "running".to_string());
+                    }
+                }
+                EventKind::TaskCompleted {
+                    run_id, task_id, ..
+                } => {
+                    if let Some(&i) = index.get(&run_id) {
+                        runs[i].task_states.insert(task_id, "success".to_string());
+                    }
+                }
+                EventKind::TaskFailed {
+                    run_id, task_id, ..
+                } => {
+                    if let Some(&i) = index.get(&run_id) {
+                        runs[i].task_states.insert(task_id, "failed".to_string());
+                    }
+                }
+                EventKind::TaskSkipped {
+                    run_id, task_id, ..
+                } => {
+                    if let Some(&i) = index.get(&run_id) {
+                        runs[i].task_states.insert(task_id, "skipped".to_string());
+                    }
+                }
+                EventKind::DagRunCompleted { run_id, status, .. } => {
+                    if let Some(&i) = index.get(&run_id) {
+                        runs[i].status = match status {
+                            RunStatus::Success => "success".to_string(),
+                            RunStatus::Failed => "failed".to_string(),
+                            RunStatus::Cancelled => "cancelled".to_string(),
+                        };
+                        runs[i].finished_at = Some(event.timestamp);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if runs.len() > MAX_CACHED_RUNS {
+            let excess = runs.len() - MAX_CACHED_RUNS;
+            runs.drain(0..excess);
+        }
+        runs
+    }
+
+    /// Persist the live environment set. Call after any env mutation
+    /// (create/delete/promote/rollback/policy/apply).
+    pub fn persist_environments(&self) {
+        let path = self.state_dir.join("environments.json");
+        if let Err(e) = self.env_manager.save_to_file(&path) {
+            tracing::warn!(error = %e, path = %path.display(), "Failed to persist environments");
+        }
     }
 
     /// Seed the state with fabricated demo run history so the UI has data
