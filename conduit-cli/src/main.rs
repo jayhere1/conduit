@@ -245,7 +245,7 @@ enum Commands {
         #[arg(long, default_value = "production")]
         env: String,
 
-        /// Enable distributed execution mode
+        /// Run via the distributed coordinator; workers must connect (see `conduit worker`)
         #[arg(long)]
         distributed: bool,
 

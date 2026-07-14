@@ -191,102 +191,59 @@ RocksDB uses **write-ahead logging**, ensuring:
 
 ## Time-Travel Debugging
 
-Replay any run from the event log:
+Replay the event log to reconstruct system state as of any point in
+history:
 
 ```bash
-# Find an interesting run
-conduit status
+# List the raw events (sequence, timestamp, type)
+conduit replay --events-only
 
-# Time-travel to specific point in a run
-conduit replay run123 --to event:7  # After TaskCompleted(extract)
+# Reconstruct state as of event 7
+conduit replay --to 7
+
+# Machine-readable reconstruction
+conduit replay --to 7 --json
 ```
 
-Output:
-
-```
-Replaying run123 from beginning to event 7
-
-State at event 7:
-  DAG: daily_analytics_etl
-  Run ID: run123
-  Completed tasks: extract
-  In-progress tasks: (none)
-  Pending tasks: transform, load
-  Task outputs:
-    - extract.users_count: 1000
-    - extract.output: raw_users.csv
-
-Time-travel debugging:
-  - What were the exact XCom outputs at this point?
-    Answer: extract returned raw_users.csv, emitted users_count=1000
-  - Did the database state look correct here?
-    Answer: Yes, 1000 users extracted
-  - Why did transform fail later?
-    Answer: (Check subsequent events)
-```
-
-### Replay with Modifications
-
-Replay a run, but with different inputs:
-
-```bash
-conduit replay run123 --modify 'extract.users_limit=100'
-```
-
-This reruns extract with `users_limit=100`, then streams the new output through transform and load, letting you see if that would have avoided the failure.
+The reconstruction shows the environments that existed, every run and
+its status, and per-task success/failure counts — all derived purely
+from events up to the chosen sequence number. Because events are
+immutable, the same replay always produces the same state.
 
 ## Event Streaming
 
-Subscribe to events in real-time via WebSocket:
+Subscribe to events in real-time over the WebSocket endpoint
+(`/ws/events`, outside the `/api/v1` prefix) with any WebSocket client:
 
 ```python
-from conduit.sdk import event_stream
+import asyncio, json, websockets
 
-async def watch_run(run_id):
-    async with event_stream() as stream:
-        async for event in stream.subscribe(f"run:{run_id}"):
-            print(f"{event.timestamp} [{event.type}] {event}")
+async def watch():
+    async with websockets.connect("ws://localhost:8080/ws/events") as ws:
+        async for message in ws:
+            event = json.loads(message)
+            print(f"[{event['type']}] {event}")
 
-# Output:
-# 2024-03-22 14:32:10 [DAGRunStarted] run123 started
-# 2024-03-22 14:32:10 [TaskStarted] extract started
-# 2024-03-22 14:32:12 [TaskCompleted] extract finished (1.67s)
-# 2024-03-22 14:32:13 [TaskStarted] transform started
-# 2024-03-22 14:35:12 [TaskCompleted] transform finished (2m59s)
-# 2024-03-22 14:35:13 [TaskStarted] load started
-# 2024-03-22 14:37:20 [TaskCompleted] load finished (2m07s)
-# 2024-03-22 14:37:20 [DAGRunCompleted] run123 succeeded
+asyncio.run(watch())
 ```
 
 ## Event Queries
 
-Query the event log:
+Query the event log over the API:
 
-```python
-from conduit import event_store
+```bash
+# All events for a run
+curl 'localhost:8080/api/v1/events?run_id=run123'
 
-# Get all events for a run
-events = event_store.query(
-    run_id='run123'
-)
-for event in events:
-    print(f"{event.timestamp} {event.type} {event.task_id}")
+# Failed tasks
+curl 'localhost:8080/api/v1/events?event_type=TaskFailed&limit=50'
 
-# Get all failed tasks in last 24 hours
-failures = event_store.query(
-    event_type='TaskFailed',
-    since='24h'
-)
-for event in failures:
-    print(f"Task {event.task_id} failed: {event.stderr}")
+# Deployment history
+curl 'localhost:8080/api/v1/events?event_type=PlanApplied'
 
-# Get deployment history
-deployments = event_store.query(
-    event_type='SnapshotDeployed',
-    environment='production'
-)
-for event in deployments:
-    print(f"Deployed {event.snapshot_id} at {event.timestamp}")
+# A sequence range
+curl 'localhost:8080/api/v1/events?from=100&to=200'
+```
 ```
 
 ## Snapshots
@@ -311,78 +268,48 @@ Snapshots are **read-only caches** of compiled DAGs. They're computed from the e
 
 ### Snapshot Coherency
 
-A snapshot is **coherent** if all events leading to it are present in the event log:
+A snapshot is **coherent** if all events leading to it are present in
+the event log. You can verify what the log supports by reconstructing
+state from it:
 
 ```bash
-# Verify all snapshots are coherent
-conduit verify-snapshots
+conduit replay --json
 ```
 
-Output:
-
-```
-Verifying snapshots...
-
-✓ prod-snap-20240322-143215: 10 tasks, all source events present
-✓ prod-snap-20240322-145456: 10 tasks (1 reused, 9 new), all source events present
-✓ staging-snap-20240322-145123: 11 tasks (10 reused, 1 added), all source events present
-
-All snapshots coherent.
-```
+Whatever `replay` reconstructs is exactly what the event log can prove
+happened; anything else was lost or never recorded.
 
 ## Retention Policies
 
-Events are immutable but can be pruned after a retention period:
-
-```toml
-[retention]
-# Keep events for 90 days
-events_max_age = "90d"
-
-# Or keep 10,000 most recent events
-events_max_count = 10000
-
-# Never prune deployment events
-never_prune_types = ["SnapshotDeployed", "EnvironmentPromoted"]
-```
-
-Pruning is **safe** because snapshots can be reconstructed from remaining events.
+The event store supports retention limits (maximum event age, maximum
+event count, and a minimum number of events always kept). This is
+currently a library-level policy — `RetentionPolicy` in `conduit-state`,
+with `standard()` (7 days / 100k events) and `extended()` (30 days / 1M
+events) presets — and the default keeps everything. There is no
+user-facing configuration file setting for it yet.
 
 ## Event-Driven Triggers
 
-Events can trigger external actions via webhooks:
-
-```bash
-conduit webhook add https://slack.com/hooks/abc123 \
-  --event-type TaskFailed \
-  --payload '{"text": "Task {{task_id}} failed"}'
-```
-
-When a TaskFailed event is logged, Conduit POSTs to the webhook with context.
+There is no built-in webhook mechanism. To trigger external actions
+(Slack alerts, PagerDuty, …), subscribe to the WebSocket stream at
+`/ws/events` and forward the events you care about — see
+[Event Streaming](#event-streaming) above.
 
 ## Audit Trail
 
-Every change to every environment is logged:
+Every apply is recorded in the event log, and every environment
+mutation (apply, promote, rollback) is recorded in the environment's
+version history:
 
 ```bash
-# View audit trail for production
-conduit audit-log production
+# Environment-level audit: version history with reasons
+conduit env history production
+
+# Raw event log
+conduit replay --events-only
 ```
 
-Output:
-
-```
-Timestamp           Type                  User       Changes
-──────────────────────────────────────────────────────────────
-2024-03-22 14:51:23 SnapshotDeployed      (automated) prod-snap-v5 → v6
-                                                      1 task added, 1 task modified
-2024-03-22 13:12:45 EnvironmentPromoted   alice      staging → production
-                                                      snapshot staging-v3
-2024-03-21 08:00:00 SnapshotDeployed      bob        prod-snap-v4 → v5
-                                                      3 tasks modified
-2024-03-20 19:30:15 EnvironmentRolledBack alice      to prod-snap-v4
-                                                      reason: high error rate detected
-```
+Over the API: `GET /api/v1/events?event_type=PlanApplied`.
 
 ## Consistency Guarantees
 
@@ -391,7 +318,7 @@ Event sourcing provides strong consistency guarantees:
 1. **Monotonic consistency**: Events are applied in order
 2. **Durability**: Events are persisted before returning
 3. **Completeness**: All state changes are captured
-4. **Auditability**: Complete trace of who did what when
+4. **Auditability**: Complete trace of what happened when
 
 ## Performance Implications
 

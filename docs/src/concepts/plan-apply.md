@@ -328,22 +328,25 @@ which environment the plan actually targets.
 
 Conduit prevents applying stale plans.
 
-## Rollback Is Just a Plan/Apply
+## Rollback Restores a Recorded Version
 
-Rollback is not a special operation—it's just a plan/apply to a previous snapshot:
+Every apply, promote, and rollback records a version in the environment's
+history. Rolling back restores the snapshot pointers captured at a prior
+version:
 
 ```bash
-# See previous snapshots
-conduit snapshot list
+# See the environment's recorded versions
+conduit env history production
 
-# Plan rollback to specific snapshot
-conduit plan production --to prod-snap-20240322-143215
+# Undo the most recent mutation
+conduit env rollback production --yes
 
-# Apply rollback
-conduit apply production --to prod-snap-20240322-143215 -y
+# Or restore a specific version
+conduit env rollback production --to-version 3 --yes
 ```
 
-This is functionally identical to promoting an old environment. Rollback is instant because snapshots are immutable pointers.
+Rollback is instant because snapshots are immutable — only the
+environment's pointers move.
 
 ## Safety Guarantees
 
@@ -379,12 +382,15 @@ conduit apply production -y
 
 ### 4. Complete Audit Trail
 
-Every plan and apply is logged to the event store:
+Every apply is logged to the durable event store (`PlanApplied` events),
+and every environment mutation is recorded in its version history:
 
 ```bash
-conduit events list --filter type:plan_generated
-conduit events list --filter type:snapshot_deployed
+conduit replay --events-only          # walk the raw event log
+conduit env history production        # per-environment version history
 ```
+
+Over the API: `GET /api/v1/events?event_type=PlanApplied`.
 
 ## Best Practices
 

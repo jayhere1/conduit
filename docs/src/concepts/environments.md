@@ -225,39 +225,26 @@ Snapshot dev-snap-20240318-092345 archived
 
 ## Snapshot Management
 
-Snapshots are the immutable artifacts that environments point to.
+Snapshots are the immutable artifacts that environments point to. They
+live in the durable snapshot store at `.conduit/snapshots_db` and are
+created by `conduit apply` (one per executed task).
 
-### List Snapshots
-
-```bash
-conduit snapshot list
-```
-
-Output:
-
-```
-Snapshots:
-
-ID                                    DAGs  Size   Created              Referenced by
-────────────────────────────────────────────────────────────────────────────────────
-prod-snap-20240322-143215             5     1.2KB  2024-03-22 14:32:15  production
-staging-snap-20240322-145123          5     1.3KB  2024-03-22 14:51:23  staging
-prod-snap-20240321-095412             5     1.1KB  2024-03-21 09:54:12  (archived)
-```
-
-### Delete Snapshot
-
-Free up space by deleting archived snapshots:
+There is no standalone snapshot CLI; you inspect snapshots through the
+environments that reference them:
 
 ```bash
-conduit snapshot delete prod-snap-20240321-095412
+# Per-task snapshot pointers for an environment (API)
+curl localhost:8080/api/v1/environments/production
+
+# Compare the pointers of two environments
+conduit env diff staging production
+
+# See how the pointers changed over time
+conduit env history production
 ```
 
-Output:
-
-```
-Deleted snapshot: prod-snap-20240321-095412 (1.1 KB freed)
-```
+Snapshots are never deleted automatically — old versions stay available
+for `conduit env rollback`.
 
 **Note**: You cannot delete a snapshot that's referenced by an active environment.
 
@@ -342,48 +329,45 @@ Summary:
   Unchanged: 9 tasks
 ```
 
-## Schedule Isolation
+## Schedules Are Per-DAG
 
-Each environment has independent schedules:
-
-```bash
-# Production runs daily at 2 AM
-conduit schedule set production daily_analytics_etl "0 2 * * *"
-
-# Staging runs hourly for testing
-conduit schedule set staging daily_analytics_etl "0 * * * *"
-
-# Dev doesn't run automatically
-conduit schedule set dev daily_analytics_etl "" --disable
-```
-
-Scheduled runs are completely independent between environments. Staging's hourly runs don't affect production's daily runs.
-
-## Run History Isolation
-
-Each environment maintains its own run history:
+Schedules are declared on the DAG itself (`schedule:` cron expression in
+the DAG definition) and executed by the scheduler inside `conduit serve`.
+There is no per-environment schedule override: cron-initiated runs
+execute against the default (`production`) environment. To exercise a
+DAG in another environment, trigger it explicitly:
 
 ```bash
-# View runs in production
-conduit status production
-
-# View runs in staging
-conduit status staging
-
-# View runs across all environments
-conduit status --all
+conduit run daily_analytics_etl --env staging
 ```
 
-Each environment's runs are stored in separate event streams. You can replay or investigate any run independently.
+or over the API with `{"environment": "staging"}`.
+
+## Run History Carries the Environment
+
+Every run records which environment it ran against, and history is
+filterable by it:
+
+```bash
+# CLI status for one environment
+conduit status --env production
+```
+
+```bash
+# API: runs filtered by environment
+curl 'localhost:8080/api/v1/runs?environment=staging'
+```
+
+All runs share one durable event log — the environment is a recorded
+field on each run, not a separate stream.
 
 ## Best Practices
 
 1. **Always test in staging first**: Catch issues before production.
 2. **Use descriptive environment names**: `staging`, `canary`, `feature-{name}`, not `test1`, `test2`.
 3. **Keep production unchanged until ready**: Use plan/apply workflow, never direct edits.
-4. **Archive old snapshots**: Save metadata space by archiving unused environments.
+4. **Guard production promotions with a policy**: `conduit env set-policy production --require-source staging`.
 5. **Document promotions**: Leave notes when promoting major changes.
-6. **Use independent schedules**: Don't run all environments on the same cron schedule.
 
 ## Limitations
 
@@ -396,7 +380,7 @@ If you need data isolation (staging database separate from production), configur
 ```python
 @task
 def write_to_db(data):
-    if os.getenv("CONDUIT_ENV") == "production":
+    if os.getenv("CONDUIT_ENVIRONMENT") == "production":
         db_connection = "prod.example.com"
     else:
         db_connection = "staging.example.com"
