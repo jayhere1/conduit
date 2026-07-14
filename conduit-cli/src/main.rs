@@ -232,7 +232,7 @@ enum Commands {
         #[arg(long)]
         date: Option<String>,
 
-        /// Maximum concurrent tasks
+        /// Maximum number of tasks to execute concurrently
         #[arg(long, default_value = "16")]
         max_tasks: usize,
 
@@ -452,7 +452,7 @@ enum Commands {
         #[arg(long, default_value = "day")]
         granularity: String,
 
-        /// Maximum concurrent partitions (v0.1: sequential only)
+        /// Maximum number of partitions to execute concurrently
         #[arg(long, default_value = "1")]
         max_concurrent: u32,
 
@@ -1278,7 +1278,7 @@ async fn cmd_run(
     dag_id: &str,
     dags_path: &PathBuf,
     date: Option<&str>,
-    _max_tasks: usize,
+    max_tasks: usize,
     full_refresh: bool,
     environment: &str,
 ) -> Result<()> {
@@ -1402,10 +1402,13 @@ async fn cmd_run(
     let registry_for_exec = std::sync::Arc::clone(&registry);
     let watermarks_for_exec = std::sync::Arc::clone(&watermarks);
     let environment_for_exec = environment.to_string();
+    // Bounds how many DispatchTask spawns may run their process at once;
+    // independent tasks (no shared dependency edge) execute concurrently up
+    // to this limit instead of serially awaiting each dispatch.
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_tasks.max(1)));
     let executor_handle = tokio::spawn(async move {
-        let mut completed = 0usize;
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let total = dag_for_executor.tasks.len();
-        let mut _failed = false;
 
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
@@ -1464,135 +1467,164 @@ async fn cmd_run(
                         extra_env = inc_ctx.to_env_vars();
                     }
 
-                    // Build execution context
-                    let context = TaskContext {
-                        dag_id: dag_id.clone(),
-                        run_id: run_id.clone(),
-                        task_id: task_id.clone(),
-                        attempt,
-                        logical_date,
-                        environment: environment_for_exec.clone(),
-                        params: HashMap::new(),
-                        extra_env,
-                    };
+                    // Everything below (context build, real process
+                    // execution, event send, watermark advance) runs on the
+                    // semaphore-bounded pool so independent tasks execute
+                    // concurrently instead of this loop awaiting each
+                    // dispatch inline. `CompleteDagRun` only arrives once the
+                    // scheduler has observed every task event, so no spawn
+                    // here can be orphaned by the recv loop breaking early.
+                    let permit_sem = std::sync::Arc::clone(&semaphore);
+                    let event_tx = executor_event_tx.clone();
+                    let registry = std::sync::Arc::clone(&registry_for_exec);
+                    let watermarks = std::sync::Arc::clone(&watermarks_for_exec);
+                    let completed = std::sync::Arc::clone(&completed);
+                    let last_error_flag = std::sync::Arc::clone(&last_error_flag);
+                    let environment_for_exec = environment_for_exec.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit_sem
+                            .acquire_owned()
+                            .await
+                            .expect("semaphore never closed");
 
-                    // Execute for real via ProcessRunner
-                    let task_start = Instant::now();
-                    match ProcessRunner::run_with_providers(
-                        &task_to_run,
-                        &context,
-                        Some(&registry_for_exec),
-                    )
-                    .await
-                    {
-                        Ok(output) => {
-                            let duration = task_start.elapsed();
-                            completed += 1;
+                        // Build execution context
+                        let context = TaskContext {
+                            dag_id: dag_id.clone(),
+                            run_id: run_id.clone(),
+                            task_id: task_id.clone(),
+                            attempt,
+                            logical_date,
+                            environment: environment_for_exec,
+                            params: HashMap::new(),
+                            extra_env,
+                        };
 
-                            if output.exit_code == 0 {
-                                println!(
-                                    "  [OK]    {} ({:.0}ms, exit 0) [{}/{}]",
-                                    task_id,
-                                    duration.as_secs_f64() * 1000.0,
-                                    completed,
-                                    total
-                                );
-                                // Print captured stdout (trimmed)
-                                let trimmed = output.stdout.trim();
-                                if !trimmed.is_empty() {
-                                    for line in trimmed.lines().take(10) {
-                                        println!("          | {}", line);
+                        // Execute for real via ProcessRunner
+                        let task_start = Instant::now();
+                        match ProcessRunner::run_with_providers(
+                            &task_to_run,
+                            &context,
+                            Some(&registry),
+                        )
+                        .await
+                        {
+                            Ok(output) => {
+                                let duration = task_start.elapsed();
+
+                                if output.exit_code == 0 {
+                                    let completed_n = completed
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                        + 1;
+                                    println!(
+                                        "  [OK]    {} ({:.0}ms, exit 0) [{}/{}]",
+                                        task_id,
+                                        duration.as_secs_f64() * 1000.0,
+                                        completed_n,
+                                        total
+                                    );
+                                    // Print captured stdout (trimmed)
+                                    let trimmed = output.stdout.trim();
+                                    if !trimmed.is_empty() {
+                                        for line in trimmed.lines().take(10) {
+                                            println!("          | {}", line);
+                                        }
                                     }
-                                }
 
-                                if let Some(inc_cfg) = &task.incremental {
-                                    if inc_cfg.emit_watermark {
-                                        let emitted = output.stdout.lines().rev().find_map(|l| {
-                                            l.trim()
-                                                .strip_prefix("CONDUIT::WATERMARK::")
-                                                .map(|s| s.trim().to_string())
-                                        });
-                                        let mut wm = watermarks_for_exec
-                                            .get(&dag_id, &task_id)
-                                            .unwrap_or_else(|| {
-                                                conduit_common::incremental::Watermark::new(
-                                                    &dag_id, &task_id,
-                                                )
-                                            });
-                                        conduit_planner::IncrementalEngine::advance_watermark(
-                                            &mut wm,
-                                            emitted.as_deref(),
-                                            run_time,
-                                            &run_id,
-                                        );
-                                        let _ = watermarks_for_exec.set(wm);
+                                    if let Some(inc_cfg) = &task_to_run.incremental {
+                                        if inc_cfg.emit_watermark {
+                                            let emitted =
+                                                output.stdout.lines().rev().find_map(|l| {
+                                                    l.trim()
+                                                        .strip_prefix("CONDUIT::WATERMARK::")
+                                                        .map(|s| s.trim().to_string())
+                                                });
+                                            let mut wm = watermarks
+                                                .get(&dag_id, &task_id)
+                                                .unwrap_or_else(|| {
+                                                    conduit_common::incremental::Watermark::new(
+                                                        &dag_id, &task_id,
+                                                    )
+                                                });
+                                            conduit_planner::IncrementalEngine::advance_watermark(
+                                                &mut wm,
+                                                emitted.as_deref(),
+                                                run_time,
+                                                &run_id,
+                                            );
+                                            let _ = watermarks.set(wm);
+                                        }
                                     }
-                                }
 
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskCompleted {
-                                    dag_id,
-                                    run_id,
-                                    task_id,
-                                    snapshot_id: None,
-                                    duration_ms: duration.as_millis() as u64,
-                                });
-                            } else if output.exit_code == 2 {
-                                println!("  [RETRY] {} (exit 2)", task_id);
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id,
-                                    run_id,
-                                    task_id,
-                                    error: format!("exit code 2 (retry): {}", output.stderr.trim()),
-                                    attempt,
-                                });
-                            } else {
-                                _failed = true;
-                                println!(
-                                    "  [FAIL]  {} (exit {}, {:.0}ms) [{}/{}]",
-                                    task_id,
-                                    output.exit_code,
-                                    duration.as_secs_f64() * 1000.0,
-                                    completed,
-                                    total
-                                );
-                                if !output.stderr.trim().is_empty() {
-                                    for line in output.stderr.trim().lines().take(5) {
-                                        println!("          ! {}", line);
-                                    }
-                                }
-                                if let Ok(mut guard) = last_error_flag.lock() {
-                                    *guard = Some(format!(
-                                        "{} exited {}: {}",
+                                    let _ = event_tx.send(SchedulerEvent::TaskCompleted {
+                                        dag_id,
+                                        run_id,
+                                        task_id,
+                                        snapshot_id: None,
+                                        duration_ms: duration.as_millis() as u64,
+                                    });
+                                } else if output.exit_code == 2 {
+                                    completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    println!("  [RETRY] {} (exit 2)", task_id);
+                                    let _ = event_tx.send(SchedulerEvent::TaskFailed {
+                                        dag_id,
+                                        run_id,
+                                        task_id,
+                                        error: format!(
+                                            "exit code 2 (retry): {}",
+                                            output.stderr.trim()
+                                        ),
+                                        attempt,
+                                    });
+                                } else {
+                                    let completed_n = completed
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                        + 1;
+                                    println!(
+                                        "  [FAIL]  {} (exit {}, {:.0}ms) [{}/{}]",
                                         task_id,
                                         output.exit_code,
-                                        output.stderr.trim()
-                                    ));
+                                        duration.as_secs_f64() * 1000.0,
+                                        completed_n,
+                                        total
+                                    );
+                                    if !output.stderr.trim().is_empty() {
+                                        for line in output.stderr.trim().lines().take(5) {
+                                            println!("          ! {}", line);
+                                        }
+                                    }
+                                    if let Ok(mut guard) = last_error_flag.lock() {
+                                        *guard = Some(format!(
+                                            "{} exited {}: {}",
+                                            task_id,
+                                            output.exit_code,
+                                            output.stderr.trim()
+                                        ));
+                                    }
+                                    let _ = event_tx.send(SchedulerEvent::TaskFailed {
+                                        dag_id,
+                                        run_id,
+                                        task_id,
+                                        error: output.stderr.trim().to_string(),
+                                        attempt,
+                                    });
                                 }
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
+                            }
+                            Err(e) => {
+                                completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                println!("  [ERR]   {} — {}", task_id, e);
+                                if let Ok(mut guard) = last_error_flag.lock() {
+                                    *guard = Some(e.to_string());
+                                }
+                                let _ = event_tx.send(SchedulerEvent::TaskFailed {
                                     dag_id,
                                     run_id,
                                     task_id,
-                                    error: output.stderr.trim().to_string(),
+                                    error: e.to_string(),
                                     attempt,
                                 });
                             }
                         }
-                        Err(e) => {
-                            _failed = true;
-                            completed += 1;
-                            println!("  [ERR]   {} — {}", task_id, e);
-                            if let Ok(mut guard) = last_error_flag.lock() {
-                                *guard = Some(e.to_string());
-                            }
-                            let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                dag_id,
-                                run_id,
-                                task_id,
-                                error: e.to_string(),
-                                attempt,
-                            });
-                        }
-                    }
+                    });
                 }
                 SchedulerCommand::CompleteDagRun {
                     dag_id,
@@ -1611,14 +1643,20 @@ async fn cmd_run(
                     task_id, reason, ..
                 } => {
                     println!("  [SKIP]  {} ({})", task_id, reason);
-                    completed += 1;
+                    completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 SchedulerCommand::RetryTask { task_id, delay, .. } => {
                     // The scheduler re-dispatches the task itself once the
                     // delay elapses; this is just progress output. The failed
                     // attempt wasn't final, so give its slot back to the
-                    // progress counter.
-                    completed = completed.saturating_sub(1);
+                    // progress counter. Guarded against underflow: with
+                    // concurrent dispatches the counter can already be at 0
+                    // when a retry for a different task arrives.
+                    let _ = completed.fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |c| Some(c.saturating_sub(1)),
+                    );
                     println!(
                         "  [RETRY] {} (retrying in {}s)",
                         task_id,
@@ -3602,12 +3640,167 @@ fn cmd_lineage_trace(
 // ─── conduit backfill ────────────────────────────────────────────────────────
 // Runs a DAG across a range of dates/partitions.
 
+/// Execute one backfill partition: run the DAG through its own
+/// scheduler/executor pair with the partition's env vars injected.
+///
+/// Returns `Ok(true)` when the partition failed (any task failed), `Ok(false)`
+/// on success. Takes owned/pre-loaded data (pools, event store, registry) so
+/// partitions can run concurrently on a `JoinSet` without touching disk or
+/// shared mutable state.
+#[allow(clippy::too_many_arguments)]
+async fn run_backfill_partition(
+    idx: usize,
+    total: usize,
+    partition: conduit_common::backfill::BackfillPartition,
+    request: conduit_common::backfill::BackfillRequest,
+    dag: conduit_common::dag::Dag,
+    dag_id: String,
+    pools: Vec<conduit_common::dag::Pool>,
+    event_store: Option<std::sync::Arc<conduit_state::EventStore>>,
+    registry: std::sync::Arc<conduit_providers::ProviderRegistry>,
+) -> Result<bool> {
+    use conduit_executor::process_runner::{ProcessRunner, TaskContext};
+    use conduit_planner::BackfillEngine;
+    use conduit_scheduler::pool_manager::PoolManager;
+    use conduit_scheduler::scheduler::{Scheduler, SchedulerCommand, SchedulerEvent};
+    use std::collections::HashMap;
+
+    let env_vars = BackfillEngine::partition_env_vars(&request, &partition, idx, total);
+
+    println!(
+        "  [{:>3}/{}] Partition '{}' ...",
+        idx + 1,
+        total,
+        partition.partition_key,
+    );
+
+    // Run the DAG for this partition using the scheduler/executor pattern
+    // from cmd_run.
+    let logical_date = partition.logical_start;
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
+
+    let mut dag_map = HashMap::new();
+    dag_map.insert(dag_id.clone(), dag.clone());
+
+    let mut scheduler = Scheduler::new(event_rx, cmd_tx, PoolManager::new(pools), dag_map)?;
+    if let Some(store) = &event_store {
+        scheduler = scheduler.with_event_store(std::sync::Arc::clone(store));
+    }
+
+    let partition_env: HashMap<String, String> = env_vars.iter().cloned().collect();
+
+    let run_id = format!("bf_{}_{}", dag_id, partition.partition_key);
+    event_tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: dag_id.clone(),
+        run_id,
+        logical_date,
+        config: env_vars.into_iter().collect(),
+    })?;
+
+    let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
+
+    let executor_event_tx = event_tx.clone();
+    let dag_for_exec = dag;
+    let executor_handle = tokio::spawn(async move {
+        let mut partition_failed = false;
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                SchedulerCommand::DispatchTask {
+                    dag_id,
+                    run_id,
+                    task_id,
+                    attempt,
+                } => {
+                    let task = match dag_for_exec.tasks.get(&task_id) {
+                        Some(t) => t,
+                        None => {
+                            let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
+                                dag_id,
+                                run_id,
+                                task_id,
+                                error: "Task not found".to_string(),
+                                attempt,
+                            });
+                            continue;
+                        }
+                    };
+
+                    let mut context = TaskContext {
+                        dag_id: dag_id.clone(),
+                        run_id: run_id.clone(),
+                        task_id: task_id.clone(),
+                        attempt,
+                        logical_date,
+                        environment: partition_env
+                            .get("CONDUIT_ENVIRONMENT")
+                            .cloned()
+                            .unwrap_or_else(|| "production".to_string()),
+                        params: partition_env.clone(),
+                        extra_env: Vec::new(),
+                    };
+                    // Inject backfill env vars into params
+                    for (k, v) in &partition_env {
+                        context.params.insert(k.clone(), v.clone());
+                    }
+
+                    let task_start = Instant::now();
+                    match ProcessRunner::run_with_providers(task, &context, Some(&registry)).await {
+                        Ok(output) => {
+                            let duration = task_start.elapsed();
+                            if output.exit_code == 0 {
+                                let _ = executor_event_tx.send(SchedulerEvent::TaskCompleted {
+                                    dag_id,
+                                    run_id,
+                                    task_id,
+                                    snapshot_id: None,
+                                    duration_ms: duration.as_millis() as u64,
+                                });
+                            } else {
+                                partition_failed = true;
+                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
+                                    dag_id,
+                                    run_id,
+                                    task_id,
+                                    error: output.stderr.trim().to_string(),
+                                    attempt,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            partition_failed = true;
+                            let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
+                                dag_id,
+                                run_id,
+                                task_id,
+                                error: e.to_string(),
+                                attempt,
+                            });
+                        }
+                    }
+                }
+                SchedulerCommand::CompleteDagRun { .. } => {
+                    let _ = executor_event_tx.send(SchedulerEvent::Shutdown);
+                    break;
+                }
+                SchedulerCommand::SkipTask { .. } => {}
+                SchedulerCommand::RetryTask { .. } => {}
+            }
+        }
+        partition_failed
+    });
+
+    let (_, exec_result) = tokio::join!(scheduler_handle, executor_handle);
+    Ok(exec_result?)
+}
+
 async fn cmd_backfill(
     dag_id: &str,
     start: &str,
     end: &str,
     granularity: &str,
-    _max_concurrent: u32,
+    max_concurrent: u32,
     full_refresh: bool,
     dry_run: bool,
     environment: &str,
@@ -3615,11 +3808,7 @@ async fn cmd_backfill(
 ) -> Result<()> {
     use conduit_common::backfill::*;
     use conduit_common::incremental::PartitionGranularity;
-    use conduit_executor::process_runner::{ProcessRunner, TaskContext};
     use conduit_planner::BackfillEngine;
-    use conduit_scheduler::pool_manager::PoolManager;
-    use conduit_scheduler::scheduler::{Scheduler, SchedulerCommand, SchedulerEvent};
-    use std::collections::HashMap;
 
     let overall_start = Instant::now();
 
@@ -3687,7 +3876,7 @@ async fn cmd_backfill(
         end_date,
         granularity: gran,
         environment: environment.to_string(),
-        max_concurrent_partitions: _max_concurrent,
+        max_concurrent_partitions: max_concurrent,
         full_refresh,
         dry_run,
     };
@@ -3725,8 +3914,9 @@ async fn cmd_backfill(
         return Ok(());
     }
 
-    // Phase 5: Execute partitions sequentially
-    println!("Executing partitions...");
+    // Phase 5: Execute partitions, bounded by --max-concurrent
+    let max_concurrent = (max_concurrent as usize).max(1);
+    println!("Executing partitions ({} at a time)...", max_concurrent);
     println!();
 
     // Open the event store once for the whole backfill; each partition's
@@ -3748,170 +3938,69 @@ async fn cmd_backfill(
     // execute for real (or fail loudly if the connection isn't configured).
     let registry = build_provider_registry(dags_path).await;
 
+    // Load pools once; each partition's scheduler receives its own copy so
+    // concurrent partitions never re-read conduit.yaml from disk.
+    let pools = load_pools(dags_path);
+
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    let mut join_set = tokio::task::JoinSet::new();
+    for (idx, partition) in partitions.into_iter().enumerate() {
+        let sem = std::sync::Arc::clone(&semaphore);
+        let request = request.clone();
+        let dag = dag.clone();
+        let dag_id = dag_id.to_string();
+        let pools = pools.clone();
+        let event_store = backfill_event_store.clone();
+        let registry = std::sync::Arc::clone(&registry);
+        join_set.spawn(async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore never closed");
+            let started = Instant::now();
+            let result = run_backfill_partition(
+                idx,
+                total,
+                partition,
+                request,
+                dag,
+                dag_id,
+                pools,
+                event_store,
+                registry,
+            )
+            .await;
+            (idx, started.elapsed(), result)
+        });
+    }
+
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let skipped = 0usize;
-
-    for (idx, partition) in partitions.iter().enumerate() {
-        let partition_start_time = Instant::now();
-        let env_vars = BackfillEngine::partition_env_vars(&request, partition, idx, total);
-
-        println!(
-            "  [{:>3}/{}] Partition '{}' ...",
-            idx + 1,
-            total,
-            partition.partition_key,
-        );
-
-        // Run the DAG for this partition using the scheduler/executor pattern from cmd_run
-        let logical_date = partition.logical_start;
-
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
-        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
-
-        let mut dag_map = HashMap::new();
-        dag_map.insert(dag_id.to_string(), dag.clone());
-
-        let pools = PoolManager::new(load_pools(dags_path));
-        let mut scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map)?;
-        if let Some(store) = &backfill_event_store {
-            scheduler = scheduler.with_event_store(std::sync::Arc::clone(store));
-        }
-
-        let run_id = format!("bf_{}_{}", dag_id, partition.partition_key);
-        event_tx.send(SchedulerEvent::DagRunRequested {
-            dag_id: dag_id.to_string(),
-            run_id: run_id.clone(),
-            logical_date,
-            config: env_vars.into_iter().collect(),
-        })?;
-
-        let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
-
-        let executor_event_tx = event_tx.clone();
-        let dag_for_exec = dag.clone();
-        let partition_env: HashMap<String, String> =
-            BackfillEngine::partition_env_vars(&request, partition, idx, total)
-                .into_iter()
-                .collect();
-        let registry_for_exec = std::sync::Arc::clone(&registry);
-        let executor_handle = tokio::spawn(async move {
-            let mut partition_failed = false;
-            while let Some(cmd) = cmd_rx.recv().await {
-                match cmd {
-                    SchedulerCommand::DispatchTask {
-                        dag_id,
-                        run_id,
-                        task_id,
-                        attempt,
-                    } => {
-                        let task = match dag_for_exec.tasks.get(&task_id) {
-                            Some(t) => t,
-                            None => {
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id,
-                                    run_id,
-                                    task_id,
-                                    error: "Task not found".to_string(),
-                                    attempt,
-                                });
-                                continue;
-                            }
-                        };
-
-                        let mut context = TaskContext {
-                            dag_id: dag_id.clone(),
-                            run_id: run_id.clone(),
-                            task_id: task_id.clone(),
-                            attempt,
-                            logical_date,
-                            environment: partition_env
-                                .get("CONDUIT_ENVIRONMENT")
-                                .cloned()
-                                .unwrap_or_else(|| "production".to_string()),
-                            params: partition_env.clone(),
-                            extra_env: Vec::new(),
-                        };
-                        // Inject backfill env vars into params
-                        for (k, v) in &partition_env {
-                            context.params.insert(k.clone(), v.clone());
-                        }
-
-                        let task_start = Instant::now();
-                        match ProcessRunner::run_with_providers(
-                            task,
-                            &context,
-                            Some(&registry_for_exec),
-                        )
-                        .await
-                        {
-                            Ok(output) => {
-                                let duration = task_start.elapsed();
-                                if output.exit_code == 0 {
-                                    let _ = executor_event_tx.send(SchedulerEvent::TaskCompleted {
-                                        dag_id,
-                                        run_id,
-                                        task_id,
-                                        snapshot_id: None,
-                                        duration_ms: duration.as_millis() as u64,
-                                    });
-                                } else {
-                                    partition_failed = true;
-                                    let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                        dag_id,
-                                        run_id,
-                                        task_id,
-                                        error: output.stderr.trim().to_string(),
-                                        attempt,
-                                    });
-                                }
-                            }
-                            Err(e) => {
-                                partition_failed = true;
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id,
-                                    run_id,
-                                    task_id,
-                                    error: e.to_string(),
-                                    attempt,
-                                });
-                            }
-                        }
-                    }
-                    SchedulerCommand::CompleteDagRun { .. } => {
-                        let _ = executor_event_tx.send(SchedulerEvent::Shutdown);
-                        break;
-                    }
-                    SchedulerCommand::SkipTask { .. } => {}
-                    SchedulerCommand::RetryTask { .. } => {}
-                }
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok((idx, dur, Ok(false))) => {
+                succeeded += 1;
+                println!(
+                    "  [{:>3}/{}] OK ({:.0}ms)",
+                    idx + 1,
+                    total,
+                    dur.as_secs_f64() * 1000.0
+                );
             }
-            partition_failed
-        });
-
-        let (_, exec_result) = tokio::join!(scheduler_handle, executor_handle);
-
-        let partition_duration = partition_start_time.elapsed();
-
-        match exec_result {
-            Ok(partition_failed) => {
-                if partition_failed {
-                    failed += 1;
-                    println!(
-                        "           FAILED ({:.0}ms)",
-                        partition_duration.as_secs_f64() * 1000.0,
-                    );
-                } else {
-                    succeeded += 1;
-                    println!(
-                        "           OK ({:.0}ms)",
-                        partition_duration.as_secs_f64() * 1000.0,
-                    );
-                }
+            Ok((idx, dur, Ok(true))) => {
+                failed += 1;
+                println!(
+                    "  [{:>3}/{}] FAILED ({:.0}ms)",
+                    idx + 1,
+                    total,
+                    dur.as_secs_f64() * 1000.0
+                );
+            }
+            Ok((idx, _, Err(e))) => {
+                failed += 1;
+                println!("  [{:>3}/{}] ERROR: {}", idx + 1, total, e);
             }
             Err(e) => {
                 failed += 1;
-                println!("           ERROR: {}", e);
+                println!("  [join] ERROR: {}", e);
             }
         }
     }

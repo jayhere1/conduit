@@ -303,6 +303,72 @@ tasks:
 }
 
 #[test]
+fn cli_run_max_tasks_runs_independent_tasks_concurrently() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let marker = dir.path().join("marks");
+    // Two independent tasks; each records start+end epoch-ns. With
+    // concurrency 2 their intervals must overlap (each sleeps 700ms).
+    let dag = format!(
+        r#"
+id: par_demo
+tasks:
+  a:
+    type: bash
+    command: "date +%s%N >> {m}/a; sleep 0.7; date +%s%N >> {m}/a"
+  b:
+    type: bash
+    command: "date +%s%N >> {m}/b; sleep 0.7; date +%s%N >> {m}/b"
+"#,
+        m = marker.display()
+    );
+    fs::create_dir_all(&marker).unwrap();
+    fs::write(dags.join("par_demo.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["run", "par_demo", "--max-tasks", "2", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success();
+
+    let read = |n: &str| -> (i128, i128) {
+        let s = fs::read_to_string(marker.join(n)).unwrap();
+        let v: Vec<i128> = s.lines().map(|l| l.trim().parse().unwrap()).collect();
+        (v[0], v[1])
+    };
+    let (a0, a1) = read("a");
+    let (b0, b1) = read("b");
+    assert!(
+        a0 < b1 && b0 < a1,
+        "task intervals must overlap: a=({a0},{a1}) b=({b0},{b1})"
+    );
+}
+
+#[test]
+fn cli_backfill_max_concurrent_completes_all_partitions() {
+    let dir = TempDir::new().unwrap();
+    let dags = write_yaml_dag(&dir);
+
+    conduit()
+        .args([
+            "backfill",
+            "smoke_test",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-04",
+            "--max-concurrent",
+            "3",
+            "--dags-path",
+        ])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Succeeded:        3"));
+}
+
+#[test]
 fn cli_plan_works() {
     let tmp = TempDir::new().unwrap();
     let dags = write_yaml_dag(&tmp);
