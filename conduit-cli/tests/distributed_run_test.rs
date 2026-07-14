@@ -96,6 +96,7 @@ fn distributed_run_executes_on_a_real_worker() {
         }
     };
     let _ = worker.kill();
+    let _ = worker.wait();
 
     let status = status.expect("distributed run did not complete within 30s");
     assert!(status.success(), "distributed run must exit 0");
