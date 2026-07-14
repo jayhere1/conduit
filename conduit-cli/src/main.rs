@@ -746,23 +746,23 @@ fn main() -> Result<()> {
             bind,
         } => {
             if distributed {
-                println!(
-                    "Starting in distributed mode (coordinator: {})",
-                    bind.as_deref().unwrap_or("0.0.0.0:9400")
-                );
-                println!(
-                    "Workers can connect with: conduit worker --coordinator {}",
-                    bind.as_deref().unwrap_or("0.0.0.0:9400")
-                );
+                let bind_addr = bind.unwrap_or_else(|| "0.0.0.0:9400".to_string());
+                rt.block_on(cmd_run_distributed(
+                    &dag_id,
+                    &dags_path,
+                    date.as_deref(),
+                    &bind_addr,
+                ))
+            } else {
+                rt.block_on(cmd_run(
+                    &dag_id,
+                    &dags_path,
+                    date.as_deref(),
+                    max_tasks,
+                    full_refresh,
+                    &env,
+                ))
             }
-            rt.block_on(cmd_run(
-                &dag_id,
-                &dags_path,
-                date.as_deref(),
-                max_tasks,
-                full_refresh,
-                &env,
-            ))
         }
         Commands::Plan {
             environment,
@@ -4086,6 +4086,323 @@ async fn cmd_worker(
             coordinator_addr
         )
     })
+}
+
+// ─── conduit run --distributed ───────────────────────────────────────────────
+
+/// Map a compiled Task onto the distributed protocol's `DispatchRequest`.
+///
+/// Mirrors what the worker executes: `Bash` runs `spec.script` via `bash -c`,
+/// `Python` imports the module and calls the function via `python3 -c`,
+/// `Executable` runs `command` + `args`, `Sql` carries the connection/query
+/// (which the worker fails on loudly — Task 10 Step 4), and `Sensor` carries
+/// nothing extra.
+fn dispatch_request_for(
+    task: &conduit_common::dag::Task,
+    dag_id: &str,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    logical_date: chrono::DateTime<chrono::Utc>,
+) -> conduit_distributed::DispatchRequest {
+    use conduit_common::dag::TaskType as T;
+    use conduit_distributed::TaskType as DT;
+
+    let (task_type, script, connection, query, command, args) = match &task.task_type {
+        T::Bash { command } => (
+            DT::Bash,
+            command.clone(),
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+        ),
+        T::Python { module, function } => (
+            DT::Python,
+            // The worker wraps `spec.script` in `python3 -c '…'`; import-and-call.
+            format!("import {m}; {m}.{f}()", m = module, f = function),
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+        ),
+        T::Sql {
+            connection, query, ..
+        } => (
+            DT::Sql,
+            String::new(),
+            connection.clone(),
+            query.clone(),
+            String::new(),
+            vec![],
+        ),
+        T::Executable { command, args } => (
+            DT::Executable,
+            String::new(),
+            String::new(),
+            String::new(),
+            command.clone(),
+            args.clone(),
+        ),
+        T::Sensor { .. } => (
+            DT::Sensor,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+        ),
+    };
+
+    conduit_distributed::DispatchRequest {
+        dag_id: dag_id.to_string(),
+        run_id: run_id.to_string(),
+        task_id: task_id.to_string(),
+        attempt,
+        task_type,
+        script,
+        connection,
+        query,
+        command,
+        args,
+        timeout_secs: 0, // 0 = executor default
+        pool: task.pool.clone().unwrap_or_default(),
+        logical_date,
+        environment: "production".to_string(),
+        params: Default::default(),
+        resources: conduit_distributed::ResourceLimits {
+            cpu_millicores: task.resources.cpu_millicores.unwrap_or(0),
+            memory_mb: task.resources.memory_mb.unwrap_or(0),
+        },
+    }
+}
+
+/// `conduit run --distributed`: run the coordinator in-process, serve the
+/// worker gRPC endpoint on `bind_addr`, and dispatch every task of the DAG
+/// run to connected workers. The coordinator recovers durable in-flight
+/// assignments from `{state_dir}/coordinator_assignments`. Exit code reflects
+/// the run outcome (non-zero on a failed run), like the local path.
+async fn cmd_run_distributed(
+    dag_id: &str,
+    dags_path: &PathBuf,
+    date: Option<&str>,
+    bind_addr: &str,
+) -> Result<()> {
+    use chrono::Utc;
+    use conduit_distributed::{DistributedExecutor, DistributedExecutorConfig};
+    use conduit_scheduler::pool_manager::PoolManager;
+    use conduit_scheduler::scheduler::{Scheduler, SchedulerCommand, SchedulerEvent};
+    use std::collections::HashMap;
+
+    let start = Instant::now();
+
+    // Phase 1: compile + resolve DAG (same as cmd_run).
+    println!("Compiling DAGs from {}...", dags_path.display());
+    let (plan, stats) = ConduitPlan::compile(dags_path)?;
+    if !stats.errors.is_empty() {
+        eprintln!("Compilation errors:");
+        for err in &stats.errors {
+            eprintln!("  {}", err);
+        }
+        std::process::exit(1);
+    }
+    let dag = plan
+        .dags
+        .get(dag_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "DAG '{}' not found. Available DAGs: {}",
+                dag_id,
+                plan.dags.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?
+        .clone();
+
+    println!(
+        "  Compiled {} DAGs ({} tasks) in {:.1}ms",
+        stats.dags_compiled,
+        stats.tasks_total,
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    println!();
+
+    // Phase 2: coordinator with durable assignment recovery (PRD E3).
+    let state_dir = resolve_state_dir(dags_path);
+    let mut dist_config = DistributedExecutorConfig::default();
+    dist_config.coordinator.bind_addr = bind_addr.to_string();
+    let executor = DistributedExecutor::with_persistence(
+        dist_config,
+        &state_dir.join("coordinator_assignments"),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to open coordinator assignment store: {}", e))?;
+
+    let grpc_addr: std::net::SocketAddr = bind_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --bind address '{}': {}", bind_addr, e))?;
+    let coordinator = std::sync::Arc::clone(executor.coordinator());
+    tokio::spawn(async move {
+        if let Err(e) = conduit_distributed::serve_grpc(coordinator, grpc_addr, None, None).await {
+            eprintln!("coordinator gRPC server failed: {e}");
+        }
+    });
+    println!("Coordinator listening on {bind_addr}");
+    println!("Workers connect with: conduit worker --coordinator {bind_addr}");
+    println!();
+
+    println!("Running DAG '{}'...", dag_id);
+    println!("  Tasks: {}", dag.tasks.len());
+    println!("  Order: {}", dag.execution_order.join(" -> "));
+    println!();
+
+    let logical_date = match date {
+        Some(d) => chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+            .map(|nd| nd.and_hms_opt(0, 0, 0).unwrap().and_utc())
+            .unwrap_or_else(|_| Utc::now()),
+        None => Utc::now(),
+    };
+
+    // Phase 3: scheduler wiring (mirrors cmd_run).
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
+
+    let mut dag_map = HashMap::new();
+    dag_map.insert(dag_id.to_string(), dag.clone());
+
+    let pools = PoolManager::new(load_pools(dags_path));
+    let scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map)?;
+
+    // Persist run history so `conduit replay` can reconstruct it (best effort).
+    let events_dir = state_dir.join("events");
+    let scheduler = match conduit_state::EventStore::open(&events_dir) {
+        Ok(store) => scheduler.with_event_store(std::sync::Arc::new(store)),
+        Err(e) => {
+            tracing::warn!(
+                path = %events_dir.display(),
+                error = %e,
+                "Event store unavailable; run will not be recorded for replay"
+            );
+            scheduler
+        }
+    };
+
+    let run_id = format!("run_{}", Utc::now().format("%Y%m%d_%H%M%S"));
+    let mut run_config = HashMap::new();
+    run_config.insert("triggered_by".to_string(), "cli-distributed".to_string());
+    run_config.insert("environment".to_string(), "production".to_string());
+    event_tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: dag_id.to_string(),
+        run_id: run_id.clone(),
+        logical_date,
+        config: run_config,
+    })?;
+
+    let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
+
+    // Phase 4: the distributed executor loop owns the executor and bridges two
+    // channels — dispatch requests in, task results out (see the ownership
+    // note in the Task 11 brief: `recv_result` needs `&mut self` while
+    // `dispatch` needs `&self`, so they cannot share a `select!` over a
+    // borrowed executor; the loop owns it exclusively instead).
+    let (dispatch_tx, dispatch_rx) =
+        tokio::sync::mpsc::unbounded_channel::<conduit_distributed::DispatchRequest>();
+    let (result_tx, mut result_rx) =
+        tokio::sync::mpsc::unbounded_channel::<conduit_distributed::DispatchResult>();
+    let executor_loop = tokio::spawn(conduit_distributed::run_distributed_loop_with(
+        executor,
+        dispatch_rx,
+        result_tx,
+    ));
+
+    // Phase 5: bridge — SchedulerCommand -> DispatchRequest, DispatchResult ->
+    // SchedulerEvent.
+    let run_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run_failed_flag = std::sync::Arc::clone(&run_failed);
+    let dag_for_exec = dag.clone();
+    let bridge_event_tx = event_tx.clone();
+    let bridge = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Some(cmd) = cmd_rx.recv() => match cmd {
+                    SchedulerCommand::DispatchTask { dag_id, run_id, task_id, attempt } => {
+                        let Some(task) = dag_for_exec.tasks.get(&task_id) else {
+                            eprintln!("  [ERR]   {} — task definition not found", task_id);
+                            let _ = bridge_event_tx.send(SchedulerEvent::TaskFailed {
+                                dag_id,
+                                run_id,
+                                task_id,
+                                error: "Task definition not found".into(),
+                                attempt,
+                            });
+                            continue;
+                        };
+                        println!("  [DISPATCH] {} (attempt {})", task_id, attempt);
+                        let req = dispatch_request_for(
+                            task, &dag_id, &run_id, &task_id, attempt, logical_date,
+                        );
+                        // Unbounded channel; the executor loop applies real
+                        // coordinator backpressure downstream.
+                        let _ = dispatch_tx.send(req);
+                    }
+                    SchedulerCommand::CompleteDagRun { dag_id, run_id, status } => {
+                        println!();
+                        println!("DAG '{}' run '{}' completed: {:?}", dag_id, run_id, status);
+                        if !matches!(status, conduit_scheduler::scheduler::RunStatus::Success) {
+                            run_failed_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        break;
+                    }
+                    SchedulerCommand::SkipTask { task_id, reason, .. } => {
+                        println!("  [SKIP]  {} ({})", task_id, reason);
+                    }
+                    SchedulerCommand::RetryTask { task_id, delay, .. } => {
+                        println!("  [RETRY] {} (retrying in {}s)", task_id, delay.num_seconds());
+                    }
+                },
+                Some(result) = result_rx.recv() => {
+                    if result.success {
+                        println!("  [OK]    {} ({}ms, remote)", result.task_id, result.duration_ms);
+                        let _ = bridge_event_tx.send(SchedulerEvent::TaskCompleted {
+                            dag_id: result.dag_id,
+                            run_id: result.run_id,
+                            task_id: result.task_id,
+                            snapshot_id: None,
+                            duration_ms: result.duration_ms,
+                        });
+                    } else {
+                        println!(
+                            "  [FAIL]  {} — {}",
+                            result.task_id,
+                            result.error.as_deref().unwrap_or("unknown error")
+                        );
+                        let _ = bridge_event_tx.send(SchedulerEvent::TaskFailed {
+                            dag_id: result.dag_id,
+                            run_id: result.run_id,
+                            task_id: result.task_id,
+                            error: result.error.unwrap_or_default(),
+                            attempt: result.attempt,
+                        });
+                    }
+                }
+                else => break,
+            }
+        }
+        let _ = bridge_event_tx.send(SchedulerEvent::Shutdown);
+    });
+
+    let _ = tokio::join!(scheduler_handle, bridge);
+    // The executor loop is a detached background task (its coordinator holds a
+    // result sender that never closes on its own); dropping the runtime on
+    // return aborts it.
+    executor_loop.abort();
+
+    let total_duration = start.elapsed();
+    println!("Total time: {:.1}ms", total_duration.as_secs_f64() * 1000.0);
+
+    if run_failed.load(std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("distributed DAG run failed — see task output above");
+    }
+    Ok(())
 }
 
 // ─── conduit cluster ────────────────────────────────────────────────────────

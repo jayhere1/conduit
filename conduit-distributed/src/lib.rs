@@ -67,7 +67,8 @@ pub use assignment_store::{
 };
 pub use coordinator::{Coordinator, CoordinatorConfig, SubmitOutcome};
 pub use distributed_executor::{
-    DispatchRequest, DispatchResult, DistributedExecutor, DistributedExecutorConfig, ExecutionMode,
+    run_distributed_loop, run_distributed_loop_with, DispatchRequest, DispatchResult,
+    DistributedExecutor, DistributedExecutorConfig, ExecutionMode,
 };
 pub use grpc_client::{run_worker, GrpcClientError, WorkerGrpcClient};
 pub use grpc_server::{serve_grpc, CoordinatorGrpcService};
