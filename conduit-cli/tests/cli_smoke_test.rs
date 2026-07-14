@@ -907,3 +907,28 @@ tasks:
         .success()
         .stdout(predicate::str::contains("full refresh"));
 }
+
+// ─── conduit cluster (distributed CLI honesty) ───────────────────────────────
+
+/// `conduit cluster status` must fail honestly (non-zero exit, error naming
+/// the coordinator address) rather than print fabricated "Unknown" status
+/// when nothing is listening on the coordinator address.
+#[test]
+fn cli_cluster_status_fails_honestly_when_unreachable() {
+    conduit()
+        .args(["cluster", "status", "--coordinator", "127.0.0.1:1"]) // nothing listens on port 1
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot reach coordinator"));
+}
+
+/// `conduit cluster drain` must fail honestly rather than print a fabricated
+/// "Drain command sent" message when the coordinator is unreachable.
+#[test]
+fn cli_cluster_drain_fails_honestly_when_unreachable() {
+    conduit()
+        .args(["cluster", "drain", "w1", "--coordinator", "127.0.0.1:1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot reach coordinator"));
+}

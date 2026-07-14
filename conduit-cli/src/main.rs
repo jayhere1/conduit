@@ -921,14 +921,22 @@ fn main() -> Result<()> {
             pools,
             id,
             labels,
-        } => cmd_worker(&coordinator, capacity, &pools, id.as_deref(), &labels),
+        } => rt.block_on(cmd_worker(
+            &coordinator,
+            capacity,
+            &pools,
+            id.as_deref(),
+            &labels,
+        )),
 
         Commands::Cluster { action } => match action {
-            ClusterCommands::Status { coordinator, json } => cmd_cluster_status(&coordinator, json),
+            ClusterCommands::Status { coordinator, json } => {
+                rt.block_on(cmd_cluster_status(&coordinator, json))
+            }
             ClusterCommands::Drain {
                 worker_id,
                 coordinator,
-            } => cmd_cluster_drain(&coordinator, &worker_id),
+            } => rt.block_on(cmd_cluster_drain(&coordinator, &worker_id)),
         },
 
         Commands::Query {
@@ -4027,7 +4035,7 @@ async fn cmd_backfill(
 
 // ─── conduit worker ─────────────────────────────────────────────────────────
 
-fn cmd_worker(
+async fn cmd_worker(
     coordinator_addr: &str,
     capacity: u32,
     pools: &str,
@@ -4059,90 +4067,124 @@ fn cmd_worker(
     println!("└─────────────────────────────────────────────┘");
     println!();
 
+    let config = conduit_distributed::WorkerConfig {
+        worker_id: worker_id.clone(),
+        coordinator_addr: coordinator_addr.to_string(),
+        capacity,
+        pool_affinity: pool_list,
+        labels,
+        heartbeat_interval_secs: 5,
+        graceful_shutdown: true,
+        tls_ca_cert_path: None,
+    };
+
     println!("Connecting to coordinator at {}...", coordinator_addr);
-
-    // In production, this would:
-    // 1. Create a Worker instance with WorkerConfig
-    // 2. Connect to coordinator via gRPC (tonic client)
-    // 3. Register and start receiving task assignments
-    // 4. Run heartbeat loop
-    // 5. Block until SIGTERM/SIGINT
-
-    println!(
-        "Worker '{}' registered with {} capacity",
-        worker_id, capacity
-    );
-    println!("Pool affinity: {:?}", pool_list);
-    if !labels.is_empty() {
-        println!("Labels: {:?}", labels);
-    }
-    println!();
-    println!("Waiting for task assignments... (press Ctrl+C to stop)");
-
-    // The actual runtime would be:
-    //   let rt = tokio::runtime::Runtime::new()?;
-    //   rt.block_on(async {
-    //       let (worker, result_rx, log_rx) = Worker::new(WorkerConfig { ... });
-    //       // gRPC connect + register + receive loop
-    //   });
-    //
-    // For now, we print the startup banner to validate the CLI wiring.
-
-    println!("\n[Worker runtime requires gRPC connection to coordinator]");
-    println!("To test locally, start the coordinator first:");
-    println!("  conduit serve --distributed --bind {}", coordinator_addr);
-
-    Ok(())
+    conduit_distributed::run_worker(config).await.map_err(|e| {
+        anyhow::anyhow!(
+            "worker failed: {} (is the coordinator running at {}?)",
+            e,
+            coordinator_addr
+        )
+    })
 }
 
 // ─── conduit cluster ────────────────────────────────────────────────────────
 
-fn cmd_cluster_status(coordinator_addr: &str, json: bool) -> Result<()> {
-    println!("Querying cluster status at {}...", coordinator_addr);
+async fn cmd_cluster_status(coordinator_addr: &str, json: bool) -> Result<()> {
+    use conduit_distributed::generated_proto::{
+        coordinator_client::CoordinatorClient, ClusterHealth, ClusterStatusRequest, WorkerState,
+    };
 
-    // In production, this would:
-    // 1. Connect to coordinator gRPC endpoint
-    // 2. Call ClusterStatus RPC
-    // 3. Display results
+    let mut client = CoordinatorClient::connect(format!("http://{}", coordinator_addr))
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot reach coordinator at {}: {}", coordinator_addr, e))?;
+    let status = client
+        .cluster_status(ClusterStatusRequest {})
+        .await
+        .map_err(|e| anyhow::anyhow!("ClusterStatus RPC failed: {}", e))?
+        .into_inner();
+
+    let health = ClusterHealth::try_from(status.health)
+        .map(|h| format!("{:?}", h))
+        .unwrap_or_else(|_| "Unknown".to_string());
+    let worker_state = |s: i32| {
+        WorkerState::try_from(s)
+            .map(|w| format!("{:?}", w))
+            .unwrap_or_else(|_| "Unknown".to_string())
+    };
 
     if json {
-        println!("{{");
-        println!("  \"health\": \"unknown\",");
-        println!("  \"coordinator\": \"{}\",", coordinator_addr);
-        println!("  \"workers\": [],");
-        println!("  \"running_tasks\": 0,");
-        println!("  \"queued_tasks\": 0");
-        println!("}}");
+        let value = serde_json::json!({
+            "health": health,
+            "coordinator": coordinator_addr,
+            "uptime_secs": status.uptime_secs,
+            "running_tasks": status.running_tasks,
+            "queued_tasks": status.queued_tasks,
+            "workers": status.workers.iter().map(|w| serde_json::json!({
+                "worker_id": w.worker_id,
+                "hostname": w.hostname,
+                "state": worker_state(w.state),
+                "capacity": w.capacity,
+                "active_tasks": w.active_tasks,
+                "pools": w.pool_affinity,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!();
         println!("Cluster Status");
         println!("──────────────────────────────────────────");
         println!("  Coordinator:  {}", coordinator_addr);
-        println!("  Health:       ⚠ Unknown (not connected)");
-        println!("  Workers:      0");
-        println!("  Running:      0 tasks");
-        println!("  Queued:       0 tasks");
-        println!();
-        println!("No workers connected. Start workers with:");
-        println!("  conduit worker --coordinator {}", coordinator_addr);
+        println!("  Health:       {}", health);
+        println!("  Uptime:       {}s", status.uptime_secs);
+        println!("  Workers:      {}", status.workers.len());
+        println!("  Running:      {} tasks", status.running_tasks);
+        println!("  Queued:       {} tasks", status.queued_tasks);
+        for w in &status.workers {
+            println!(
+                "    - {} ({}) {} {}/{} tasks pools={:?}",
+                w.worker_id,
+                w.hostname,
+                worker_state(w.state),
+                w.active_tasks,
+                w.capacity,
+                w.pool_affinity
+            );
+        }
+        if status.workers.is_empty() {
+            println!();
+            println!("No workers connected. Start one with:");
+            println!("  conduit worker --coordinator {}", coordinator_addr);
+        }
     }
-
     Ok(())
 }
 
-fn cmd_cluster_drain(coordinator_addr: &str, worker_id: &str) -> Result<()> {
+async fn cmd_cluster_drain(coordinator_addr: &str, worker_id: &str) -> Result<()> {
+    use conduit_distributed::generated_proto::{
+        coordinator_client::CoordinatorClient, DrainRequest,
+    };
+
     println!(
         "Draining worker '{}' via {}...",
         worker_id, coordinator_addr
     );
-
-    // In production: send DrainWorker directive via gRPC
-    println!("Drain command sent. Worker will finish current tasks and stop.");
+    let mut client = CoordinatorClient::connect(format!("http://{}", coordinator_addr))
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot reach coordinator at {}: {}", coordinator_addr, e))?;
+    let ack = client
+        .drain_worker(DrainRequest {
+            worker_id: worker_id.to_string(),
+            reason: "requested via conduit cluster drain".to_string(),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("drain failed: {}", e))?
+        .into_inner();
+    println!("{}", ack.message);
     println!(
         "Monitor with: conduit cluster status --coordinator {}",
         coordinator_addr
     );
-
     Ok(())
 }
 

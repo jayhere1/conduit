@@ -297,6 +297,19 @@ impl WorkerPool {
         }
     }
 
+    /// Whether a worker is currently marked draining.
+    pub fn is_draining(&self, worker_id: &str) -> bool {
+        self.workers
+            .get(worker_id)
+            .map(|w| w.state == WorkerState::Draining)
+            .unwrap_or(false)
+    }
+
+    /// Whether a worker is registered at all.
+    pub fn contains(&self, worker_id: &str) -> bool {
+        self.workers.contains_key(worker_id)
+    }
+
     /// Remove a worker from the pool entirely.
     pub fn remove_worker(&self, worker_id: &str) {
         info!(worker = %worker_id, "Removing worker from pool");

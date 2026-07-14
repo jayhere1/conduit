@@ -358,9 +358,26 @@ impl Coordinator {
     pub fn handle_heartbeat(&self, hb: &WorkerHeartbeat) -> CoordinatorDirective {
         self.pool.heartbeat(hb);
 
+        if self.pool.is_draining(&hb.worker_id) {
+            return CoordinatorDirective::Drain {
+                reason: "drain requested by operator".to_string(),
+                grace_period_secs: 30,
+            };
+        }
+
         CoordinatorDirective::HeartbeatAck {
             timestamp_ms: Utc::now().timestamp_millis(),
         }
+    }
+
+    /// Mark a worker as draining. Returns false when the worker is unknown.
+    /// The drain directive is delivered on the worker's next heartbeat.
+    pub fn drain_worker(&self, worker_id: &str, reason: &str) -> bool {
+        if !self.pool.contains(worker_id) {
+            return false;
+        }
+        self.pool.drain_worker(worker_id, reason);
+        true
     }
 
     /// Process a log entry from a worker.
