@@ -74,7 +74,14 @@ types include:
 - **Sequence** — an integer offset (used by event streams)
 - **Partition** — a set of processed partitions (used by `delete_insert`)
 
-Watermarks are persisted to the `.conduit/` state directory and survive restarts.
+Watermarks are persisted to `.conduit/watermarks.json` in the state directory
+and survive restarts. `conduit run` and `conduit apply` both load this file
+before executing tasks. A task's watermark only advances once it exits
+successfully and emits a new value; `conduit run` writes the file back once
+the whole run finishes (even if some other task in the DAG failed), while
+`conduit apply` only writes it back once the apply reaches its success path —
+a blocked or failed apply discards any in-memory watermark advances instead
+of persisting them.
 
 ## SQL Rewriting
 

@@ -503,39 +503,29 @@ impl Worker {
         Self::execute_bash(&python_spec, assignment_id, log_tx, worker_id).await
     }
 
-    /// Execute a SQL task (delegates to provider if available).
+    /// Execute a SQL task. Remote workers have no provider registry yet, so
+    /// this fails honestly rather than reporting a fabricated success.
     async fn execute_sql(
         spec: &TaskSpec,
         assignment_id: &str,
         log_tx: &mpsc::UnboundedSender<TaskLogEntry>,
         worker_id: &str,
     ) -> (TaskOutcome, i32, String, String, HashMap<String, f64>) {
-        // For now, report that SQL requires a provider connection.
-        // In production, this would use the provider registry.
+        let msg = format!(
+            "SQL task on connection '{}' cannot run on this worker: remote workers \
+             have no provider registry yet. Run SQL DAGs locally (conduit run/apply) \
+             or on a worker build with providers.",
+            spec.connection
+        );
         let _ = log_tx.send(TaskLogEntry {
             assignment_id: assignment_id.to_string(),
             worker_id: worker_id.to_string(),
-            level: LogLevel::Info,
-            message: format!(
-                "SQL task on connection '{}': {}",
-                spec.connection,
-                &spec.query[..spec.query.len().min(100)]
-            ),
+            level: LogLevel::Error,
+            message: msg.clone(),
             timestamp_ms: Utc::now().timestamp_millis(),
             metadata_json: String::new(),
         });
-
-        (
-            TaskOutcome::Success,
-            0,
-            String::new(),
-            serde_json::json!({
-                "connection": spec.connection,
-                "query_preview": &spec.query[..spec.query.len().min(200)],
-            })
-            .to_string(),
-            HashMap::new(),
-        )
+        (TaskOutcome::Failed, 1, msg, String::new(), HashMap::new())
     }
 
     /// Execute an external executable.

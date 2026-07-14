@@ -90,6 +90,7 @@ pub async fn create_environment(
         .env_manager
         .create(&body.name, body.based_on.as_deref())
         .map_err(ApiError::from)?;
+    state.persist_environments();
 
     // Broadcast event
     let event = json!({
@@ -156,6 +157,7 @@ pub async fn delete_environment(
         .env_manager
         .delete(&env_name)
         .map_err(ApiError::from)?;
+    state.persist_environments();
 
     Ok(Json(json!({
         "message": format!("Environment '{}' deleted", env_name),
@@ -174,6 +176,7 @@ pub async fn promote_environment(
         .env_manager
         .promote(&body.source, &body.target)
         .map_err(ApiError::from)?;
+    state.persist_environments();
 
     // Broadcast event
     let event = json!({
@@ -385,6 +388,7 @@ pub async fn update_env_policy(
         .env_manager
         .set_promotion_policy(&env_name, policy)
         .map_err(ApiError::from)?;
+    state.persist_environments();
 
     Ok(Json(json!({
         "environment": env.id,
@@ -413,6 +417,7 @@ pub async fn rollback_environment(
         .env_manager
         .rollback(&env_name, body.to_version)
         .map_err(ApiError::from)?;
+    state.persist_environments();
 
     let event = json!({
         "type": "environment_rolled_back",

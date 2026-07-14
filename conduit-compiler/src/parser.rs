@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 use conduit_common::contracts::TaskContracts;
 use conduit_common::dag::*;
 use conduit_common::error::{ConduitError, ConduitResult};
+use conduit_common::incremental::IncrementalConfig;
 
 /// The DAG parser — extracts DAG definitions from Python source files.
 pub struct DagParser {
@@ -56,6 +57,9 @@ pub struct ParsedTask {
     pub raw_dependencies: Vec<String>,
     /// Data quality contracts (from YAML or Python decorator).
     pub contracts: Option<TaskContracts>,
+    /// Incremental processing configuration (from YAML `incremental:`; the
+    /// Python `@task` decorator has no equivalent parameter yet).
+    pub incremental: Option<IncrementalConfig>,
     /// Verbatim text of the function's parameter list, e.g. `(data=greet)`.
     /// Used by `extract_default_arg_deps` to discover deps expressed via the
     /// SDK-documented `def fn(param=other_task)` pattern.
@@ -449,6 +453,7 @@ impl DagParser {
                 .unwrap_or(0),
             raw_dependencies: Vec::new(),
             contracts: None, // Python contracts are extracted via decorator analysis (future)
+            incremental: None, // No @task(incremental=…) parameter yet
             parameters_text,
             inputs,
             outputs,

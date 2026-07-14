@@ -304,6 +304,45 @@ pub async fn run_distributed_loop(
     }
 }
 
+/// Like [`run_distributed_loop`], but drives a caller-constructed executor
+/// (e.g. one created via [`DistributedExecutor::with_persistence`] so its
+/// coordinator recovers durable assignments) instead of building a fresh
+/// non-durable one. The CLI's `run --distributed` path uses this so the
+/// in-process coordinator shares the same persistence and gRPC server it
+/// exposes to workers.
+pub async fn run_distributed_loop_with(
+    mut executor: DistributedExecutor,
+    mut dispatch_rx: mpsc::UnboundedReceiver<DispatchRequest>,
+    result_tx: mpsc::UnboundedSender<DispatchResult>,
+) {
+    let _health_handle = executor.start_health_checker();
+
+    info!("Distributed executor loop started (caller-provided executor)");
+
+    loop {
+        tokio::select! {
+            // Receive dispatch requests from the scheduler bridge.
+            Some(req) = dispatch_rx.recv() => {
+                executor.dispatch(req).await;
+            }
+
+            // Receive results from workers via the coordinator.
+            Some(result) = executor.recv_result() => {
+                if result_tx.send(result).is_err() {
+                    info!("Result receiver dropped; distributed executor loop shutting down");
+                    break;
+                }
+            }
+
+            // Dispatch channel closed and no more results.
+            else => {
+                info!("Distributed executor loop shutting down");
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +436,56 @@ mod tests {
     fn test_execution_mode_variants() {
         assert_ne!(ExecutionMode::Local, ExecutionMode::Distributed);
         assert_ne!(ExecutionMode::Distributed, ExecutionMode::Hybrid);
+    }
+
+    #[tokio::test]
+    async fn test_run_distributed_loop_with_routes_dispatches() {
+        // The loop must pull DispatchRequests off the caller's channel and
+        // route them through the caller-provided executor's coordinator.
+        let executor = DistributedExecutor::new(DistributedExecutorConfig::default());
+        let coordinator = Arc::clone(executor.coordinator());
+
+        // A registered worker makes the dispatched task go in-flight
+        // (rather than sit pending), which is what we assert on.
+        let _worker_rx = coordinator.register_worker(&RegisterRequest {
+            worker_id: "w1".to_string(),
+            hostname: "w1.local".to_string(),
+            capacity: 4,
+            pool_affinity: vec!["default".to_string()],
+            labels: HashMap::new(),
+            version: "0.1.0".to_string(),
+            health_port: 0,
+        });
+
+        let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
+        let (result_tx, _result_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_distributed_loop_with(executor, dispatch_rx, result_tx));
+
+        dispatch_tx
+            .send(DispatchRequest {
+                dag_id: "dag1".to_string(),
+                run_id: "run1".to_string(),
+                task_id: "task1".to_string(),
+                attempt: 0,
+                task_type: TaskType::Bash,
+                script: "echo hi".to_string(),
+                connection: String::new(),
+                query: String::new(),
+                command: String::new(),
+                args: vec![],
+                timeout_secs: 300,
+                pool: "default".to_string(),
+                logical_date: Utc::now(),
+                environment: "dev".to_string(),
+                params: HashMap::new(),
+                resources: ResourceLimits::default(),
+            })
+            .unwrap();
+
+        // Give the loop a moment to drain the dispatch and route it.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(coordinator.inflight_count(), 1);
+
+        handle.abort();
     }
 }

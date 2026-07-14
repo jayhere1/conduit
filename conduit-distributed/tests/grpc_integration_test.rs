@@ -849,6 +849,53 @@ async fn cluster_status_reflects_inflight_tasks() {
     assert_eq!(status2.running_tasks, 2);
 }
 
+/// Test: DrainWorker RPC marks a registered worker as Draining (visible via
+/// ClusterStatus) and returns NotFound for an unregistered worker id.
+#[tokio::test]
+async fn drain_worker_rpc_marks_worker_draining() {
+    let (addr, _coordinator, _result_rx) = start_server().await;
+    let mut client = connect_client(addr).await;
+
+    // Register a worker.
+    let _resp = client
+        .register(Request::new(make_proto_register("w-drain", 4)))
+        .await
+        .unwrap();
+
+    let ack = client
+        .drain_worker(Request::new(proto::DrainRequest {
+            worker_id: "w-drain".to_string(),
+            reason: "maintenance".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(ack.success);
+
+    // Cluster status reflects the draining state.
+    let status = client
+        .cluster_status(Request::new(proto::ClusterStatusRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let w = status
+        .workers
+        .iter()
+        .find(|w| w.worker_id == "w-drain")
+        .unwrap();
+    assert_eq!(w.state, proto::WorkerState::Draining as i32);
+
+    // Unknown worker → NotFound error.
+    let err = client
+        .drain_worker(Request::new(proto::DrainRequest {
+            worker_id: "nope".into(),
+            reason: String::new(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
+
 /// Test: Two independent clients can both call cluster_status concurrently.
 #[tokio::test]
 async fn concurrent_cluster_status_queries() {

@@ -68,8 +68,17 @@ pub async fn trigger_run(
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or(now);
 
-    let config = body.config.unwrap_or_default();
+    let mut config = body.config.unwrap_or_default();
     let environment = body.environment.unwrap_or_else(|| "production".to_string());
+    // The scheduler reads environment/triggered_by out of the run config
+    // (scheduler.rs handle_dag_run_requested) — without these keys every
+    // API-triggered run is logged as production/scheduler.
+    config
+        .entry("environment".to_string())
+        .or_insert_with(|| environment.clone());
+    config
+        .entry("triggered_by".to_string())
+        .or_insert_with(|| "api".to_string());
 
     let task_states: HashMap<String, String> = dag
         .tasks

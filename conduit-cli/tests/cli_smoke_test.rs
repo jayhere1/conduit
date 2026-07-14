@@ -111,6 +111,24 @@ tasks:
     dags
 }
 
+/// Write a conduit.yaml declaring a real (bundled) DuckDB connection named
+/// `warehouse`, pointing at a file DB inside the temp project.
+fn write_duckdb_project_config(dir: &TempDir) {
+    let db_path = dir.path().join("warehouse.duckdb");
+    let config = format!(
+        r#"
+name: smoke_project
+dags_path: ./dags
+connections:
+  warehouse:
+    type: duckdb
+    database: "{}"
+"#,
+        db_path.display()
+    );
+    fs::write(dir.path().join("conduit.yaml"), config).unwrap();
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -209,6 +227,25 @@ fn cli_run_yaml_dag() {
 }
 
 #[test]
+fn cli_run_env_flag_reaches_task_context() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    fs::write(
+        dags.join("envcheck.yaml"),
+        "id: envcheck\ntasks:\n  show:\n    type: bash\n    command: \"echo env=$CONDUIT_ENVIRONMENT\"\n",
+    )
+    .unwrap();
+
+    conduit()
+        .args(["run", "envcheck", "--env", "staging", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("env=staging"));
+}
+
+#[test]
 fn cli_run_nonexistent_dag_fails() {
     let tmp = TempDir::new().unwrap();
     let dags = write_yaml_dag(&tmp);
@@ -220,6 +257,115 @@ fn cli_run_nonexistent_dag_fails() {
         .arg(dags.to_str().unwrap())
         .assert()
         .failure();
+}
+
+#[test]
+fn cli_run_sql_dag_without_connection_fails_loudly() {
+    let dir = TempDir::new().unwrap();
+    let dags = write_sql_dag(&dir); // references connection `warehouse`, no conduit.yaml
+
+    conduit()
+        .args(["run", "sql_lineage", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("warehouse").and(predicate::str::contains("conduit.yaml")),
+        );
+}
+
+#[test]
+fn cli_run_sql_dag_with_duckdb_executes_for_real() {
+    let dir = TempDir::new().unwrap();
+    write_duckdb_project_config(&dir);
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    // Self-contained query (no pre-existing tables needed).
+    let dag = r#"
+id: duck_smoke
+tasks:
+  select_two:
+    type: sql
+    connection: warehouse
+    query: "SELECT 1 AS a UNION ALL SELECT 2"
+"#;
+    fs::write(dags.join("duck_smoke.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["run", "duck_smoke", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("row_count")
+                .and(predicate::str::contains("SQL execution completed").not()),
+        );
+}
+
+#[test]
+fn cli_run_max_tasks_runs_independent_tasks_concurrently() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let marker = dir.path().join("marks");
+    // Two independent tasks; each records start+end epoch-ns. With
+    // concurrency 2 their intervals must overlap (each sleeps 700ms).
+    let dag = format!(
+        r#"
+id: par_demo
+tasks:
+  a:
+    type: bash
+    command: "date +%s%N >> {m}/a; sleep 0.7; date +%s%N >> {m}/a"
+  b:
+    type: bash
+    command: "date +%s%N >> {m}/b; sleep 0.7; date +%s%N >> {m}/b"
+"#,
+        m = marker.display()
+    );
+    fs::create_dir_all(&marker).unwrap();
+    fs::write(dags.join("par_demo.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["run", "par_demo", "--max-tasks", "2", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success();
+
+    let read = |n: &str| -> (i128, i128) {
+        let s = fs::read_to_string(marker.join(n)).unwrap();
+        let v: Vec<i128> = s.lines().map(|l| l.trim().parse().unwrap()).collect();
+        (v[0], v[1])
+    };
+    let (a0, a1) = read("a");
+    let (b0, b1) = read("b");
+    assert!(
+        a0 < b1 && b0 < a1,
+        "task intervals must overlap: a=({a0},{a1}) b=({b0},{b1})"
+    );
+}
+
+#[test]
+fn cli_backfill_max_concurrent_completes_all_partitions() {
+    let dir = TempDir::new().unwrap();
+    let dags = write_yaml_dag(&dir);
+
+    conduit()
+        .args([
+            "backfill",
+            "smoke_test",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-04",
+            "--max-concurrent",
+            "3",
+            "--dags-path",
+        ])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Succeeded:        3"));
 }
 
 #[test]
@@ -437,6 +583,151 @@ fn cli_lineage_trace_unknown_column_fails() {
         ));
 }
 
+// ─── conduit apply ──────────────────────────────────────────────────────────
+
+#[test]
+fn cli_apply_fails_with_nonzero_exit_when_task_fails() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let dag = r#"
+id: failing_apply
+tasks:
+  boom:
+    type: bash
+    command: "echo about-to-fail >&2; exit 1"
+"#;
+    fs::write(dags.join("failing_apply.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["apply", "production", "-y", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("apply aborted"));
+}
+
+#[test]
+fn cli_apply_rejects_stale_plan_file() {
+    let dir = TempDir::new().unwrap();
+    let dags = write_yaml_dag(&dir);
+    let plan_path = dir.path().join("plan.json");
+
+    // Save a plan against the empty environment (version 0).
+    conduit()
+        .args(["plan", "production", "--dags-path"])
+        .arg(&dags)
+        .arg("--output")
+        .arg(&plan_path)
+        .assert()
+        .success();
+
+    // Applying the saved plan while the env is still at version 0 works.
+    conduit()
+        .args(["apply", "production", "-y", "--plan-file"])
+        .arg(&plan_path)
+        .arg("--dags-path")
+        .arg(&dags)
+        .assert()
+        .success();
+
+    // The apply bumped the env to version 1 — the same plan is now stale.
+    conduit()
+        .args(["apply", "production", "-y", "--plan-file"])
+        .arg(&plan_path)
+        .arg("--dags-path")
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stale plan"));
+}
+
+#[test]
+fn cli_apply_rejects_plan_for_different_environment() {
+    let dir = TempDir::new().unwrap();
+    let dags = write_yaml_dag(&dir);
+    let plan_path = dir.path().join("plan.json");
+
+    conduit()
+        .args(["plan", "staging", "--dags-path"])
+        .arg(&dags)
+        .arg("--output")
+        .arg(&plan_path)
+        .assert()
+        .success();
+
+    conduit()
+        .args(["apply", "production", "-y", "--plan-file"])
+        .arg(&plan_path)
+        .arg("--dags-path")
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("targets environment 'staging'"));
+}
+
+#[test]
+fn cli_apply_validates_contracts_and_passes() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let dag = r#"
+id: contract_ok
+tasks:
+  emit:
+    type: bash
+    command: "echo CONDUIT::METRIC::row_count::100"
+    contracts:
+      - type: row_count
+        min: 1
+"#;
+    fs::write(dags.join("contract_ok.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["apply", "production", "-y", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "contract_ok.emit contracts: 1/1 checks passed",
+        ));
+}
+
+#[test]
+fn cli_apply_blocks_on_contract_violation() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let dag = r#"
+id: contract_bad
+tasks:
+  emit:
+    type: bash
+    command: "echo CONDUIT::METRIC::row_count::5"
+    contracts:
+      - type: row_count
+        min: 1000
+"#;
+    fs::write(dags.join("contract_bad.yaml"), dag).unwrap();
+
+    conduit()
+        .args(["apply", "production", "-y", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("contract"));
+
+    // A blocked apply must not update the environment: a second `plan` must
+    // still show the task as pending execution (cmd_status only prints
+    // snapshot counts, not per-task pointers, so it can't distinguish this).
+    conduit()
+        .args(["plan", "production", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[EXEC ] contract_bad.emit"));
+}
+
 // ─── README contract ────────────────────────────────────────────────────────
 
 /// Every command documented in the README's command table must parse.
@@ -558,4 +849,86 @@ fn impact_identical_plans_report_clean() {
         report["summary"]["total_breaking_changes"].as_u64(),
         Some(0)
     );
+}
+
+/// End-to-end: first run of an incremental task has no watermark so it's a
+/// full refresh; the emitted watermark is persisted to `.conduit/watermarks.json`;
+/// the second run picks it up and runs incrementally; `--full-refresh`
+/// forces a full refresh even with a watermark on file.
+#[test]
+fn cli_run_incremental_watermarks_and_full_refresh() {
+    let dir = TempDir::new().unwrap();
+    let dags = dir.path().join("dags");
+    fs::create_dir_all(&dags).unwrap();
+    let dag = r#"
+id: incr_demo
+tasks:
+  ingest:
+    type: bash
+    command: "echo refresh=$CONDUIT_FULL_REFRESH; echo CONDUIT::WATERMARK::2026-01-02T00:00:00Z"
+    incremental:
+      strategy: append
+      time_column: created_at
+"#;
+    fs::write(dags.join("incr_demo.yaml"), dag).unwrap();
+
+    // First run: no watermark → full refresh.
+    conduit()
+        .args(["run", "incr_demo", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("full refresh"));
+
+    // Watermark file was persisted next to the project.
+    let wm_file = dir.path().join(".conduit").join("watermarks.json");
+    assert!(wm_file.exists(), "watermarks.json must be persisted");
+    let wm_json = fs::read_to_string(&wm_file).unwrap();
+    assert!(
+        wm_json.contains("2026-01-02T00:00:00"),
+        "emitted watermark stored: {wm_json}"
+    );
+
+    // Second run: incremental, and the task sees CONDUIT_FULL_REFRESH=false.
+    conduit()
+        .args(["run", "incr_demo", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("incremental").and(predicate::str::contains("refresh=false")),
+        );
+
+    // --full-refresh overrides the watermark.
+    conduit()
+        .args(["run", "incr_demo", "--full-refresh", "--dags-path"])
+        .arg(&dags)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("full refresh"));
+}
+
+// ─── conduit cluster (distributed CLI honesty) ───────────────────────────────
+
+/// `conduit cluster status` must fail honestly (non-zero exit, error naming
+/// the coordinator address) rather than print fabricated "Unknown" status
+/// when nothing is listening on the coordinator address.
+#[test]
+fn cli_cluster_status_fails_honestly_when_unreachable() {
+    conduit()
+        .args(["cluster", "status", "--coordinator", "127.0.0.1:1"]) // nothing listens on port 1
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot reach coordinator"));
+}
+
+/// `conduit cluster drain` must fail honestly rather than print a fabricated
+/// "Drain command sent" message when the coordinator is unreachable.
+#[test]
+fn cli_cluster_drain_fails_honestly_when_unreachable() {
+    conduit()
+        .args(["cluster", "drain", "w1", "--coordinator", "127.0.0.1:1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot reach coordinator"));
 }

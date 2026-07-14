@@ -14,6 +14,7 @@ conduit-scheduler = { path = "../conduit-scheduler" }
 conduit-planner = { path = "../conduit-planner" }
 conduit-lineage = { path = "../conduit-lineage" }
 conduit-providers = { path = "../conduit-providers" }
+conduit-executor = { path = "../conduit-executor" }
 axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true }
 tower-http = { workspace = true }
@@ -42,4 +43,3 @@ conduit-common = { path = "../conduit-common" }
 conduit-compiler = { path = "../conduit-compiler" }
 conduit-state = { path = "../conduit-state" }
 conduit-scheduler = { path = "../conduit-scheduler" }
-conduit-executor = { path = "../conduit-executor" }

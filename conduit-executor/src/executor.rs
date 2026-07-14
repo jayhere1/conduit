@@ -257,6 +257,7 @@ impl TaskExecutor {
             logical_date,
             environment,
             params,
+            extra_env: Vec::new(),
         };
 
         let registry = self.provider_registry.clone();

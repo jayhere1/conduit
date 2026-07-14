@@ -181,6 +181,26 @@ impl proto::coordinator_server::Coordinator for CoordinatorGrpcService {
         let proto_status = convert::cluster_status_to_proto(&local_status);
         Ok(Response::new(proto_status))
     }
+
+    /// Administratively drain a worker.
+    async fn drain_worker(
+        &self,
+        request: Request<proto::DrainRequest>,
+    ) -> Result<Response<proto::Ack>, Status> {
+        let req = request.into_inner();
+        if self.coordinator.drain_worker(&req.worker_id, &req.reason) {
+            info!(worker_id = %req.worker_id, reason = %req.reason, "Worker drain requested via gRPC");
+            Ok(Response::new(proto::Ack {
+                success: true,
+                message: format!("worker '{}' draining", req.worker_id),
+            }))
+        } else {
+            Err(Status::not_found(format!(
+                "worker '{}' is not registered",
+                req.worker_id
+            )))
+        }
+    }
 }
 
 /// Start the gRPC server for the coordinator.

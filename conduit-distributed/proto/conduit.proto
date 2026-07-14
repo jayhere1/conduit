@@ -29,6 +29,10 @@ service Coordinator {
 
     /// Query cluster status (used by CLI and UI).
     rpc ClusterStatus(ClusterStatusRequest) returns (ClusterStatusResponse);
+
+    /// Administratively drain a worker: it finishes in-flight tasks and
+    /// receives no new assignments. Invoked by `conduit cluster drain`.
+    rpc DrainWorker(DrainRequest) returns (Ack);
 }
 
 // ─── Registration ─────────────────────────────────────────────────────────
@@ -230,6 +234,11 @@ enum LogLevel {
 }
 
 // ─── Cluster Status ───────────────────────────────────────────────────────
+
+message DrainRequest {
+    string worker_id = 1;
+    string reason = 2;
+}
 
 message ClusterStatusRequest {}
 

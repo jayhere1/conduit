@@ -358,9 +358,26 @@ impl Coordinator {
     pub fn handle_heartbeat(&self, hb: &WorkerHeartbeat) -> CoordinatorDirective {
         self.pool.heartbeat(hb);
 
+        if self.pool.is_draining(&hb.worker_id) {
+            return CoordinatorDirective::Drain {
+                reason: "drain requested by operator".to_string(),
+                grace_period_secs: 30,
+            };
+        }
+
         CoordinatorDirective::HeartbeatAck {
             timestamp_ms: Utc::now().timestamp_millis(),
         }
+    }
+
+    /// Mark a worker as draining. Returns false when the worker is unknown.
+    /// The drain directive is delivered on the worker's next heartbeat.
+    pub fn drain_worker(&self, worker_id: &str, reason: &str) -> bool {
+        if !self.pool.contains(worker_id) {
+            return false;
+        }
+        self.pool.drain_worker(worker_id, reason);
+        true
     }
 
     /// Process a log entry from a worker.
@@ -942,6 +959,33 @@ mod tests {
         match directive {
             CoordinatorDirective::HeartbeatAck { .. } => {}
             _ => panic!("Expected HeartbeatAck"),
+        }
+    }
+
+    #[test]
+    fn test_handle_heartbeat_returns_drain_directive_for_draining_worker() {
+        let (coord, _rx) = Coordinator::new(CoordinatorConfig::default());
+        coord.register_worker(&make_register("w1", 4));
+
+        assert!(coord.drain_worker("w1", "maintenance"));
+
+        let hb = WorkerHeartbeat {
+            worker_id: "w1".to_string(),
+            active_tasks: 2,
+            cpu_percent: 50.0,
+            memory_percent: 60.0,
+            disk_percent: 20.0,
+            running_assignments: vec!["a1".into()],
+            timestamp_ms: Utc::now().timestamp_millis(),
+        };
+
+        let directive = coord.handle_heartbeat(&hb);
+        match directive {
+            CoordinatorDirective::Drain { .. } => {}
+            other => panic!(
+                "expected Drain directive for draining worker, got {:?}",
+                other
+            ),
         }
     }
 

@@ -10,34 +10,32 @@ http://localhost:8080/api/v1
 
 ## Authentication
 
-Currently, Conduit has no authentication (Phase 1). Phase 2 will add API keys and OAuth.
+API-key authentication is built in but disabled by default. Enable it with:
 
-For now, assume all endpoints are public. Secure them at the network/infrastructure level.
+```bash
+conduit serve --auth-enabled
+```
+
+On first start with auth enabled, a bootstrap admin key is created and printed once. Send the key on every request:
+
+```
+Authorization: Bearer <api-key>
+```
+
+Keys are managed via `POST/GET /auth/keys`, `GET/DELETE /auth/keys/{key_id}`, and `GET /auth/me`. When auth is disabled, all endpoints are public — secure them at the network/infrastructure level.
 
 ## Response Format
 
-All responses are JSON:
+Success responses are plain endpoint-specific JSON (no envelope) — see each endpoint below.
+
+Errors share one shape:
 
 ```json
 {
-  "success": true,
-  "data": { /* response data */ },
-  "error": null,
-  "timestamp": "2024-03-22T14:32:10Z"
-}
-```
-
-Errors:
-
-```json
-{
-  "success": false,
-  "data": null,
   "error": {
-    "code": "DAG_NOT_FOUND",
+    "type": "not_found",
     "message": "DAG 'daily_etl' not found"
-  },
-  "timestamp": "2024-03-22T14:32:10Z"
+  }
 }
 ```
 
@@ -51,17 +49,15 @@ Health check.
 
 ```json
 {
-  "status": "healthy",
-  "version": "0.2.0",
-  "uptime_ms": 123456,
-  "state_store": "connected",
-  "scheduler": "running"
+  "status": "ok",
+  "service": "conduit",
+  "version": "0.2.0"
 }
 ```
 
-### GET /metrics
+### GET /metrics (root path, not under /api/v1)
 
-Prometheus metrics.
+Prometheus metrics, served at `http://localhost:8080/metrics`. (`GET /api/v1/metrics` is a different endpoint — it lists task metrics.)
 
 **Response:**
 
@@ -75,13 +71,7 @@ conduit_dags_total 5
 
 ### GET /dags
 
-List all compiled DAGs.
-
-**Query Parameters:**
-
-- `env` (optional): Filter by environment (default: all)
-- `limit` (optional): Max results (default: 100)
-- `offset` (optional): Offset for pagination (default: 0)
+List all compiled DAGs. Compiles the DAGs directory on each call; no query parameters.
 
 **Response:**
 
@@ -89,13 +79,13 @@ List all compiled DAGs.
 {
   "dags": [
     {
-      "dag_id": "daily_etl",
+      "id": "daily_etl",
+      "name": "daily_etl",
       "description": "Daily ETL pipeline",
-      "tasks": 3,
       "schedule": "0 2 * * *",
-      "fingerprint": "f1a2b3c4d5e6",
-      "created_at": "2024-03-22T14:00:00Z",
-      "updated_at": "2024-03-22T14:32:00Z"
+      "tags": [],
+      "taskCount": 3,
+      "sourceFile": "dags/daily_etl.yaml"
     }
   ],
   "total": 5
@@ -110,66 +100,66 @@ Get DAG details.
 
 ```json
 {
-  "dag_id": "daily_etl",
+  "id": "daily_etl",
+  "name": "daily_etl",
   "description": "Daily ETL pipeline",
   "schedule": "0 2 * * *",
+  "tags": [],
+  "maxActiveRuns": 1,
+  "taskCount": 2,
+  "sourceFile": "dags/daily_etl.yaml",
+  "executionOrder": ["extract", "transform"],
   "tasks": [
     {
-      "task_id": "extract",
-      "type": "python",
+      "id": "extract",
+      "name": "extract",
+      "type": "Python",
+      "dependencies": [],
+      "retries": 1,
+      "retryDelay": null,
+      "pool": null,
       "timeout": 300,
-      "retries": 1
-    },
-    {
-      "task_id": "transform",
-      "type": "python",
-      "timeout": 600,
-      "retries": 2
+      "priority": 0,
+      "triggerRule": "AllSuccess"
     }
-  ],
-  "fingerprint": "f1a2b3c4d5e6",
-  "created_at": "2024-03-22T14:00:00Z"
+  ]
 }
 ```
 
-### POST /dags/{dag_id}/compile
+### POST /dags/compile
 
-Recompile a DAG.
-
-**Request:**
-
-```json
-{
-  "force": false
-}
-```
+Recompile the whole DAGs directory. No request body.
 
 **Response:**
 
 ```json
 {
-  "dag_id": "daily_etl",
-  "fingerprint": "f1a2b3c4d5e6",
-  "num_tasks": 3,
-  "compile_duration_ms": 45,
-  "status": "success"
+  "success": true,
+  "dagsCompiled": 5,
+  "tasksTotal": 32,
+  "errors": [],
+  "warnings": [],
+  "durationMs": 45
 }
 ```
 
 ## Run Endpoints
 
-### POST /dags/{dag_id}/run
+### POST /dags/{dag_id}/runs
 
 Start a new DAG run. The run is dispatched to the scheduler which coordinates task execution via the executor. Task state changes are broadcast over WebSocket in real-time.
 
-**Request:**
+**Request** (all fields optional):
 
 ```json
 {
   "logical_date": "2024-03-22T14:00:00Z",
-  "config": { "batch_size": 1000 }
+  "config": { "batch_size": "1000" },
+  "environment": "staging"
 }
 ```
+
+`environment` defaults to `"production"` and is recorded on the run and threaded into task execution context.
 
 **Response:**
 
@@ -177,6 +167,7 @@ Start a new DAG run. The run is dispatched to the scheduler which coordinates ta
 {
   "runId": "run_daily_etl_20240322_143210_123",
   "dagId": "daily_etl",
+  "environment": "staging",
   "status": "dispatched",
   "taskStates": {
     "extract": "pending",
@@ -191,15 +182,14 @@ If no scheduler is attached, `status` will be `"queued"` instead of `"dispatched
 
 ### GET /runs
 
-List recent runs.
+List recent runs across all DAGs. (`GET /dags/{dag_id}/runs` returns the same shape scoped to one DAG.)
 
 **Query Parameters:**
 
 - `dag_id` (optional): Filter by DAG
 - `status` (optional): Filter by status (pending, running, success, failed)
-- `env` (optional): Filter by environment
-- `limit` (optional): Max results (default: 20)
-- `offset` (optional): Offset for pagination
+- `environment` (optional): Filter by environment
+- `limit` (optional): Max results (default: 100)
 
 **Response:**
 
@@ -207,13 +197,15 @@ List recent runs.
 {
   "runs": [
     {
-      "run_id": "run_abc123def456",
-      "dag_id": "daily_etl",
+      "id": "run_abc123def456",
+      "dagId": "daily_etl",
       "status": "success",
-      "started_at": "2024-03-22T14:32:10Z",
-      "completed_at": "2024-03-22T14:37:45Z",
-      "duration_ms": 335000,
-      "failed_tasks": []
+      "startedAt": "2024-03-22T14:32:10Z",
+      "endedAt": "2024-03-22T14:37:45Z",
+      "taskStates": { "extract": "success" },
+      "taskLogs": {},
+      "triggeredBy": "api",
+      "environment": "production"
     }
   ],
   "total": 142
@@ -222,63 +214,26 @@ List recent runs.
 
 ### GET /runs/{run_id}
 
-Get run details.
+Get run details. Captured task output (truncated stdout/stderr per task) is returned in `taskLogs` — there is no separate log-streaming endpoint; live events stream over the WebSocket (see below).
 
 **Response:**
 
 ```json
 {
-  "run_id": "run_abc123def456",
-  "dag_id": "daily_etl",
+  "id": "run_abc123def456",
+  "dagId": "daily_etl",
   "status": "success",
-  "env": "production",
-  "started_at": "2024-03-22T14:32:10Z",
-  "completed_at": "2024-03-22T14:37:45Z",
-  "duration_ms": 335000,
-  "tasks": [
-    {
-      "task_id": "extract",
-      "status": "success",
-      "started_at": "2024-03-22T14:32:10Z",
-      "completed_at": "2024-03-22T14:32:45Z",
-      "duration_ms": 35000,
-      "exit_code": 0,
-      "xcom": {
-        "row_count": 1000
-      }
-    }
-  ]
-}
-```
-
-### GET /runs/{run_id}/logs
-
-Stream task logs.
-
-**Query Parameters:**
-
-- `task_id` (optional): Filter by task
-
-**Response:** Server-sent events (text/event-stream)
-
-```
-data: [2024-03-22 14:32:10] extract started
-data: Extracting data from API...
-data: [2024-03-22 14:32:15] extract completed
-data: [2024-03-22 14:32:16] transform started
-```
-
-### POST /runs/{run_id}/cancel
-
-Cancel a run.
-
-**Response:**
-
-```json
-{
-  "run_id": "run_abc123def456",
-  "status": "cancelled",
-  "cancelled_at": "2024-03-22T14:35:00Z"
+  "startedAt": "2024-03-22T14:32:10Z",
+  "endedAt": "2024-03-22T14:37:45Z",
+  "taskStates": {
+    "extract": "success",
+    "transform": "success"
+  },
+  "taskLogs": {
+    "extract": "Extracting data from API...\n1000 rows written"
+  },
+  "triggeredBy": "api",
+  "environment": "production"
 }
 ```
 
@@ -294,19 +249,16 @@ List all environments.
 {
   "environments": [
     {
+      "id": "production",
       "name": "production",
-      "status": "active",
-      "snapshot_id": "prod-snap-20240322-143215",
-      "created_at": "2024-03-15T00:00:00Z",
-      "last_modified": "2024-03-22T14:32:00Z",
-      "num_dags": 5,
-      "num_tasks": 32
-    },
-    {
-      "name": "staging",
-      "status": "active",
-      "snapshot_id": "staging-snap-20240322-145123",
-      "created_at": "2024-03-22T14:51:00Z"
+      "snapshotCount": 32,
+      "updatedAt": "2024-03-22T14:32:00Z",
+      "basedOn": null,
+      "currentVersion": 4,
+      "promotionPolicy": {
+        "requireSource": null,
+        "minAgeSecs": null
+      }
     }
   ]
 }
@@ -321,9 +273,7 @@ Create a new environment.
 ```json
 {
   "name": "staging",
-  "from_env": "production",
-  "description": "Staging environment",
-  "tags": ["testing", "pre-prod"]
+  "based_on": "production"
 }
 ```
 
@@ -331,48 +281,52 @@ Create a new environment.
 
 ```json
 {
+  "id": "staging",
   "name": "staging",
-  "snapshot_id": "staging-snap-20240322-145123",
-  "forked_from": "production",
-  "status": "active",
-  "created_at": "2024-03-22T14:51:00Z"
+  "snapshotCount": 32,
+  "basedOn": "production",
+  "message": "Environment 'staging' created"
 }
 ```
 
 ### GET /environments/{env_name}
 
-Get environment details.
+Get environment details, including its per-task snapshot pointers.
 
 **Response:**
 
 ```json
 {
+  "id": "production",
   "name": "production",
-  "status": "active",
-  "snapshot_id": "prod-snap-20240322-143215",
-  "created_at": "2024-03-15T00:00:00Z",
-  "last_modified": "2024-03-22T14:32:00Z",
-  "num_runs_24h": 42,
-  "dags": [
+  "snapshotCount": 32,
+  "updatedAt": "2024-03-22T14:32:00Z",
+  "basedOn": null,
+  "currentVersion": 4,
+  "promotionPolicy": {
+    "requireSource": null,
+    "minAgeSecs": null
+  },
+  "snapshots": [
     {
-      "dag_id": "daily_etl",
-      "fingerprint": "f1a2b3c4d5e6",
-      "tasks": 3
+      "dagId": "daily_etl",
+      "taskId": "extract",
+      "snapshotId": "snap_extract_20240322143215123"
     }
   ]
 }
 ```
 
-### POST /environments/{env_name}/promote
+### POST /environments/promote
 
-Promote environment to another.
+Promote one environment's state to another. Source and target are given in the body, not the path.
 
 **Request:**
 
 ```json
 {
-  "target_env": "production",
-  "backup": true
+  "source": "staging",
+  "target": "production"
 }
 ```
 
@@ -380,24 +334,22 @@ Promote environment to another.
 
 ```json
 {
-  "source_env": "staging",
-  "target_env": "production",
-  "snapshot_id": "staging-snap-20240322-145123",
-  "previous_snapshot": "prod-snap-20240322-143215",
-  "promoted_at": "2024-03-22T14:55:00Z"
+  "source": "staging",
+  "target": "production",
+  "snapshotChanges": 4,
+  "message": "Promoted 'staging' -> 'production' (4 snapshot changes)"
 }
 ```
 
 ### POST /environments/{env_name}/rollback
 
-Rollback environment.
+Roll an environment back to a previous recorded version (see `GET /environments/{env_name}/history`). Omit `to_version` to roll back one step.
 
 **Request:**
 
 ```json
 {
-  "to_snapshot": "prod-snap-20240322-143215",
-  "reason": "high error rate detected"
+  "to_version": 3
 }
 ```
 
@@ -406,9 +358,10 @@ Rollback environment.
 ```json
 {
   "environment": "production",
-  "snapshot_id": "prod-snap-20240322-143215",
-  "rolled_back_from": "staging-snap-20240322-145123",
-  "rolled_back_at": "2024-03-22T14:55:00Z"
+  "rolledBackTo": 3,
+  "newVersion": 5,
+  "snapshotChanges": 2,
+  "message": "Rolled back 'production' (new version 5, 2 snapshot changes)"
 }
 ```
 
@@ -416,14 +369,13 @@ Rollback environment.
 
 ### POST /plan
 
-Generate a deployment plan.
+Generate a deployment plan against an environment's current state. Generated plans are cached server-side (in-memory, most recent 50) so a later `POST /apply` can apply exactly the plan that was reviewed, by `plan_id`. Cached plans do not survive a server restart — regenerate if in doubt.
 
 **Request:**
 
 ```json
 {
-  "env": "production",
-  "from_env": "development"
+  "environment": "production"
 }
 ```
 
@@ -433,41 +385,52 @@ Generate a deployment plan.
 {
   "plan_id": "plan_abc123",
   "environment": "production",
-  "modified": [
+  "created_at": "2024-03-22T14:52:00Z",
+  "actions": [
     {
       "dag_id": "daily_etl",
       "task_id": "extract",
-      "change_type": "modified",
-      "changes": {
-        "timeout": "300 → 600"
-      }
+      "action": "Execute",
+      "reason": "fingerprint changed",
+      "fingerprint": "f1a2b3c4d5e6"
     }
   ],
-  "upstream_invalidated": [
-    {
-      "dag_id": "daily_etl",
-      "task_id": "transform",
-      "reason": "upstream extract changed"
-    }
-  ],
-  "impact_analysis": {
-    "blast_radius": 2,
-    "cascading_changes": 1
+  "stats": {
+    "total_tasks": 32,
+    "to_execute": 2,
+    "to_reuse": 30,
+    "to_skip": 0,
+    "to_remove": 0,
+    "critical_path_depth": 3,
+    "blast_radius": 2
   },
-  "created_at": "2024-03-22T14:52:00Z"
+  "compilation": {
+    "dags_compiled": 5,
+    "tasks_total": 32,
+    "duration_ms": 45
+  }
 }
 ```
 
 ### POST /apply
 
-Apply a deployment plan.
+Execute a deployment plan synchronously: each `Execute` action runs for real (through the provider registry for SQL tasks), contracts are validated against the emitted evidence, snapshots are stored, and the environment is updated with a history-recorded, rollbackable version bump.
+
+With `plan_id`, the cached plan is applied only if it still matches reality:
+
+- **404 `not_found`** — unknown or expired `plan_id`
+- **400 `bad_request`** — plan targets a different environment than requested
+- **409 `conflict`** — stale plan: the environment's version has moved since the plan was generated; regenerate the plan
+- **422 `apply_failed`** — a task failed, errored, or violated a contract; the environment is not updated
+
+Without `plan_id`, a fresh plan is generated against current state and applied immediately.
 
 **Request:**
 
 ```json
 {
   "plan_id": "plan_abc123",
-  "skip_confirmation": false
+  "environment": "production"
 }
 ```
 
@@ -475,14 +438,17 @@ Apply a deployment plan.
 
 ```json
 {
+  "plan_id": "plan_abc123",
   "environment": "production",
-  "snapshot_id": "prod-snap-20240322-145456",
-  "previous_snapshot": "prod-snap-20240322-143215",
+  "status": "applied",
+  "tasks_executed": 2,
   "tasks_reused": 30,
-  "tasks_compiled": 2,
-  "applied_at": "2024-03-22T14:52:30Z"
+  "tasks_removed": 0,
+  "environment_version": 4
 }
 ```
+
+If there is nothing to execute or remove, `status` is `"noop"` and the environment is left untouched.
 
 ## Lineage Endpoints
 
@@ -598,7 +564,7 @@ Refresh the schema catalog by introspecting connected providers.
 }
 ```
 
-### POST /lineage/upstream
+### POST /lineage/trace/upstream
 
 Get upstream lineage.
 
@@ -628,7 +594,7 @@ Get upstream lineage.
 }
 ```
 
-### POST /lineage/downstream
+### POST /lineage/trace/downstream
 
 Get downstream lineage.
 
@@ -700,8 +666,9 @@ Query event log.
 
 **Query Parameters:**
 
-- `filter` (optional): Filter expression (e.g., `type:TaskFailed`)
-- `since` (optional): Time window (e.g., `24h`)
+- `from` / `to` (optional): Sequence number range (inclusive)
+- `event_type` (optional): Filter to one event type (e.g. `TaskFailed`, `DagRunCompleted`)
+- `run_id`, `dag_id`, `task_id` (optional): Scope to a run, DAG, or task
 - `limit` (optional): Max results (default: 100)
 
 **Response:**
@@ -725,14 +692,14 @@ Query event log.
 }
 ```
 
-### WebSocket /events/stream
+### WebSocket GET /ws/events
 
-Stream events in real-time.
+Stream events in real-time. Note the path is `/ws/events`, outside the `/api/v1` prefix.
 
 **Subscribe:**
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8080/api/v1/events/stream');
+const ws = new WebSocket('ws://localhost:8080/ws/events');
 ws.addEventListener('message', (event) => {
   const data = JSON.parse(event.data);
   console.log(`${data.type}: ${data.task_id}`);
@@ -750,92 +717,53 @@ ws.addEventListener('message', (event) => {
 }
 ```
 
-## Snapshot Endpoints
-
-### GET /snapshots
-
-List snapshots.
-
-**Query Parameters:**
-
-- `env` (optional): Filter by environment
-- `limit` (optional): Max results
-
-**Response:**
-
-```json
-{
-  "snapshots": [
-    {
-      "snapshot_id": "prod-snap-20240322-143215",
-      "num_tasks": 32,
-      "size_bytes": 1229,
-      "created_at": "2024-03-22T14:32:15Z",
-      "referenced_by": ["production"]
-    }
-  ]
-}
-```
-
-### GET /snapshots/{snapshot_id}
-
-Get snapshot details.
-
-**Response:**
-
-```json
-{
-  "snapshot_id": "prod-snap-20240322-143215",
-  "dags": [
-    {
-      "dag_id": "daily_etl",
-      "fingerprint": "f1a2b3c4d5e6",
-      "tasks": 3
-    }
-  ],
-  "created_at": "2024-03-22T14:32:15Z",
-  "size_bytes": 1229
-}
-```
-
-### DELETE /snapshots/{snapshot_id}
-
-Delete a snapshot.
-
-**Response:**
-
-```json
-{
-  "snapshot_id": "prod-snap-20240322-143215",
-  "deleted_at": "2024-03-22T14:55:00Z"
-}
-```
-
 ## Error Codes
 
-| Code | Status | Meaning |
+Errors are returned as `{"error": {"type": "...", "message": "..."}}`:
+
+| Type | Status | Meaning |
 |------|--------|---------|
-| DAG_NOT_FOUND | 404 | DAG doesn't exist |
-| RUN_NOT_FOUND | 404 | Run doesn't exist |
-| ENV_NOT_FOUND | 404 | Environment doesn't exist |
-| INVALID_PLAN | 400 | Plan is invalid or stale |
-| COMPILATION_ERROR | 400 | DAG compilation failed |
-| CONFLICT | 409 | Snapshot conflict (stale plan) |
-| INTERNAL_ERROR | 500 | Server error |
+| not_found | 404 | Resource (DAG, run, plan, …) doesn't exist |
+| environment_not_found | 404 | Environment doesn't exist |
+| bad_request | 400 | Malformed request (e.g. plan/environment mismatch) |
+| unauthorized | 401 | Missing or invalid API key (when auth is enabled) |
+| forbidden | 403 | API key lacks the required permission |
+| conflict | 409 | Stale plan: environment changed since plan generation |
+| compilation_failed | 422 | DAG compilation failed |
+| apply_failed | 422 | Task failure or contract violation during apply |
+| promotion_policy_violation | 422 | Environment promotion blocked by policy |
+| internal_error | 500 | Server error (details logged server-side only) |
+
+Rate-limited requests receive `429 Too Many Requests`.
 
 ## Rate Limiting
 
-Currently no rate limiting. Phase 2 will add per-API-key limits.
+Requests are rate limited per client IP: 10 requests/second with a burst capacity of 50. Exceeding the limit returns `429 Too Many Requests`.
 
 ## Pagination
 
-Use `limit` and `offset` for pagination:
+List endpoints accept a `limit` query parameter:
 
 ```
-GET /dags?limit=10&offset=0    # First 10
-GET /dags?limit=10&offset=10   # Next 10
-GET /dags?limit=10&offset=20   # Next 10
+GET /runs?limit=50       # Most recent 50 runs
+GET /events?limit=200    # Most recent 200 events
 ```
+
+## Other Endpoints
+
+Also routed but not detailed here (see `GET /api/v1/docs` for the live OpenAPI spec and Swagger UI):
+
+- `GET /api/v1/info` — system info
+- `POST/GET /api/v1/auth/keys`, `GET/DELETE /api/v1/auth/keys/{key_id}`, `GET /api/v1/auth/me` — API-key management
+- `GET /api/v1/dags/{dag_id}/graph` — DAG graph for visualization
+- `GET /api/v1/environments/{env_name}/diff/{other_env}`, `GET .../history`, `GET .../history/{version}`, `PUT .../policy` — environment diff, history, and promotion policy
+- `POST /api/v1/lineage/schema/diff`, `POST /api/v1/lineage/contracts/validate` — schema diff and contract validation
+- `POST /api/v1/openlineage/v1/lineage`, `GET /api/v1/openlineage/events`, `GET /api/v1/openlineage/datasets/{namespace}/{name}`, `GET /api/v1/openlineage/stats`, `GET /api/v1/lineage/datasets/{namespace}/{name}/unified`, `GET /api/v1/lineage/cache/stats`, `POST /api/v1/lineage/cache/invalidate` — OpenLineage ingest and unified dataset views
+- `GET /api/v1/contracts`, `GET /api/v1/contracts/{dag_id}`, `GET /api/v1/contracts/{dag_id}/{task_id}` — contract inventory
+- `GET /api/v1/metrics`, `GET /api/v1/metrics/{dag_id}/{task_id}` — task metrics
+- `GET /api/v1/connections`, `GET /api/v1/connections/providers`, `GET /api/v1/connections/{name}`, `POST /api/v1/connections/{name}/test` — provider connections
+- `POST /api/v1/backfill` — backfill runs
+- `GET /api/v1/cluster/status`, `POST /api/v1/cluster/workers/{id}/drain` — distributed cluster operations
 
 ## Next Steps
 

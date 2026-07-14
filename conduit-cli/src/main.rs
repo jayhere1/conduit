@@ -64,6 +64,7 @@ struct PersistentState {
     /// Best-effort event log for `conduit replay`. None when the events DB
     /// is unavailable (e.g. locked by a running `conduit serve`).
     event_store: Option<std::sync::Arc<conduit_state::EventStore>>,
+    watermark_store: std::sync::Arc<conduit_planner::WatermarkStore>,
     state_dir: PathBuf,
 }
 
@@ -140,10 +141,20 @@ impl PersistentState {
             None => env_manager,
         };
 
+        // Load watermarks so incremental tasks resume from where the last
+        // successful run left off. Best-effort: a missing/corrupt file
+        // starts fresh (first run behaves like a full refresh).
+        let watermarks_path = state_dir.join("watermarks.json");
+        let watermark_store = std::sync::Arc::new(
+            conduit_planner::WatermarkStore::from_file(&watermarks_path)
+                .unwrap_or_else(|_| conduit_planner::WatermarkStore::new()),
+        );
+
         Ok(Self {
             env_manager,
             snapshot_store,
             event_store,
+            watermark_store,
             state_dir: state_dir.to_path_buf(),
         })
     }
@@ -158,6 +169,9 @@ impl PersistentState {
         }
 
         // Snapshots are persisted via RocksDB — no explicit save needed
+
+        self.watermark_store
+            .save_to_file(&self.state_dir.join("watermarks.json"))?;
 
         Ok(())
     }
@@ -218,7 +232,7 @@ enum Commands {
         #[arg(long)]
         date: Option<String>,
 
-        /// Maximum concurrent tasks
+        /// Maximum number of tasks to execute concurrently
         #[arg(long, default_value = "16")]
         max_tasks: usize,
 
@@ -226,7 +240,12 @@ enum Commands {
         #[arg(long)]
         full_refresh: bool,
 
-        /// Enable distributed execution mode
+        /// Target environment recorded for this run (context only; snapshots
+        /// are managed by plan/apply).
+        #[arg(long, default_value = "production")]
+        env: String,
+
+        /// Run via the distributed coordinator; workers must connect (see `conduit worker`)
         #[arg(long)]
         distributed: bool,
 
@@ -433,7 +452,7 @@ enum Commands {
         #[arg(long, default_value = "day")]
         granularity: String,
 
-        /// Maximum concurrent partitions (v0.1: sequential only)
+        /// Maximum number of partitions to execute concurrently
         #[arg(long, default_value = "1")]
         max_concurrent: u32,
 
@@ -722,26 +741,28 @@ fn main() -> Result<()> {
             date,
             max_tasks,
             full_refresh,
+            env,
             distributed,
             bind,
         } => {
             if distributed {
-                println!(
-                    "Starting in distributed mode (coordinator: {})",
-                    bind.as_deref().unwrap_or("0.0.0.0:9400")
-                );
-                println!(
-                    "Workers can connect with: conduit worker --coordinator {}",
-                    bind.as_deref().unwrap_or("0.0.0.0:9400")
-                );
+                let bind_addr = bind.unwrap_or_else(|| "0.0.0.0:9400".to_string());
+                rt.block_on(cmd_run_distributed(
+                    &dag_id,
+                    &dags_path,
+                    date.as_deref(),
+                    &bind_addr,
+                ))
+            } else {
+                rt.block_on(cmd_run(
+                    &dag_id,
+                    &dags_path,
+                    date.as_deref(),
+                    max_tasks,
+                    full_refresh,
+                    &env,
+                ))
             }
-            rt.block_on(cmd_run(
-                &dag_id,
-                &dags_path,
-                date.as_deref(),
-                max_tasks,
-                full_refresh,
-            ))
         }
         Commands::Plan {
             environment,
@@ -900,14 +921,22 @@ fn main() -> Result<()> {
             pools,
             id,
             labels,
-        } => cmd_worker(&coordinator, capacity, &pools, id.as_deref(), &labels),
+        } => rt.block_on(cmd_worker(
+            &coordinator,
+            capacity,
+            &pools,
+            id.as_deref(),
+            &labels,
+        )),
 
         Commands::Cluster { action } => match action {
-            ClusterCommands::Status { coordinator, json } => cmd_cluster_status(&coordinator, json),
+            ClusterCommands::Status { coordinator, json } => {
+                rt.block_on(cmd_cluster_status(&coordinator, json))
+            }
             ClusterCommands::Drain {
                 worker_id,
                 coordinator,
-            } => cmd_cluster_drain(&coordinator, &worker_id),
+            } => rt.block_on(cmd_cluster_drain(&coordinator, &worker_id)),
         },
 
         Commands::Query {
@@ -1218,6 +1247,38 @@ fn warn_on_stub_connections(dags_path: &Path, plan: &conduit_compiler::ConduitPl
     }
 }
 
+/// Build a provider registry from the project's conduit.yaml `connections:`.
+///
+/// Returns an empty registry when no config file or no connections exist —
+/// SQL tasks then fail loudly instead of pretending to run.
+async fn build_provider_registry(
+    dags_path: &Path,
+) -> std::sync::Arc<conduit_providers::ProviderRegistry> {
+    let registry = match find_conduit_yaml(dags_path) {
+        Some(config_path) => match conduit_common::config::ConduitConfig::load(&config_path) {
+            Ok(cfg) if !cfg.connections.is_empty() => {
+                let secrets: conduit_providers::SecretsConfig = cfg.secrets.clone().into();
+                conduit_providers::ProviderRegistry::from_configs_with_secrets(
+                    &cfg.connections,
+                    &secrets,
+                )
+                .await
+            }
+            Ok(_) => conduit_providers::ProviderRegistry::new(),
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load {}: {} — SQL tasks will fail without providers",
+                    config_path.display(),
+                    e
+                );
+                conduit_providers::ProviderRegistry::new()
+            }
+        },
+        None => conduit_providers::ProviderRegistry::new(),
+    };
+    std::sync::Arc::new(registry)
+}
+
 // ─── conduit run ─────────────────────────────────────────────────────────────
 // Compiles DAGs, schedules one, and executes tasks via real ProcessRunner.
 
@@ -1225,8 +1286,9 @@ async fn cmd_run(
     dag_id: &str,
     dags_path: &PathBuf,
     date: Option<&str>,
-    _max_tasks: usize,
-    _full_refresh: bool,
+    max_tasks: usize,
+    full_refresh: bool,
+    environment: &str,
 ) -> Result<()> {
     use chrono::Utc;
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
@@ -1281,6 +1343,18 @@ async fn cmd_run(
         None => Utc::now(),
     };
 
+    // Build the provider registry from conduit.yaml so SQL tasks execute for
+    // real (or fail loudly if the connection isn't configured).
+    let registry = build_provider_registry(dags_path).await;
+
+    // Load watermarks so incremental tasks resume where the last successful
+    // run left off; persisted back to disk after the run joins.
+    let watermarks_path = resolve_state_dir(dags_path).join("watermarks.json");
+    let watermarks = std::sync::Arc::new(
+        conduit_planner::WatermarkStore::from_file(&watermarks_path)
+            .unwrap_or_else(|_| conduit_planner::WatermarkStore::new()),
+    );
+
     // Create scheduler channels
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
@@ -1311,6 +1385,7 @@ async fn cmd_run(
     let run_id = format!("run_{}", Utc::now().format("%Y%m%d_%H%M%S"));
     let mut run_config = HashMap::new();
     run_config.insert("triggered_by".to_string(), "cli".to_string());
+    run_config.insert("environment".to_string(), environment.to_string());
     event_tx.send(SchedulerEvent::DagRunRequested {
         dag_id: dag_id.to_string(),
         run_id: run_id.clone(),
@@ -1326,10 +1401,22 @@ async fn cmd_run(
     let dag_for_executor = dag.clone();
     let run_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let run_failed_flag = std::sync::Arc::clone(&run_failed);
+    // Captures the most recent task failure reason so the final error
+    // (printed to stderr) names the actual cause instead of a generic
+    // "see task output above" — e.g. an unconfigured SQL connection.
+    let last_error: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let last_error_flag = std::sync::Arc::clone(&last_error);
+    let registry_for_exec = std::sync::Arc::clone(&registry);
+    let watermarks_for_exec = std::sync::Arc::clone(&watermarks);
+    let environment_for_exec = environment.to_string();
+    // Bounds how many DispatchTask spawns may run their process at once;
+    // independent tasks (no shared dependency edge) execute concurrently up
+    // to this limit instead of serially awaiting each dispatch.
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_tasks.max(1)));
     let executor_handle = tokio::spawn(async move {
-        let mut completed = 0usize;
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let total = dag_for_executor.tasks.len();
-        let mut _failed = false;
 
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
@@ -1357,93 +1444,195 @@ async fn cmd_run(
                         }
                     };
 
-                    // Build execution context
-                    let context = TaskContext {
-                        dag_id: dag_id.clone(),
-                        run_id: run_id.clone(),
-                        task_id: task_id.clone(),
-                        attempt,
-                        logical_date,
-                        environment: "production".to_string(),
-                        params: HashMap::new(),
-                    };
+                    // Resolve incremental context, if this task declares one:
+                    // rewrite SQL queries and/or inject CONDUIT_* env vars.
+                    let run_time = chrono::Utc::now();
+                    let mut task_to_run = task.clone();
+                    let mut extra_env: Vec<(String, String)> = Vec::new();
+                    if let Some(inc_cfg) = &task.incremental {
+                        let wm = watermarks_for_exec.get(&dag_id, &task_id);
+                        let inc_ctx = conduit_planner::IncrementalEngine::build_context(
+                            inc_cfg,
+                            wm.as_ref(),
+                            full_refresh,
+                            run_time,
+                        );
+                        if inc_ctx.is_full_refresh {
+                            println!("  [INCR]  {} → full refresh", task_id);
+                        } else {
+                            println!(
+                                "  [INCR]  {} → incremental (watermark {:?})",
+                                task_id, inc_ctx.watermark
+                            );
+                        }
+                        if let conduit_common::dag::TaskType::Sql { query, .. } =
+                            &mut task_to_run.task_type
+                        {
+                            *query = conduit_planner::IncrementalEngine::rewrite_sql(
+                                query, inc_cfg, &inc_ctx,
+                            );
+                        }
+                        extra_env = inc_ctx.to_env_vars();
+                    }
 
-                    // Execute for real via ProcessRunner
-                    let task_start = Instant::now();
-                    match ProcessRunner::run(task, &context).await {
-                        Ok(output) => {
-                            let duration = task_start.elapsed();
-                            completed += 1;
+                    // Everything below (context build, real process
+                    // execution, event send, watermark advance) runs on the
+                    // semaphore-bounded pool so independent tasks execute
+                    // concurrently instead of this loop awaiting each
+                    // dispatch inline. `CompleteDagRun` only arrives once the
+                    // scheduler has observed every task event, so no spawn
+                    // here can be orphaned by the recv loop breaking early.
+                    let permit_sem = std::sync::Arc::clone(&semaphore);
+                    let event_tx = executor_event_tx.clone();
+                    let registry = std::sync::Arc::clone(&registry_for_exec);
+                    let watermarks = std::sync::Arc::clone(&watermarks_for_exec);
+                    let completed = std::sync::Arc::clone(&completed);
+                    let last_error_flag = std::sync::Arc::clone(&last_error_flag);
+                    let environment_for_exec = environment_for_exec.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit_sem
+                            .acquire_owned()
+                            .await
+                            .expect("semaphore never closed");
 
-                            if output.exit_code == 0 {
-                                println!(
-                                    "  [OK]    {} ({:.0}ms, exit 0) [{}/{}]",
-                                    task_id,
-                                    duration.as_secs_f64() * 1000.0,
-                                    completed,
-                                    total
-                                );
-                                // Print captured stdout (trimmed)
-                                let trimmed = output.stdout.trim();
-                                if !trimmed.is_empty() {
-                                    for line in trimmed.lines().take(10) {
-                                        println!("          | {}", line);
+                        // Build execution context
+                        let context = TaskContext {
+                            dag_id: dag_id.clone(),
+                            run_id: run_id.clone(),
+                            task_id: task_id.clone(),
+                            attempt,
+                            logical_date,
+                            environment: environment_for_exec,
+                            params: HashMap::new(),
+                            extra_env,
+                        };
+
+                        // Execute for real via ProcessRunner
+                        let task_start = Instant::now();
+                        match ProcessRunner::run_with_providers(
+                            &task_to_run,
+                            &context,
+                            Some(&registry),
+                        )
+                        .await
+                        {
+                            Ok(output) => {
+                                let duration = task_start.elapsed();
+
+                                if output.exit_code == 0 {
+                                    let completed_n = completed
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                        + 1;
+                                    println!(
+                                        "  [OK]    {} ({:.0}ms, exit 0) [{}/{}]",
+                                        task_id,
+                                        duration.as_secs_f64() * 1000.0,
+                                        completed_n,
+                                        total
+                                    );
+                                    // Print captured stdout (trimmed)
+                                    let trimmed = output.stdout.trim();
+                                    if !trimmed.is_empty() {
+                                        for line in trimmed.lines().take(10) {
+                                            println!("          | {}", line);
+                                        }
                                     }
-                                }
 
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskCompleted {
-                                    dag_id,
-                                    run_id,
-                                    task_id,
-                                    snapshot_id: None,
-                                    duration_ms: duration.as_millis() as u64,
-                                });
-                            } else if output.exit_code == 2 {
-                                println!("  [RETRY] {} (exit 2)", task_id);
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id,
-                                    run_id,
-                                    task_id,
-                                    error: format!("exit code 2 (retry): {}", output.stderr.trim()),
-                                    attempt,
-                                });
-                            } else {
-                                _failed = true;
-                                println!(
-                                    "  [FAIL]  {} (exit {}, {:.0}ms) [{}/{}]",
-                                    task_id,
-                                    output.exit_code,
-                                    duration.as_secs_f64() * 1000.0,
-                                    completed,
-                                    total
-                                );
-                                if !output.stderr.trim().is_empty() {
-                                    for line in output.stderr.trim().lines().take(5) {
-                                        println!("          ! {}", line);
+                                    if let Some(inc_cfg) = &task_to_run.incremental {
+                                        if inc_cfg.emit_watermark {
+                                            let emitted =
+                                                output.stdout.lines().rev().find_map(|l| {
+                                                    l.trim()
+                                                        .strip_prefix("CONDUIT::WATERMARK::")
+                                                        .map(|s| s.trim().to_string())
+                                                });
+                                            let mut wm = watermarks
+                                                .get(&dag_id, &task_id)
+                                                .unwrap_or_else(|| {
+                                                    conduit_common::incremental::Watermark::new(
+                                                        &dag_id, &task_id,
+                                                    )
+                                                });
+                                            conduit_planner::IncrementalEngine::advance_watermark(
+                                                &mut wm,
+                                                emitted.as_deref(),
+                                                run_time,
+                                                &run_id,
+                                            );
+                                            let _ = watermarks.set(wm);
+                                        }
                                     }
+
+                                    let _ = event_tx.send(SchedulerEvent::TaskCompleted {
+                                        dag_id,
+                                        run_id,
+                                        task_id,
+                                        snapshot_id: None,
+                                        duration_ms: duration.as_millis() as u64,
+                                    });
+                                } else if output.exit_code == 2 {
+                                    completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    println!("  [RETRY] {} (exit 2)", task_id);
+                                    let _ = event_tx.send(SchedulerEvent::TaskFailed {
+                                        dag_id,
+                                        run_id,
+                                        task_id,
+                                        error: format!(
+                                            "exit code 2 (retry): {}",
+                                            output.stderr.trim()
+                                        ),
+                                        attempt,
+                                    });
+                                } else {
+                                    let completed_n = completed
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                        + 1;
+                                    println!(
+                                        "  [FAIL]  {} (exit {}, {:.0}ms) [{}/{}]",
+                                        task_id,
+                                        output.exit_code,
+                                        duration.as_secs_f64() * 1000.0,
+                                        completed_n,
+                                        total
+                                    );
+                                    if !output.stderr.trim().is_empty() {
+                                        for line in output.stderr.trim().lines().take(5) {
+                                            println!("          ! {}", line);
+                                        }
+                                    }
+                                    if let Ok(mut guard) = last_error_flag.lock() {
+                                        *guard = Some(format!(
+                                            "{} exited {}: {}",
+                                            task_id,
+                                            output.exit_code,
+                                            output.stderr.trim()
+                                        ));
+                                    }
+                                    let _ = event_tx.send(SchedulerEvent::TaskFailed {
+                                        dag_id,
+                                        run_id,
+                                        task_id,
+                                        error: output.stderr.trim().to_string(),
+                                        attempt,
+                                    });
                                 }
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
+                            }
+                            Err(e) => {
+                                completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                println!("  [ERR]   {} — {}", task_id, e);
+                                if let Ok(mut guard) = last_error_flag.lock() {
+                                    *guard = Some(e.to_string());
+                                }
+                                let _ = event_tx.send(SchedulerEvent::TaskFailed {
                                     dag_id,
                                     run_id,
                                     task_id,
-                                    error: output.stderr.trim().to_string(),
+                                    error: e.to_string(),
                                     attempt,
                                 });
                             }
                         }
-                        Err(e) => {
-                            _failed = true;
-                            completed += 1;
-                            println!("  [ERR]   {} — {}", task_id, e);
-                            let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                dag_id,
-                                run_id,
-                                task_id,
-                                error: e.to_string(),
-                                attempt,
-                            });
-                        }
-                    }
+                    });
                 }
                 SchedulerCommand::CompleteDagRun {
                     dag_id,
@@ -1462,14 +1651,20 @@ async fn cmd_run(
                     task_id, reason, ..
                 } => {
                     println!("  [SKIP]  {} ({})", task_id, reason);
-                    completed += 1;
+                    completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 SchedulerCommand::RetryTask { task_id, delay, .. } => {
                     // The scheduler re-dispatches the task itself once the
                     // delay elapses; this is just progress output. The failed
                     // attempt wasn't final, so give its slot back to the
-                    // progress counter.
-                    completed = completed.saturating_sub(1);
+                    // progress counter. Guarded against underflow: with
+                    // concurrent dispatches the counter can already be at 0
+                    // when a retry for a different task arrives.
+                    let _ = completed.fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |c| Some(c.saturating_sub(1)),
+                    );
                     println!(
                         "  [RETRY] {} (retrying in {}s)",
                         task_id,
@@ -1482,12 +1677,21 @@ async fn cmd_run(
 
     let _ = tokio::join!(scheduler_handle, executor_handle);
 
+    if let Err(e) = watermarks.save_to_file(&watermarks_path) {
+        tracing::warn!(error = %e, "Failed to persist watermarks");
+    }
+
     let total_duration = start.elapsed();
     println!("Total time: {:.1}ms", total_duration.as_secs_f64() * 1000.0);
 
     // A failed run must fail the command (CI gates on this exit code).
     if run_failed.load(std::sync::atomic::Ordering::SeqCst) {
-        anyhow::bail!("DAG run failed — see task output above");
+        let detail = last_error
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "see task output above".to_string());
+        anyhow::bail!("DAG run failed: {}", detail);
     }
 
     Ok(())
@@ -1580,7 +1784,7 @@ async fn cmd_apply(
     dags_path: &PathBuf,
     plan_file: Option<&Path>,
     auto_approve: bool,
-    _full_refresh: bool,
+    full_refresh: bool,
     only: &[String],
 ) -> Result<()> {
     use conduit_executor::process_runner::{ProcessRunner, TaskContext};
@@ -1603,9 +1807,54 @@ async fn cmd_apply(
     // Load persistent state
     let state = PersistentState::open(&state_dir)?;
 
+    // Build the provider registry from conduit.yaml so SQL tasks execute for
+    // real (or fail loudly if the connection isn't configured).
+    let registry = build_provider_registry(dags_path).await;
+
     let deploy = if let Some(pf) = plan_file {
         println!("Loading plan from {}...", pf.display());
-        DeploymentPlan::from_json(&std::fs::read_to_string(pf)?)?
+        let deploy = DeploymentPlan::from_json(&std::fs::read_to_string(pf)?)?;
+
+        if deploy.target_environment != environment {
+            anyhow::bail!(
+                "plan file targets environment '{}' but apply was invoked for '{}'.\n  \
+                 Re-run as: conduit apply {} --plan-file {}",
+                deploy.target_environment,
+                environment,
+                deploy.target_environment,
+                pf.display()
+            );
+        }
+
+        let current_version = state
+            .env_manager
+            .get(environment)
+            .map(|e| e.current_version)
+            .unwrap_or(0);
+        if current_version != deploy.base_environment_version {
+            eprintln!(
+                "Error: stale plan — environment '{}' changed since this plan was generated.",
+                environment
+            );
+            eprintln!("  Current environment version: {}", current_version);
+            eprintln!(
+                "  Plan was based on version:    {}",
+                deploy.base_environment_version
+            );
+            eprintln!();
+            eprintln!("Recommended action:");
+            eprintln!(
+                "  conduit plan {} --output <plan.json>   # regenerate against current state",
+                environment
+            );
+            eprintln!("  conduit apply {} --plan-file <plan.json> -y", environment);
+            anyhow::bail!(
+                "stale plan rejected (environment version {} != plan base version {})",
+                current_version,
+                deploy.base_environment_version
+            );
+        }
+        deploy
     } else {
         println!("Generating deployment plan for '{}'...", environment);
         println!();
@@ -1624,7 +1873,7 @@ async fn cmd_apply(
     // upstream. Pure Skip upstream are dropped; the env preserves unselected
     // pointers because `apply_to_environment` only mutates entries that have
     // an action in the plan.
-    let deploy = if !only.is_empty() {
+    let mut deploy = if !only.is_empty() {
         let selectors: Result<Vec<(String, String)>, _> = only
             .iter()
             .map(|s| {
@@ -1692,6 +1941,22 @@ async fn cmd_apply(
     let mut removed = 0usize;
     let logical_date = chrono::Utc::now();
 
+    // Contracts indexed by (dag_id, task_id) — evaluated against the evidence
+    // each executed task emits. Error-severity failures block the deployment
+    // (docs/src/concepts/contracts.md "Plan/Apply Integration").
+    let contract_index: HashMap<(String, String), &conduit_common::contracts::TaskContracts> =
+        deploy
+            .pending_contracts
+            .iter()
+            .map(|tc| {
+                (
+                    (tc.dag_id.clone().unwrap_or_default(), tc.task_id.clone()),
+                    tc,
+                )
+            })
+            .collect();
+    let mut contract_results: Vec<conduit_common::contracts::ValidationResult> = Vec::new();
+
     for action in &deploy.actions {
         match &action.action {
             ActionKind::Execute => {
@@ -1714,22 +1979,123 @@ async fn cmd_apply(
 
                 println!("  [EXEC]  {}.{}", action.dag_id, action.task_id);
 
+                let run_id = format!("apply_{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+
+                // Resolve incremental context, if this task declares one:
+                // rewrite SQL queries and/or inject CONDUIT_* env vars.
+                let mut task_to_run = task.clone();
+                let mut extra_env: Vec<(String, String)> = Vec::new();
+                if let Some(inc_cfg) = &task.incremental {
+                    let wm = state.watermark_store.get(&action.dag_id, &action.task_id);
+                    let inc_ctx = conduit_planner::IncrementalEngine::build_context(
+                        inc_cfg,
+                        wm.as_ref(),
+                        full_refresh,
+                        logical_date,
+                    );
+                    if inc_ctx.is_full_refresh {
+                        println!(
+                            "  [INCR]  {}.{} → full refresh",
+                            action.dag_id, action.task_id
+                        );
+                    } else {
+                        println!(
+                            "  [INCR]  {}.{} → incremental (watermark {:?})",
+                            action.dag_id, action.task_id, inc_ctx.watermark
+                        );
+                    }
+                    if let conduit_common::dag::TaskType::Sql { query, .. } =
+                        &mut task_to_run.task_type
+                    {
+                        *query = conduit_planner::IncrementalEngine::rewrite_sql(
+                            query, inc_cfg, &inc_ctx,
+                        );
+                    }
+                    extra_env = inc_ctx.to_env_vars();
+                }
+
                 let context = TaskContext {
                     dag_id: action.dag_id.clone(),
-                    run_id: format!("apply_{}", chrono::Utc::now().format("%Y%m%d%H%M%S")),
+                    run_id: run_id.clone(),
                     task_id: action.task_id.clone(),
                     attempt: 1,
                     logical_date,
                     environment: environment.to_string(),
                     params: HashMap::new(),
+                    extra_env,
                 };
 
                 let task_start = Instant::now();
-                match ProcessRunner::run(task, &context).await {
+                match ProcessRunner::run_with_providers(&task_to_run, &context, Some(&registry))
+                    .await
+                {
                     Ok(output) => {
                         let duration_ms = task_start.elapsed().as_secs_f64() * 1000.0;
 
                         if output.exit_code == 0 {
+                            if let Some(tc) =
+                                contract_index.get(&(action.dag_id.clone(), action.task_id.clone()))
+                            {
+                                let result = conduit_common::contracts::ContractEvaluator::evaluate(
+                                    tc,
+                                    &output.evidence,
+                                );
+                                let blocked = !result.passed;
+                                println!(
+                                    "  [{}] {}.{} contracts: {}/{} checks passed",
+                                    if blocked { "CVIO" } else { "CHK " },
+                                    action.dag_id,
+                                    action.task_id,
+                                    result.passed_checks,
+                                    result.total_checks
+                                );
+                                for check in result.checks.iter().filter(|c| !c.passed) {
+                                    eprintln!(
+                                        "          ! {}: {}",
+                                        check.contract_name, check.message
+                                    );
+                                }
+                                contract_results.push(result);
+                                if blocked {
+                                    let validation =
+                                        conduit_common::contracts::DeploymentValidation::from_results(
+                                            contract_results,
+                                        );
+                                    eprintln!();
+                                    eprintln!("{}", validation);
+                                    anyhow::bail!(
+                                        "apply blocked: contract validation failed for {}.{} — environment not updated",
+                                        action.dag_id, action.task_id
+                                    );
+                                }
+                            }
+
+                            if let Some(inc_cfg) = &task.incremental {
+                                if inc_cfg.emit_watermark {
+                                    let emitted = output.stdout.lines().rev().find_map(|l| {
+                                        l.trim()
+                                            .strip_prefix("CONDUIT::WATERMARK::")
+                                            .map(|s| s.trim().to_string())
+                                    });
+                                    let mut wm = state
+                                        .watermark_store
+                                        .get(&action.dag_id, &action.task_id)
+                                        .unwrap_or_else(|| {
+                                            conduit_common::incremental::Watermark::new(
+                                                &action.dag_id,
+                                                &action.task_id,
+                                            )
+                                        });
+                                    conduit_planner::IncrementalEngine::advance_watermark(
+                                        &mut wm,
+                                        emitted.as_deref(),
+                                        logical_date,
+                                        &run_id,
+                                    );
+                                    let _ = state.watermark_store.set(wm);
+                                }
+                            }
+
                             let snap_id = format!(
                                 "snap_{}_{}",
                                 action.task_id,
@@ -1777,14 +2143,22 @@ async fn cmd_apply(
                                     eprintln!("          ! {}", line);
                                 }
                             }
-                            eprintln!("Apply aborted due to task failure.");
-                            return Ok(());
+                            anyhow::bail!(
+                                "apply aborted: task {}.{} failed with exit code {}",
+                                action.dag_id,
+                                action.task_id,
+                                output.exit_code
+                            );
                         }
                     }
                     Err(e) => {
                         eprintln!("  [ERR]   {}.{} — {}", action.dag_id, action.task_id, e);
-                        eprintln!("Apply aborted due to execution error.");
-                        return Ok(());
+                        anyhow::bail!(
+                            "apply aborted: task {}.{} execution error: {}",
+                            action.dag_id,
+                            action.task_id,
+                            e
+                        );
                     }
                 }
             }
@@ -1804,6 +2178,21 @@ async fn cmd_apply(
                 println!("  [DEL]   {}.{}", action.dag_id, action.task_id);
                 removed += 1;
             }
+        }
+    }
+
+    // `contract_index` borrows from `deploy.pending_contracts`; drop it before
+    // taking a mutable borrow of `deploy` below.
+    drop(contract_index);
+
+    if !contract_results.is_empty() {
+        let validation =
+            conduit_common::contracts::DeploymentValidation::from_results(contract_results);
+        println!();
+        println!("{}", validation);
+        deploy.set_validation(validation);
+        if !deploy.can_apply() {
+            anyhow::bail!("apply blocked: contract validation failed — environment not updated");
         }
     }
 
@@ -1928,6 +2317,24 @@ async fn cmd_serve(
         ui_dir,
         auth_enabled,
     );
+
+    // Initialize SQL providers from conduit.yaml so both the /connections API
+    // and the server-side executor run SQL for real.
+    if let Some(config_path) = find_conduit_yaml(dags_path) {
+        match conduit_common::config::ConduitConfig::load(&config_path) {
+            Ok(cfg) => {
+                state.init_providers(&cfg.connections).await;
+                println!(
+                    "  Providers:   {} connection(s) registered",
+                    cfg.connections.len()
+                );
+            }
+            Err(e) => eprintln!(
+                "  Providers:   WARNING — failed to load conduit.yaml: {}",
+                e
+            ),
+        }
+    }
 
     if !cors_origins.is_empty() {
         println!("  CORS:        allowing {}", cors_origins.join(", "));
@@ -2072,15 +2479,33 @@ async fn cmd_serve(
                             .to_string(),
                         );
 
+                        let environment = exec_state
+                            .runs
+                            .read()
+                            .ok()
+                            .and_then(|runs| {
+                                runs.iter()
+                                    .find(|r| r.run_id == run_id)
+                                    .map(|r| r.environment.clone())
+                            })
+                            .unwrap_or_else(|| "production".to_string());
+
                         let context = TaskContext {
                             dag_id: dag_id.clone(),
                             run_id: run_id.clone(),
                             task_id: task_id.clone(),
                             attempt,
                             logical_date: chrono::Utc::now(),
-                            environment: "production".to_string(),
+                            environment,
                             params: HashMap::new(),
+                            extra_env: Vec::new(),
                         };
+
+                        let registry = exec_state
+                            .provider_registry
+                            .read()
+                            .ok()
+                            .and_then(|guard| guard.clone());
 
                         // Spawn each task so independent tasks run concurrently
                         // instead of blocking the command dispatch loop.
@@ -2088,7 +2513,13 @@ async fn cmd_serve(
                         let spawn_event_tx = exec_event_tx.clone();
                         tokio::spawn(async move {
                             let task_start = Instant::now();
-                            match ProcessRunner::run(&task, &context).await {
+                            match ProcessRunner::run_with_providers(
+                                &task,
+                                &context,
+                                registry.as_deref(),
+                            )
+                            .await
+                            {
                                 Ok(output) => {
                                     let duration = task_start.elapsed();
                                     update_run_task_logs(
@@ -3217,12 +3648,167 @@ fn cmd_lineage_trace(
 // ─── conduit backfill ────────────────────────────────────────────────────────
 // Runs a DAG across a range of dates/partitions.
 
+/// Execute one backfill partition: run the DAG through its own
+/// scheduler/executor pair with the partition's env vars injected.
+///
+/// Returns `Ok(true)` when the partition failed (any task failed), `Ok(false)`
+/// on success. Takes owned/pre-loaded data (pools, event store, registry) so
+/// partitions can run concurrently on a `JoinSet` without touching disk or
+/// shared mutable state.
+#[allow(clippy::too_many_arguments)]
+async fn run_backfill_partition(
+    idx: usize,
+    total: usize,
+    partition: conduit_common::backfill::BackfillPartition,
+    request: conduit_common::backfill::BackfillRequest,
+    dag: conduit_common::dag::Dag,
+    dag_id: String,
+    pools: Vec<conduit_common::dag::Pool>,
+    event_store: Option<std::sync::Arc<conduit_state::EventStore>>,
+    registry: std::sync::Arc<conduit_providers::ProviderRegistry>,
+) -> Result<bool> {
+    use conduit_executor::process_runner::{ProcessRunner, TaskContext};
+    use conduit_planner::BackfillEngine;
+    use conduit_scheduler::pool_manager::PoolManager;
+    use conduit_scheduler::scheduler::{Scheduler, SchedulerCommand, SchedulerEvent};
+    use std::collections::HashMap;
+
+    let env_vars = BackfillEngine::partition_env_vars(&request, &partition, idx, total);
+
+    println!(
+        "  [{:>3}/{}] Partition '{}' ...",
+        idx + 1,
+        total,
+        partition.partition_key,
+    );
+
+    // Run the DAG for this partition using the scheduler/executor pattern
+    // from cmd_run.
+    let logical_date = partition.logical_start;
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
+
+    let mut dag_map = HashMap::new();
+    dag_map.insert(dag_id.clone(), dag.clone());
+
+    let mut scheduler = Scheduler::new(event_rx, cmd_tx, PoolManager::new(pools), dag_map)?;
+    if let Some(store) = &event_store {
+        scheduler = scheduler.with_event_store(std::sync::Arc::clone(store));
+    }
+
+    let partition_env: HashMap<String, String> = env_vars.iter().cloned().collect();
+
+    let run_id = format!("bf_{}_{}", dag_id, partition.partition_key);
+    event_tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: dag_id.clone(),
+        run_id,
+        logical_date,
+        config: env_vars.into_iter().collect(),
+    })?;
+
+    let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
+
+    let executor_event_tx = event_tx.clone();
+    let dag_for_exec = dag;
+    let executor_handle = tokio::spawn(async move {
+        let mut partition_failed = false;
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                SchedulerCommand::DispatchTask {
+                    dag_id,
+                    run_id,
+                    task_id,
+                    attempt,
+                } => {
+                    let task = match dag_for_exec.tasks.get(&task_id) {
+                        Some(t) => t,
+                        None => {
+                            let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
+                                dag_id,
+                                run_id,
+                                task_id,
+                                error: "Task not found".to_string(),
+                                attempt,
+                            });
+                            continue;
+                        }
+                    };
+
+                    let mut context = TaskContext {
+                        dag_id: dag_id.clone(),
+                        run_id: run_id.clone(),
+                        task_id: task_id.clone(),
+                        attempt,
+                        logical_date,
+                        environment: partition_env
+                            .get("CONDUIT_ENVIRONMENT")
+                            .cloned()
+                            .unwrap_or_else(|| "production".to_string()),
+                        params: partition_env.clone(),
+                        extra_env: Vec::new(),
+                    };
+                    // Inject backfill env vars into params
+                    for (k, v) in &partition_env {
+                        context.params.insert(k.clone(), v.clone());
+                    }
+
+                    let task_start = Instant::now();
+                    match ProcessRunner::run_with_providers(task, &context, Some(&registry)).await {
+                        Ok(output) => {
+                            let duration = task_start.elapsed();
+                            if output.exit_code == 0 {
+                                let _ = executor_event_tx.send(SchedulerEvent::TaskCompleted {
+                                    dag_id,
+                                    run_id,
+                                    task_id,
+                                    snapshot_id: None,
+                                    duration_ms: duration.as_millis() as u64,
+                                });
+                            } else {
+                                partition_failed = true;
+                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
+                                    dag_id,
+                                    run_id,
+                                    task_id,
+                                    error: output.stderr.trim().to_string(),
+                                    attempt,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            partition_failed = true;
+                            let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
+                                dag_id,
+                                run_id,
+                                task_id,
+                                error: e.to_string(),
+                                attempt,
+                            });
+                        }
+                    }
+                }
+                SchedulerCommand::CompleteDagRun { .. } => {
+                    let _ = executor_event_tx.send(SchedulerEvent::Shutdown);
+                    break;
+                }
+                SchedulerCommand::SkipTask { .. } => {}
+                SchedulerCommand::RetryTask { .. } => {}
+            }
+        }
+        partition_failed
+    });
+
+    let (_, exec_result) = tokio::join!(scheduler_handle, executor_handle);
+    Ok(exec_result?)
+}
+
 async fn cmd_backfill(
     dag_id: &str,
     start: &str,
     end: &str,
     granularity: &str,
-    _max_concurrent: u32,
+    max_concurrent: u32,
     full_refresh: bool,
     dry_run: bool,
     environment: &str,
@@ -3230,11 +3816,7 @@ async fn cmd_backfill(
 ) -> Result<()> {
     use conduit_common::backfill::*;
     use conduit_common::incremental::PartitionGranularity;
-    use conduit_executor::process_runner::{ProcessRunner, TaskContext};
     use conduit_planner::BackfillEngine;
-    use conduit_scheduler::pool_manager::PoolManager;
-    use conduit_scheduler::scheduler::{Scheduler, SchedulerCommand, SchedulerEvent};
-    use std::collections::HashMap;
 
     let overall_start = Instant::now();
 
@@ -3302,7 +3884,7 @@ async fn cmd_backfill(
         end_date,
         granularity: gran,
         environment: environment.to_string(),
-        max_concurrent_partitions: _max_concurrent,
+        max_concurrent_partitions: max_concurrent,
         full_refresh,
         dry_run,
     };
@@ -3340,8 +3922,9 @@ async fn cmd_backfill(
         return Ok(());
     }
 
-    // Phase 5: Execute partitions sequentially
-    println!("Executing partitions...");
+    // Phase 5: Execute partitions, bounded by --max-concurrent
+    let max_concurrent = (max_concurrent as usize).max(1);
+    println!("Executing partitions ({} at a time)...", max_concurrent);
     println!();
 
     // Open the event store once for the whole backfill; each partition's
@@ -3359,162 +3942,73 @@ async fn cmd_backfill(
         }
     };
 
+    // Build the provider registry once for the whole backfill so SQL tasks
+    // execute for real (or fail loudly if the connection isn't configured).
+    let registry = build_provider_registry(dags_path).await;
+
+    // Load pools once; each partition's scheduler receives its own copy so
+    // concurrent partitions never re-read conduit.yaml from disk.
+    let pools = load_pools(dags_path);
+
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    let mut join_set = tokio::task::JoinSet::new();
+    for (idx, partition) in partitions.into_iter().enumerate() {
+        let sem = std::sync::Arc::clone(&semaphore);
+        let request = request.clone();
+        let dag = dag.clone();
+        let dag_id = dag_id.to_string();
+        let pools = pools.clone();
+        let event_store = backfill_event_store.clone();
+        let registry = std::sync::Arc::clone(&registry);
+        join_set.spawn(async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore never closed");
+            let started = Instant::now();
+            let result = run_backfill_partition(
+                idx,
+                total,
+                partition,
+                request,
+                dag,
+                dag_id,
+                pools,
+                event_store,
+                registry,
+            )
+            .await;
+            (idx, started.elapsed(), result)
+        });
+    }
+
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let skipped = 0usize;
-
-    for (idx, partition) in partitions.iter().enumerate() {
-        let partition_start_time = Instant::now();
-        let env_vars = BackfillEngine::partition_env_vars(&request, partition, idx, total);
-
-        println!(
-            "  [{:>3}/{}] Partition '{}' ...",
-            idx + 1,
-            total,
-            partition.partition_key,
-        );
-
-        // Run the DAG for this partition using the scheduler/executor pattern from cmd_run
-        let logical_date = partition.logical_start;
-
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
-        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
-
-        let mut dag_map = HashMap::new();
-        dag_map.insert(dag_id.to_string(), dag.clone());
-
-        let pools = PoolManager::new(load_pools(dags_path));
-        let mut scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map)?;
-        if let Some(store) = &backfill_event_store {
-            scheduler = scheduler.with_event_store(std::sync::Arc::clone(store));
-        }
-
-        let run_id = format!("bf_{}_{}", dag_id, partition.partition_key);
-        event_tx.send(SchedulerEvent::DagRunRequested {
-            dag_id: dag_id.to_string(),
-            run_id: run_id.clone(),
-            logical_date,
-            config: env_vars.into_iter().collect(),
-        })?;
-
-        let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
-
-        let executor_event_tx = event_tx.clone();
-        let dag_for_exec = dag.clone();
-        let partition_env: HashMap<String, String> =
-            BackfillEngine::partition_env_vars(&request, partition, idx, total)
-                .into_iter()
-                .collect();
-        let executor_handle = tokio::spawn(async move {
-            let mut partition_failed = false;
-            while let Some(cmd) = cmd_rx.recv().await {
-                match cmd {
-                    SchedulerCommand::DispatchTask {
-                        dag_id,
-                        run_id,
-                        task_id,
-                        attempt,
-                    } => {
-                        let task = match dag_for_exec.tasks.get(&task_id) {
-                            Some(t) => t,
-                            None => {
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id,
-                                    run_id,
-                                    task_id,
-                                    error: "Task not found".to_string(),
-                                    attempt,
-                                });
-                                continue;
-                            }
-                        };
-
-                        let mut context = TaskContext {
-                            dag_id: dag_id.clone(),
-                            run_id: run_id.clone(),
-                            task_id: task_id.clone(),
-                            attempt,
-                            logical_date,
-                            environment: partition_env
-                                .get("CONDUIT_ENVIRONMENT")
-                                .cloned()
-                                .unwrap_or_else(|| "production".to_string()),
-                            params: partition_env.clone(),
-                        };
-                        // Inject backfill env vars into params
-                        for (k, v) in &partition_env {
-                            context.params.insert(k.clone(), v.clone());
-                        }
-
-                        let task_start = Instant::now();
-                        match ProcessRunner::run(task, &context).await {
-                            Ok(output) => {
-                                let duration = task_start.elapsed();
-                                if output.exit_code == 0 {
-                                    let _ = executor_event_tx.send(SchedulerEvent::TaskCompleted {
-                                        dag_id,
-                                        run_id,
-                                        task_id,
-                                        snapshot_id: None,
-                                        duration_ms: duration.as_millis() as u64,
-                                    });
-                                } else {
-                                    partition_failed = true;
-                                    let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                        dag_id,
-                                        run_id,
-                                        task_id,
-                                        error: output.stderr.trim().to_string(),
-                                        attempt,
-                                    });
-                                }
-                            }
-                            Err(e) => {
-                                partition_failed = true;
-                                let _ = executor_event_tx.send(SchedulerEvent::TaskFailed {
-                                    dag_id,
-                                    run_id,
-                                    task_id,
-                                    error: e.to_string(),
-                                    attempt,
-                                });
-                            }
-                        }
-                    }
-                    SchedulerCommand::CompleteDagRun { .. } => {
-                        let _ = executor_event_tx.send(SchedulerEvent::Shutdown);
-                        break;
-                    }
-                    SchedulerCommand::SkipTask { .. } => {}
-                    SchedulerCommand::RetryTask { .. } => {}
-                }
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok((idx, dur, Ok(false))) => {
+                succeeded += 1;
+                println!(
+                    "  [{:>3}/{}] OK ({:.0}ms)",
+                    idx + 1,
+                    total,
+                    dur.as_secs_f64() * 1000.0
+                );
             }
-            partition_failed
-        });
-
-        let (_, exec_result) = tokio::join!(scheduler_handle, executor_handle);
-
-        let partition_duration = partition_start_time.elapsed();
-
-        match exec_result {
-            Ok(partition_failed) => {
-                if partition_failed {
-                    failed += 1;
-                    println!(
-                        "           FAILED ({:.0}ms)",
-                        partition_duration.as_secs_f64() * 1000.0,
-                    );
-                } else {
-                    succeeded += 1;
-                    println!(
-                        "           OK ({:.0}ms)",
-                        partition_duration.as_secs_f64() * 1000.0,
-                    );
-                }
+            Ok((idx, dur, Ok(true))) => {
+                failed += 1;
+                println!(
+                    "  [{:>3}/{}] FAILED ({:.0}ms)",
+                    idx + 1,
+                    total,
+                    dur.as_secs_f64() * 1000.0
+                );
+            }
+            Ok((idx, _, Err(e))) => {
+                failed += 1;
+                println!("  [{:>3}/{}] ERROR: {}", idx + 1, total, e);
             }
             Err(e) => {
                 failed += 1;
-                println!("           ERROR: {}", e);
+                println!("  [join] ERROR: {}", e);
             }
         }
     }
@@ -3541,7 +4035,7 @@ async fn cmd_backfill(
 
 // ─── conduit worker ─────────────────────────────────────────────────────────
 
-fn cmd_worker(
+async fn cmd_worker(
     coordinator_addr: &str,
     capacity: u32,
     pools: &str,
@@ -3573,90 +4067,441 @@ fn cmd_worker(
     println!("└─────────────────────────────────────────────┘");
     println!();
 
-    println!("Connecting to coordinator at {}...", coordinator_addr);
+    let config = conduit_distributed::WorkerConfig {
+        worker_id: worker_id.clone(),
+        coordinator_addr: coordinator_addr.to_string(),
+        capacity,
+        pool_affinity: pool_list,
+        labels,
+        heartbeat_interval_secs: 5,
+        graceful_shutdown: true,
+        tls_ca_cert_path: None,
+    };
 
-    // In production, this would:
-    // 1. Create a Worker instance with WorkerConfig
-    // 2. Connect to coordinator via gRPC (tonic client)
-    // 3. Register and start receiving task assignments
-    // 4. Run heartbeat loop
-    // 5. Block until SIGTERM/SIGINT
+    println!("Connecting to coordinator at {}...", coordinator_addr);
+    conduit_distributed::run_worker(config).await.map_err(|e| {
+        anyhow::anyhow!(
+            "worker failed: {} (is the coordinator running at {}?)",
+            e,
+            coordinator_addr
+        )
+    })
+}
+
+// ─── conduit run --distributed ───────────────────────────────────────────────
+
+/// Map a compiled Task onto the distributed protocol's `DispatchRequest`.
+///
+/// Mirrors what the worker executes: `Bash` runs `spec.script` via `bash -c`,
+/// `Python` imports the module and calls the function via `python3 -c`,
+/// `Executable` runs `command` + `args`, `Sql` carries the connection/query
+/// (which the worker fails on loudly — Task 10 Step 4), and `Sensor` carries
+/// nothing extra.
+fn dispatch_request_for(
+    task: &conduit_common::dag::Task,
+    dag_id: &str,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    logical_date: chrono::DateTime<chrono::Utc>,
+) -> conduit_distributed::DispatchRequest {
+    use conduit_common::dag::TaskType as T;
+    use conduit_distributed::TaskType as DT;
+
+    let (task_type, script, connection, query, command, args) = match &task.task_type {
+        T::Bash { command } => (
+            DT::Bash,
+            command.clone(),
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+        ),
+        T::Python { module, function } => (
+            DT::Python,
+            // The worker wraps `spec.script` in `python3 -c '…'`; import-and-call.
+            format!("import {m}; {m}.{f}()", m = module, f = function),
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+        ),
+        T::Sql {
+            connection, query, ..
+        } => (
+            DT::Sql,
+            String::new(),
+            connection.clone(),
+            query.clone(),
+            String::new(),
+            vec![],
+        ),
+        T::Executable { command, args } => (
+            DT::Executable,
+            String::new(),
+            String::new(),
+            String::new(),
+            command.clone(),
+            args.clone(),
+        ),
+        T::Sensor { .. } => (
+            DT::Sensor,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+        ),
+    };
+
+    conduit_distributed::DispatchRequest {
+        dag_id: dag_id.to_string(),
+        run_id: run_id.to_string(),
+        task_id: task_id.to_string(),
+        attempt,
+        task_type,
+        script,
+        connection,
+        query,
+        command,
+        args,
+        timeout_secs: 0, // 0 = executor default
+        pool: task.pool.clone().unwrap_or_default(),
+        logical_date,
+        environment: "production".to_string(),
+        params: Default::default(),
+        resources: conduit_distributed::ResourceLimits {
+            cpu_millicores: task.resources.cpu_millicores.unwrap_or(0),
+            memory_mb: task.resources.memory_mb.unwrap_or(0),
+        },
+    }
+}
+
+/// `conduit run --distributed`: run the coordinator in-process, serve the
+/// worker gRPC endpoint on `bind_addr`, and dispatch every task of the DAG
+/// run to connected workers. The coordinator recovers durable in-flight
+/// assignments from `{state_dir}/coordinator_assignments`. Exit code reflects
+/// the run outcome (non-zero on a failed run), like the local path.
+async fn cmd_run_distributed(
+    dag_id: &str,
+    dags_path: &PathBuf,
+    date: Option<&str>,
+    bind_addr: &str,
+) -> Result<()> {
+    use chrono::Utc;
+    use conduit_distributed::{DistributedExecutor, DistributedExecutorConfig};
+    use conduit_scheduler::pool_manager::PoolManager;
+    use conduit_scheduler::scheduler::{Scheduler, SchedulerCommand, SchedulerEvent};
+    use std::collections::HashMap;
+
+    let start = Instant::now();
+
+    // Phase 1: compile + resolve DAG (same as cmd_run).
+    println!("Compiling DAGs from {}...", dags_path.display());
+    let (plan, stats) = ConduitPlan::compile(dags_path)?;
+    if !stats.errors.is_empty() {
+        eprintln!("Compilation errors:");
+        for err in &stats.errors {
+            eprintln!("  {}", err);
+        }
+        std::process::exit(1);
+    }
+    let dag = plan
+        .dags
+        .get(dag_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "DAG '{}' not found. Available DAGs: {}",
+                dag_id,
+                plan.dags.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?
+        .clone();
 
     println!(
-        "Worker '{}' registered with {} capacity",
-        worker_id, capacity
+        "  Compiled {} DAGs ({} tasks) in {:.1}ms",
+        stats.dags_compiled,
+        stats.tasks_total,
+        start.elapsed().as_secs_f64() * 1000.0
     );
-    println!("Pool affinity: {:?}", pool_list);
-    if !labels.is_empty() {
-        println!("Labels: {:?}", labels);
-    }
     println!();
-    println!("Waiting for task assignments... (press Ctrl+C to stop)");
 
-    // The actual runtime would be:
-    //   let rt = tokio::runtime::Runtime::new()?;
-    //   rt.block_on(async {
-    //       let (worker, result_rx, log_rx) = Worker::new(WorkerConfig { ... });
-    //       // gRPC connect + register + receive loop
-    //   });
-    //
-    // For now, we print the startup banner to validate the CLI wiring.
+    // Phase 2: coordinator with durable assignment recovery (PRD E3).
+    let state_dir = resolve_state_dir(dags_path);
+    let mut dist_config = DistributedExecutorConfig::default();
+    dist_config.coordinator.bind_addr = bind_addr.to_string();
+    let executor = DistributedExecutor::with_persistence(
+        dist_config,
+        &state_dir.join("coordinator_assignments"),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to open coordinator assignment store: {}", e))?;
 
-    println!("\n[Worker runtime requires gRPC connection to coordinator]");
-    println!("To test locally, start the coordinator first:");
-    println!("  conduit serve --distributed --bind {}", coordinator_addr);
+    let grpc_addr: std::net::SocketAddr = bind_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --bind address '{}': {}", bind_addr, e))?;
+    let coordinator = std::sync::Arc::clone(executor.coordinator());
+    tokio::spawn(async move {
+        if let Err(e) = conduit_distributed::serve_grpc(coordinator, grpc_addr, None, None).await {
+            eprintln!("coordinator gRPC server failed: {e}");
+        }
+    });
+    println!("Coordinator listening on {bind_addr}");
+    println!("Workers connect with: conduit worker --coordinator {bind_addr}");
+    println!();
 
+    println!("Running DAG '{}'...", dag_id);
+    println!("  Tasks: {}", dag.tasks.len());
+    println!("  Order: {}", dag.execution_order.join(" -> "));
+    println!();
+
+    let logical_date = match date {
+        Some(d) => chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+            .map(|nd| nd.and_hms_opt(0, 0, 0).unwrap().and_utc())
+            .unwrap_or_else(|_| Utc::now()),
+        None => Utc::now(),
+    };
+
+    // Phase 3: scheduler wiring (mirrors cmd_run).
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerEvent>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SchedulerCommand>();
+
+    let mut dag_map = HashMap::new();
+    dag_map.insert(dag_id.to_string(), dag.clone());
+
+    let pools = PoolManager::new(load_pools(dags_path));
+    let scheduler = Scheduler::new(event_rx, cmd_tx, pools, dag_map)?;
+
+    // Persist run history so `conduit replay` can reconstruct it (best effort).
+    let events_dir = state_dir.join("events");
+    let scheduler = match conduit_state::EventStore::open(&events_dir) {
+        Ok(store) => scheduler.with_event_store(std::sync::Arc::new(store)),
+        Err(e) => {
+            tracing::warn!(
+                path = %events_dir.display(),
+                error = %e,
+                "Event store unavailable; run will not be recorded for replay"
+            );
+            scheduler
+        }
+    };
+
+    let run_id = format!("run_{}", Utc::now().format("%Y%m%d_%H%M%S"));
+    let mut run_config = HashMap::new();
+    run_config.insert("triggered_by".to_string(), "cli-distributed".to_string());
+    run_config.insert("environment".to_string(), "production".to_string());
+    event_tx.send(SchedulerEvent::DagRunRequested {
+        dag_id: dag_id.to_string(),
+        run_id: run_id.clone(),
+        logical_date,
+        config: run_config,
+    })?;
+
+    let scheduler_handle = tokio::spawn(async move { scheduler.run().await });
+
+    // Phase 4: the distributed executor loop owns the executor and bridges two
+    // channels — dispatch requests in, task results out (see the ownership
+    // note in the Task 11 brief: `recv_result` needs `&mut self` while
+    // `dispatch` needs `&self`, so they cannot share a `select!` over a
+    // borrowed executor; the loop owns it exclusively instead).
+    let (dispatch_tx, dispatch_rx) =
+        tokio::sync::mpsc::unbounded_channel::<conduit_distributed::DispatchRequest>();
+    let (result_tx, mut result_rx) =
+        tokio::sync::mpsc::unbounded_channel::<conduit_distributed::DispatchResult>();
+    let executor_loop = tokio::spawn(conduit_distributed::run_distributed_loop_with(
+        executor,
+        dispatch_rx,
+        result_tx,
+    ));
+
+    // Phase 5: bridge — SchedulerCommand -> DispatchRequest, DispatchResult ->
+    // SchedulerEvent.
+    let run_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run_failed_flag = std::sync::Arc::clone(&run_failed);
+    let dag_for_exec = dag.clone();
+    let bridge_event_tx = event_tx.clone();
+    let bridge = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Some(cmd) = cmd_rx.recv() => match cmd {
+                    SchedulerCommand::DispatchTask { dag_id, run_id, task_id, attempt } => {
+                        let Some(task) = dag_for_exec.tasks.get(&task_id) else {
+                            eprintln!("  [ERR]   {} — task definition not found", task_id);
+                            let _ = bridge_event_tx.send(SchedulerEvent::TaskFailed {
+                                dag_id,
+                                run_id,
+                                task_id,
+                                error: "Task definition not found".into(),
+                                attempt,
+                            });
+                            continue;
+                        };
+                        println!("  [DISPATCH] {} (attempt {})", task_id, attempt);
+                        let req = dispatch_request_for(
+                            task, &dag_id, &run_id, &task_id, attempt, logical_date,
+                        );
+                        // Unbounded channel; the executor loop applies real
+                        // coordinator backpressure downstream.
+                        let _ = dispatch_tx.send(req);
+                    }
+                    SchedulerCommand::CompleteDagRun { dag_id, run_id, status } => {
+                        println!();
+                        println!("DAG '{}' run '{}' completed: {:?}", dag_id, run_id, status);
+                        if !matches!(status, conduit_scheduler::scheduler::RunStatus::Success) {
+                            run_failed_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        break;
+                    }
+                    SchedulerCommand::SkipTask { task_id, reason, .. } => {
+                        println!("  [SKIP]  {} ({})", task_id, reason);
+                    }
+                    SchedulerCommand::RetryTask { task_id, delay, .. } => {
+                        println!("  [RETRY] {} (retrying in {}s)", task_id, delay.num_seconds());
+                    }
+                },
+                Some(result) = result_rx.recv() => {
+                    if result.success {
+                        println!("  [OK]    {} ({}ms, remote)", result.task_id, result.duration_ms);
+                        let _ = bridge_event_tx.send(SchedulerEvent::TaskCompleted {
+                            dag_id: result.dag_id,
+                            run_id: result.run_id,
+                            task_id: result.task_id,
+                            snapshot_id: None,
+                            duration_ms: result.duration_ms,
+                        });
+                    } else {
+                        println!(
+                            "  [FAIL]  {} — {}",
+                            result.task_id,
+                            result.error.as_deref().unwrap_or("unknown error")
+                        );
+                        let _ = bridge_event_tx.send(SchedulerEvent::TaskFailed {
+                            dag_id: result.dag_id,
+                            run_id: result.run_id,
+                            task_id: result.task_id,
+                            error: result.error.unwrap_or_default(),
+                            attempt: result.attempt,
+                        });
+                    }
+                }
+                else => break,
+            }
+        }
+        let _ = bridge_event_tx.send(SchedulerEvent::Shutdown);
+    });
+
+    let _ = tokio::join!(scheduler_handle, bridge);
+    // The executor loop is a detached background task (its coordinator holds a
+    // result sender that never closes on its own); dropping the runtime on
+    // return aborts it.
+    executor_loop.abort();
+
+    let total_duration = start.elapsed();
+    println!("Total time: {:.1}ms", total_duration.as_secs_f64() * 1000.0);
+
+    if run_failed.load(std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("distributed DAG run failed — see task output above");
+    }
     Ok(())
 }
 
 // ─── conduit cluster ────────────────────────────────────────────────────────
 
-fn cmd_cluster_status(coordinator_addr: &str, json: bool) -> Result<()> {
-    println!("Querying cluster status at {}...", coordinator_addr);
+async fn cmd_cluster_status(coordinator_addr: &str, json: bool) -> Result<()> {
+    use conduit_distributed::generated_proto::{
+        coordinator_client::CoordinatorClient, ClusterHealth, ClusterStatusRequest, WorkerState,
+    };
 
-    // In production, this would:
-    // 1. Connect to coordinator gRPC endpoint
-    // 2. Call ClusterStatus RPC
-    // 3. Display results
+    let mut client = CoordinatorClient::connect(format!("http://{}", coordinator_addr))
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot reach coordinator at {}: {}", coordinator_addr, e))?;
+    let status = client
+        .cluster_status(ClusterStatusRequest {})
+        .await
+        .map_err(|e| anyhow::anyhow!("ClusterStatus RPC failed: {}", e))?
+        .into_inner();
+
+    let health = ClusterHealth::try_from(status.health)
+        .map(|h| format!("{:?}", h))
+        .unwrap_or_else(|_| "Unknown".to_string());
+    let worker_state = |s: i32| {
+        WorkerState::try_from(s)
+            .map(|w| format!("{:?}", w))
+            .unwrap_or_else(|_| "Unknown".to_string())
+    };
 
     if json {
-        println!("{{");
-        println!("  \"health\": \"unknown\",");
-        println!("  \"coordinator\": \"{}\",", coordinator_addr);
-        println!("  \"workers\": [],");
-        println!("  \"running_tasks\": 0,");
-        println!("  \"queued_tasks\": 0");
-        println!("}}");
+        let value = serde_json::json!({
+            "health": health,
+            "coordinator": coordinator_addr,
+            "uptime_secs": status.uptime_secs,
+            "running_tasks": status.running_tasks,
+            "queued_tasks": status.queued_tasks,
+            "workers": status.workers.iter().map(|w| serde_json::json!({
+                "worker_id": w.worker_id,
+                "hostname": w.hostname,
+                "state": worker_state(w.state),
+                "capacity": w.capacity,
+                "active_tasks": w.active_tasks,
+                "pools": w.pool_affinity,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!();
         println!("Cluster Status");
         println!("──────────────────────────────────────────");
         println!("  Coordinator:  {}", coordinator_addr);
-        println!("  Health:       ⚠ Unknown (not connected)");
-        println!("  Workers:      0");
-        println!("  Running:      0 tasks");
-        println!("  Queued:       0 tasks");
-        println!();
-        println!("No workers connected. Start workers with:");
-        println!("  conduit worker --coordinator {}", coordinator_addr);
+        println!("  Health:       {}", health);
+        println!("  Uptime:       {}s", status.uptime_secs);
+        println!("  Workers:      {}", status.workers.len());
+        println!("  Running:      {} tasks", status.running_tasks);
+        println!("  Queued:       {} tasks", status.queued_tasks);
+        for w in &status.workers {
+            println!(
+                "    - {} ({}) {} {}/{} tasks pools={:?}",
+                w.worker_id,
+                w.hostname,
+                worker_state(w.state),
+                w.active_tasks,
+                w.capacity,
+                w.pool_affinity
+            );
+        }
+        if status.workers.is_empty() {
+            println!();
+            println!("No workers connected. Start one with:");
+            println!("  conduit worker --coordinator {}", coordinator_addr);
+        }
     }
-
     Ok(())
 }
 
-fn cmd_cluster_drain(coordinator_addr: &str, worker_id: &str) -> Result<()> {
+async fn cmd_cluster_drain(coordinator_addr: &str, worker_id: &str) -> Result<()> {
+    use conduit_distributed::generated_proto::{
+        coordinator_client::CoordinatorClient, DrainRequest,
+    };
+
     println!(
         "Draining worker '{}' via {}...",
         worker_id, coordinator_addr
     );
-
-    // In production: send DrainWorker directive via gRPC
-    println!("Drain command sent. Worker will finish current tasks and stop.");
+    let mut client = CoordinatorClient::connect(format!("http://{}", coordinator_addr))
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot reach coordinator at {}: {}", coordinator_addr, e))?;
+    let ack = client
+        .drain_worker(DrainRequest {
+            worker_id: worker_id.to_string(),
+            reason: "requested via conduit cluster drain".to_string(),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("drain failed: {}", e))?
+        .into_inner();
+    println!("{}", ack.message);
     println!(
         "Monitor with: conduit cluster status --coordinator {}",
         coordinator_addr
     );
-
     Ok(())
 }
 
